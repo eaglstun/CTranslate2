@@ -267,6 +267,78 @@ kernel void ct2_layer_norm_half(device const half* input  [[buffer(0)]],
   threadgroup float s_sq[CT2_NORM_TG];
   ct2_layer_norm_impl<half>(input, gamma, beta, output, depth, epsilon, row, tid, s_sum, s_sq);
 }
+
+// ---- Rotary (RoPE) ----  one thread per element of the [batch*max_time, depth] tensor.
+// sin/cos are indexed by time only (t * ndims). Elements >= ndims are copied through.
+template <typename T>
+inline void ct2_rotary_impl(device const T* input, device const T* sin, device const T* cos,
+                            device T* output, uint max_time, uint ndims, uint depth,
+                            uint interleave, uint gid) {
+  const uint row = gid / depth;
+  const uint e = gid - row * depth;
+  const uint t = row % max_time;
+
+  device const T* x = input + (ulong)row * (ulong)depth;
+  device T* y = output + (ulong)row * (ulong)depth;
+
+  if (e >= ndims) {
+    y[e] = x[e];
+    return;
+  }
+
+  device const T* s = sin + (ulong)t * (ulong)ndims;
+  device const T* c = cos + (ulong)t * (ulong)ndims;
+  const uint middle = ndims / 2u;
+
+  float pair;
+  if (interleave != 0u)
+    pair = (e % 2u == 0u) ? -(float)x[e + 1u] : (float)x[e - 1u];
+  else
+    pair = (e < middle) ? -(float)x[e + middle] : (float)x[e - middle];
+
+  y[e] = (T)((float)x[e] * (float)c[e] + pair * (float)s[e]);
+}
+
+kernel void ct2_rotary_float(device const float* input [[buffer(0)]],
+                             device const float* sin   [[buffer(1)]],
+                             device const float* cos   [[buffer(2)]],
+                             device float* output       [[buffer(3)]],
+                             constant uint& max_time     [[buffer(4)]],
+                             constant uint& ndims        [[buffer(5)]],
+                             constant uint& depth        [[buffer(6)]],
+                             constant uint& interleave   [[buffer(7)]],
+                             uint gid [[thread_position_in_grid]]) {
+  ct2_rotary_impl<float>(input, sin, cos, output, max_time, ndims, depth, interleave, gid);
+}
+
+kernel void ct2_rotary_half(device const half* input [[buffer(0)]],
+                            device const half* sin   [[buffer(1)]],
+                            device const half* cos   [[buffer(2)]],
+                            device half* output       [[buffer(3)]],
+                            constant uint& max_time     [[buffer(4)]],
+                            constant uint& ndims        [[buffer(5)]],
+                            constant uint& depth        [[buffer(6)]],
+                            constant uint& interleave   [[buffer(7)]],
+                            uint gid [[thread_position_in_grid]]) {
+  ct2_rotary_impl<half>(input, sin, cos, output, max_time, ndims, depth, interleave, gid);
+}
+
+// ---- Gather ----  type-agnostic byte copy: one thread per gathered row.
+// output[i] = data[batch_of(i) * batch_stride + indices[i] * copy_size], copy_size bytes.
+kernel void ct2_gather_bytes(device const uchar* data    [[buffer(0)]],
+                             device const int* indices    [[buffer(1)]],
+                             device uchar* output         [[buffer(2)]],
+                             constant uint& copy_size      [[buffer(3)]],
+                             constant uint& batch_stride   [[buffer(4)]],
+                             constant uint& num_per_batch  [[buffer(5)]],
+                             uint i [[thread_position_in_grid]]) {
+  const uint batch = i / num_per_batch;
+  const uint read = (uint)indices[i];
+  device const uchar* src = data + (ulong)batch * (ulong)batch_stride + (ulong)read * (ulong)copy_size;
+  device uchar* dst = output + (ulong)i * (ulong)copy_size;
+  for (uint b = 0; b < copy_size; ++b)
+    dst[b] = src[b];
+}
 )MSL";
     }
 

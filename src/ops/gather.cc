@@ -4,6 +4,10 @@
 
 #include "dispatch.h"
 
+#ifdef CT2_WITH_METAL
+#  include "metal/primitives.h"
+#endif
+
 namespace ctranslate2 {
   namespace ops {
 
@@ -81,6 +85,26 @@ namespace ctranslate2 {
 
       const dim_t axis = _axis < 0 ? data.rank() + _axis : _axis;
       output.resize(compute_output_shape(data, input, axis));
+
+#ifdef CT2_WITH_METAL
+      if (data.device() == Device::METAL && axis == _batch_dims) {
+        const dim_t copy_size = data.stride(axis);
+        const dim_t batch_stride = axis > 0 ? data.stride(axis - 1) : data.size();
+        const dim_t batch_size = data.size() / batch_stride;
+        const dim_t num_indices = input.size();
+        const dim_t num_indices_per_batch = num_indices / batch_size;
+        const dim_t elem = data.item_size();
+        const void* data_ptr = nullptr;
+        void* out_ptr = nullptr;
+        TYPE_DISPATCH(data.dtype(), data_ptr = data.data<T>());
+        TYPE_DISPATCH(output.dtype(), out_ptr = output.data<T>());
+        metal::gather(data_ptr, input.data<int32_t>(), out_ptr,
+                      copy_size * elem, batch_stride * elem,
+                      num_indices, num_indices_per_batch);
+        return;
+      }
+#endif
+
       DEVICE_AND_TYPE_DISPATCH(data.device(), data.dtype(),
                                (compute<D, T>(data, input, axis, _batch_dims, output)));
     }

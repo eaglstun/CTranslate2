@@ -150,4 +150,34 @@ TEST_F(MetalTest, Float16LayerNormMatchesFloat32) {
   expect_storage_eq(y16.to_float32(), y32, 2e-2);
 }
 
+TEST_F(MetalTest, RotaryMatchesCPU) {
+  // input is [batch, max_time, depth]; with is_transposed=true, max_time = dim(-2).
+  const std::vector<float> in_vec = {0.1f, 0.2f, 0.3f, 0.4f, -0.5f, 0.6f, -0.7f, 0.8f};
+  const std::vector<float> sin_vec = {0.0f, 0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f};
+  const std::vector<float> cos_vec = {1.0f, 0.9f, 0.8f, 0.7f, 0.6f, 0.5f, 0.4f, 0.3f};
+  ops::Rotary rotary(/*ndims=*/4, /*interleave=*/false);
+
+  // CPU reference.
+  StorageView in_cpu({1, 2, 4}, in_vec);
+  StorageView sin_cpu({2, 4}, sin_vec);
+  StorageView cos_cpu({2, 4}, cos_vec);
+  StorageView ref;
+  rotary(in_cpu, sin_cpu, cos_cpu, ref, /*is_transposed=*/true);
+
+  StorageView in_m({1, 2, 4}, in_vec, Device::METAL);
+  StorageView sin_m({2, 4}, sin_vec, Device::METAL);
+  StorageView cos_m({2, 4}, cos_vec, Device::METAL);
+
+  // float32 on Metal must match CPU closely.
+  StorageView y32(Device::METAL);
+  rotary(in_m, sin_m, cos_m, y32, true);
+  expect_storage_eq(y32.to_float32(), ref, 1e-5);
+
+  // float16 on Metal within half tolerance.
+  StorageView y16(DataType::FLOAT16, Device::METAL);
+  rotary(in_m.to(DataType::FLOAT16), sin_m.to(DataType::FLOAT16), cos_m.to(DataType::FLOAT16),
+         y16, true);
+  expect_storage_eq(y16.to_float32(), ref, 2e-2);
+}
+
 #endif  // CT2_WITH_METAL

@@ -168,16 +168,18 @@ graduated to half kernels (the CPU reference is float32-only).
 
 ## What runs where today
 
-| Operation                                                                                                                | Metal execution                                                                                               |
-| ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
-| GEMM / MatMul (float32 and float16)                                                                                      | **GPU** — MPSMatrixMultiplication                                                                             |
-| SoftMax / LogSoftMax (float32 and float16)                                                                               | **GPU** — custom kernel                                                                                       |
-| RMSNorm (float32 and float16)                                                                                            | **GPU** — custom kernel                                                                                       |
-| LayerNorm, last axis + affine (float32 and float16)                                                                      | **GPU** — custom kernel                                                                                       |
-| Elementwise add (float32)                                                                                                | **GPU** — custom kernel                                                                                       |
-| Everything else (gather, rotary, bias/activation, sampling, concat/split, general-axis LayerNorm, conv, quantization, …) | CPU reference over unified memory (correct, float32 only)                                                     |
-| fp16 for ungraduated ops                                                                                                 | Not yet — CPU reference is float32-only, so a full fp16 model needs those ops graduated to half kernels first |
-| bf16 compute                                                                                                             | Not yet                                                                                                       |
+| Operation                                                                                                | Metal execution                                                                                               |
+| -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| GEMM / MatMul (float32 and float16)                                                                      | **GPU** — MPSMatrixMultiplication                                                                             |
+| SoftMax / LogSoftMax (float32 and float16)                                                               | **GPU** — custom kernel                                                                                       |
+| RMSNorm (float32 and float16)                                                                            | **GPU** — custom kernel                                                                                       |
+| LayerNorm, last axis + affine (float32 and float16)                                                      | **GPU** — custom kernel                                                                                       |
+| Rotary / RoPE (float32 and float16)                                                                      | **GPU** — custom kernel                                                                                       |
+| Gather (all dtypes)                                                                                      | **GPU** — custom kernel                                                                                       |
+| Elementwise add (float32)                                                                                | **GPU** — custom kernel                                                                                       |
+| Everything else (bias/activation, sampling, concat/split, general-axis LayerNorm, conv, quantization, …) | CPU reference over unified memory (correct, float32 only)                                                     |
+| fp16 for ungraduated ops                                                                                 | Not yet — CPU reference is float32-only, so a full fp16 model needs those ops graduated to half kernels first |
+| bf16 compute                                                                                             | Not yet                                                                                                       |
 
 ## What's left
 
@@ -187,8 +189,6 @@ Each follows the established pattern: write an MSL kernel, add a `metal::` entry
 add `if (device == Device::METAL)` routing in the op, verify parity against the CPU
 reference via the existing suite.
 
-- `Gather` (embedding lookup)
-- `Rotary` (RoPE)
 - `BiasAdd` + activations (GELU, etc.)
 - Sampling: `TopK`, `TopPMask`, `Multinomial`
 - Remaining elementwise/`mul` variants used in residuals and gating

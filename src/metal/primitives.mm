@@ -193,5 +193,92 @@ namespace ctranslate2 {
       layer_norm_impl("ct2_layer_norm_half", input, gamma, beta, output, batch_size, depth, epsilon);
     }
 
+    namespace {
+      void rotary_impl(const char* pipeline_name,
+                       const void* input, const void* sin, const void* cos, void* output,
+                       dim_t batch_size, dim_t max_time, dim_t ndims, dim_t depth,
+                       bool interleave) {
+        const dim_t total = batch_size * max_time * depth;
+        if (total == 0)
+          return;
+
+        const BufferRange in_buffer = buffer_and_offset(input);
+        const BufferRange sin_buffer = buffer_and_offset(sin);
+        const BufferRange cos_buffer = buffer_and_offset(cos);
+        const BufferRange out_buffer = buffer_and_offset(output);
+
+        id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
+        id<MTLCommandBuffer> command_buffer = [get_command_queue() commandBuffer];
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        [encoder setComputePipelineState:pso];
+        [encoder setBuffer:in_buffer.buffer offset:in_buffer.offset atIndex:0];
+        [encoder setBuffer:sin_buffer.buffer offset:sin_buffer.offset atIndex:1];
+        [encoder setBuffer:cos_buffer.buffer offset:cos_buffer.offset atIndex:2];
+        [encoder setBuffer:out_buffer.buffer offset:out_buffer.offset atIndex:3];
+        const uint32_t max_time_u = static_cast<uint32_t>(max_time);
+        const uint32_t ndims_u = static_cast<uint32_t>(ndims);
+        const uint32_t depth_u = static_cast<uint32_t>(depth);
+        const uint32_t interleave_u = interleave ? 1u : 0u;
+        [encoder setBytes:&max_time_u length:sizeof(max_time_u) atIndex:4];
+        [encoder setBytes:&ndims_u length:sizeof(ndims_u) atIndex:5];
+        [encoder setBytes:&depth_u length:sizeof(depth_u) atIndex:6];
+        [encoder setBytes:&interleave_u length:sizeof(interleave_u) atIndex:7];
+
+        NSUInteger tg = pso.maxTotalThreadsPerThreadgroup;
+        if (tg > (NSUInteger)total) tg = total;
+        [encoder dispatchThreads:MTLSizeMake(total, 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+        [encoder endEncoding];
+        [command_buffer commit];
+        [command_buffer waitUntilCompleted];
+      }
+    }
+
+    void rotary(const float* input, const float* sin, const float* cos, float* output,
+                dim_t batch_size, dim_t max_time, dim_t ndims, dim_t depth, bool interleave) {
+      rotary_impl("ct2_rotary_float", input, sin, cos, output,
+                  batch_size, max_time, ndims, depth, interleave);
+    }
+
+    void rotary(const float16_t* input, const float16_t* sin, const float16_t* cos,
+                float16_t* output, dim_t batch_size, dim_t max_time, dim_t ndims, dim_t depth,
+                bool interleave) {
+      rotary_impl("ct2_rotary_half", input, sin, cos, output,
+                  batch_size, max_time, ndims, depth, interleave);
+    }
+
+    void gather(const void* data, const int32_t* indices, void* output,
+                dim_t copy_size_bytes, dim_t batch_stride_bytes,
+                dim_t num_indices, dim_t num_indices_per_batch) {
+      if (num_indices == 0 || copy_size_bytes == 0)
+        return;
+
+      const BufferRange data_buffer = buffer_and_offset(data);
+      const BufferRange idx_buffer = buffer_and_offset(indices);
+      const BufferRange out_buffer = buffer_and_offset(output);
+
+      id<MTLComputePipelineState> pso = get_pipeline("ct2_gather_bytes");
+      id<MTLCommandBuffer> command_buffer = [get_command_queue() commandBuffer];
+      id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+      [encoder setComputePipelineState:pso];
+      [encoder setBuffer:data_buffer.buffer offset:data_buffer.offset atIndex:0];
+      [encoder setBuffer:idx_buffer.buffer offset:idx_buffer.offset atIndex:1];
+      [encoder setBuffer:out_buffer.buffer offset:out_buffer.offset atIndex:2];
+      const uint32_t copy_u = static_cast<uint32_t>(copy_size_bytes);
+      const uint32_t stride_u = static_cast<uint32_t>(batch_stride_bytes);
+      const uint32_t per_batch_u = static_cast<uint32_t>(num_indices_per_batch);
+      [encoder setBytes:&copy_u length:sizeof(copy_u) atIndex:3];
+      [encoder setBytes:&stride_u length:sizeof(stride_u) atIndex:4];
+      [encoder setBytes:&per_batch_u length:sizeof(per_batch_u) atIndex:5];
+
+      NSUInteger tg = pso.maxTotalThreadsPerThreadgroup;
+      if (tg > (NSUInteger)num_indices) tg = num_indices;
+      [encoder dispatchThreads:MTLSizeMake(num_indices, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+      [encoder endEncoding];
+      [command_buffer commit];
+      [command_buffer waitUntilCompleted];
+    }
+
   }
 }

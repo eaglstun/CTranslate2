@@ -47,6 +47,20 @@ namespace ctranslate2 {
     void layer_norm(const float16_t* input, const float16_t* gamma, const float16_t* beta,
                     float16_t* output, dim_t batch_size, dim_t depth, float epsilon);
 
+    // Rotary position embedding over a [batch_size * max_time, depth] tensor; sin/cos are
+    // [max_time, ndims]. Elements >= ndims are copied through. float32 and float16.
+    void rotary(const float* input, const float* sin, const float* cos, float* output,
+                dim_t batch_size, dim_t max_time, dim_t ndims, dim_t depth, bool interleave);
+    void rotary(const float16_t* input, const float16_t* sin, const float16_t* cos,
+                float16_t* output, dim_t batch_size, dim_t max_time, dim_t ndims, dim_t depth,
+                bool interleave);
+
+    // Type-agnostic gather: output[i] = data[batch_of(i)*batch_stride + indices[i]*copy_size],
+    // where copy_size and batch_stride are in BYTES. Pointers must be Metal-allocated.
+    void gather(const void* data, const int32_t* indices, void* output,
+                dim_t copy_size_bytes, dim_t batch_stride_bytes,
+                dim_t num_indices, dim_t num_indices_per_batch);
+
     // Single-precision GEMM on the GPU via Metal Performance Shaders, matching the
     // semantics of primitives<D>::gemm: C = alpha * op(A) * op(B) + beta * C, where A,
     // B, C are row-major with leading dimensions lda/ldb/ldc and op() transposes when
