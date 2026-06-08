@@ -15,6 +15,7 @@ option(WITH_RUY "Compile with Ruy backend" OFF)
 option(WITH_CUDA "Compile with CUDA backend" OFF)
 option(WITH_CUDNN "Compile with cuDNN backend" OFF)
 option(WITH_HIP "Compile with AMD HIP GPU backend" OFF)
+option(WITH_METAL "Compile with Apple Metal GPU backend" OFF)
 option(CUDA_DYNAMIC_LOADING "Dynamically load CUDA libraries at runtime" OFF)
 option(ENABLE_CPU_DISPATCH "Compile CPU kernels for multiple ISA and dispatch at runtime" ON)
 option(ENABLE_PROFILING "Compile with profiling support" OFF)
@@ -450,6 +451,33 @@ if (WITH_ACCELERATE)
   find_package(BLAS REQUIRED)
   add_definitions(-DCT2_WITH_ACCELERATE)
   list(APPEND LIBRARIES ${BLAS_LIBRARIES})
+endif()
+
+if (WITH_METAL)
+  if(NOT APPLE OR NOT CT2_BUILD_ARCH STREQUAL "arm64")
+    message(FATAL_ERROR "WITH_METAL requires macOS on Apple Silicon (arm64)")
+  endif()
+  if(WITH_CUDA OR WITH_HIP)
+    message(FATAL_ERROR "WITH_METAL is incompatible with WITH_CUDA/WITH_HIP")
+  endif()
+
+  enable_language(OBJCXX)
+  set(CMAKE_OBJCXX_STANDARD 17)
+  set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+  add_definitions(-DCT2_WITH_METAL)
+
+  set(METAL_SOURCES
+    src/metal/device.mm
+    src/metal/allocator.mm
+    src/metal/primitives.mm
+    )
+  set_source_files_properties(${METAL_SOURCES} PROPERTIES LANGUAGE OBJCXX)
+  list(APPEND SOURCES ${METAL_SOURCES})
+
+  find_library(METAL_FRAMEWORK Metal REQUIRED)
+  find_library(MPS_FRAMEWORK MetalPerformanceShaders REQUIRED)
+  find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+  list(APPEND LIBRARIES ${METAL_FRAMEWORK} ${MPS_FRAMEWORK} ${FOUNDATION_FRAMEWORK})
 endif()
 
 if (WITH_OPENBLAS)

@@ -1,6 +1,7 @@
 *.pyc
 /.vs
 /build
+/build-*
 
 CMake*.json
 .idea

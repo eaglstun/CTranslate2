@@ -123,11 +123,23 @@ namespace ctranslate2 {
 
   int get_device_index(Device device) {
     int index = 0;
+#ifdef CT2_WITH_METAL
+    // Metal is kept off the DEVICE_DISPATCH path during bring-up (see device_dispatch.h);
+    // reach its template specialization directly.
+    if (device == Device::METAL)
+      return get_device_index<Device::METAL>();
+#endif
     DEVICE_DISPATCH(device, index = get_device_index<D>());
     return index;
   }
 
   void set_device_index(Device device, int index) {
+#ifdef CT2_WITH_METAL
+    if (device == Device::METAL) {
+      set_device_index<Device::METAL>(index);
+      return;
+    }
+#endif
     DEVICE_DISPATCH(device, set_device_index<D>(index));
   }
 
