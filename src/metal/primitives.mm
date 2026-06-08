@@ -247,6 +247,54 @@ namespace ctranslate2 {
                   batch_size, max_time, ndims, depth, interleave);
     }
 
+    namespace {
+      void bias_add_impl(const char* pipeline_name,
+                         const void* value, const void* bias, const void* residual,
+                         void* output, dim_t size, dim_t depth, int activation) {
+        if (size == 0)
+          return;
+
+        const BufferRange value_buffer = buffer_and_offset(value);
+        const BufferRange bias_buffer = buffer_and_offset(bias);
+        const BufferRange out_buffer = buffer_and_offset(output);
+        const uint32_t has_residual = residual ? 1u : 0u;
+        // Index 2 must always be bound; reuse value as a never-read dummy when no residual.
+        const BufferRange res_buffer = residual ? buffer_and_offset(residual) : value_buffer;
+
+        id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
+        id<MTLCommandBuffer> command_buffer = [get_command_queue() commandBuffer];
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        [encoder setComputePipelineState:pso];
+        [encoder setBuffer:value_buffer.buffer offset:value_buffer.offset atIndex:0];
+        [encoder setBuffer:bias_buffer.buffer offset:bias_buffer.offset atIndex:1];
+        [encoder setBuffer:res_buffer.buffer offset:res_buffer.offset atIndex:2];
+        [encoder setBuffer:out_buffer.buffer offset:out_buffer.offset atIndex:3];
+        const uint32_t depth_u = static_cast<uint32_t>(depth);
+        const int32_t act = activation;
+        [encoder setBytes:&depth_u length:sizeof(depth_u) atIndex:4];
+        [encoder setBytes:&has_residual length:sizeof(has_residual) atIndex:5];
+        [encoder setBytes:&act length:sizeof(act) atIndex:6];
+
+        NSUInteger tg = pso.maxTotalThreadsPerThreadgroup;
+        if (tg > (NSUInteger)size) tg = size;
+        [encoder dispatchThreads:MTLSizeMake(size, 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+        [encoder endEncoding];
+        [command_buffer commit];
+        [command_buffer waitUntilCompleted];
+      }
+    }
+
+    void bias_add(const float* value, const float* bias, const float* residual,
+                  float* output, dim_t size, dim_t depth, int activation) {
+      bias_add_impl("ct2_bias_add_float", value, bias, residual, output, size, depth, activation);
+    }
+
+    void bias_add(const float16_t* value, const float16_t* bias, const float16_t* residual,
+                  float16_t* output, dim_t size, dim_t depth, int activation) {
+      bias_add_impl("ct2_bias_add_half", value, bias, residual, output, size, depth, activation);
+    }
+
     void gather(const void* data, const int32_t* indices, void* output,
                 dim_t copy_size_bytes, dim_t batch_stride_bytes,
                 dim_t num_indices, dim_t num_indices_per_batch) {

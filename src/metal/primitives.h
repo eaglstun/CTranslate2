@@ -55,6 +55,15 @@ namespace ctranslate2 {
                 float16_t* output, dim_t batch_size, dim_t max_time, dim_t ndims, dim_t depth,
                 bool interleave);
 
+    // Fused bias-add + optional activation over a [.., depth] tensor of `size` elements:
+    // output[i] = activation(value[i] + bias[i % depth] + (residual ? residual[i] : 0)).
+    // `activation` matches the ActivationType enum; pass a negative value for none.
+    // float32 and float16.
+    void bias_add(const float* value, const float* bias, const float* residual,
+                  float* output, dim_t size, dim_t depth, int activation);
+    void bias_add(const float16_t* value, const float16_t* bias, const float16_t* residual,
+                  float16_t* output, dim_t size, dim_t depth, int activation);
+
     // Type-agnostic gather: output[i] = data[batch_of(i)*batch_stride + indices[i]*copy_size],
     // where copy_size and batch_stride are in BYTES. Pointers must be Metal-allocated.
     void gather(const void* data, const int32_t* indices, void* output,

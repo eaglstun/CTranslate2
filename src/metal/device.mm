@@ -34,6 +34,7 @@ namespace ctranslate2 {
           if (it != _pipelines.end())
             return it->second;
 
+          ensure_library();
           id<MTLFunction> function =
             [_library newFunctionWithName:[NSString stringWithUTF8String:name.c_str()]];
           if (!function)
@@ -63,7 +64,14 @@ namespace ctranslate2 {
           _queue = [_device newCommandQueue];
           if (!_queue)
             throw std::runtime_error("Metal: failed to create command queue");
+        }
 
+        // The kernel library is compiled lazily on first pipeline use so that device
+        // setup, allocation, and MPS-based ops (which don't need it) stay usable even if
+        // a kernel fails to compile. Callers hold _mutex.
+        void ensure_library() {
+          if (_library)
+            return;
           NSError* error = nil;
           NSString* source = [NSString stringWithUTF8String:get_kernels_source()];
           MTLCompileOptions* options = [[MTLCompileOptions alloc] init];

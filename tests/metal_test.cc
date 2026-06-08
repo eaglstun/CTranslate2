@@ -150,6 +150,22 @@ TEST_F(MetalTest, Float16LayerNormMatchesFloat32) {
   expect_storage_eq(y16.to_float32(), y32, 2e-2);
 }
 
+TEST_F(MetalTest, Float16BiasAddGELUMatchesFloat32) {
+  StorageView value({2, 3}, std::vector<float>{0.5, -1.0, 2.0, 1.5, 0.75, -0.5}, Device::METAL);
+  StorageView bias({3}, std::vector<float>{0.1, -0.2, 0.3}, Device::METAL);
+  const ops::ActivationType gelu = ops::ActivationType::GELU;
+  ops::BiasAdd bias_add(&gelu);
+
+  StorageView out32(Device::METAL);
+  bias_add(value, bias, out32);
+
+  StorageView out16(DataType::FLOAT16, Device::METAL);
+  bias_add(value.to(DataType::FLOAT16), bias.to(DataType::FLOAT16), out16);
+  EXPECT_EQ(out16.dtype(), DataType::FLOAT16);
+
+  expect_storage_eq(out16.to_float32(), out32, 2e-2);
+}
+
 TEST_F(MetalTest, RotaryMatchesCPU) {
   // input is [batch, max_time, depth]; with is_transposed=true, max_time = dim(-2).
   const std::vector<float> in_vec = {0.1f, 0.2f, 0.3f, 0.4f, -0.5f, 0.6f, -0.7f, 0.8f};
