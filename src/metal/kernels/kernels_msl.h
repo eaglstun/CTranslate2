@@ -152,6 +152,121 @@ kernel void ct2_softmax_half(device const half* input  [[buffer(0)]],
       y[j] = (half)(exp((float)x[j] - x_max) * inv_sum);
   }
 }
+
+// ---- Normalizations (one threadgroup per row, fixed power-of-two reduction) ----
+// Reductions accumulate in float; 1.0f/sqrt is used (not rsqrt) to match the CPU kernels.
+constant uint CT2_NORM_TG = 256;
+
+template <typename T>
+inline void ct2_rms_norm_impl(device const T* input, device const T* gamma, device T* output,
+                              uint depth, float epsilon, uint use_residual,
+                              uint row, uint tid, threadgroup float* scratch) {
+  device const T* x = input + (ulong)row * (ulong)depth;
+  device T* y = output + (ulong)row * (ulong)depth;
+
+  float local_ss = 0.0f;
+  for (uint j = tid; j < depth; j += CT2_NORM_TG) {
+    const float v = (float)x[j];
+    local_ss += v * v;
+  }
+  scratch[tid] = local_ss;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint s = CT2_NORM_TG / 2u; s > 0u; s >>= 1) {
+    if (tid < s)
+      scratch[tid] += scratch[tid + s];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+
+  const float inv_rms = 1.0f / sqrt(scratch[0] / (float)depth + epsilon);
+  for (uint j = tid; j < depth; j += CT2_NORM_TG) {
+    const float g = (float)gamma[j];
+    y[j] = (T)((float)x[j] * inv_rms * (use_residual != 0u ? (1.0f + g) : g));
+  }
+}
+
+kernel void ct2_rms_norm_float(device const float* input  [[buffer(0)]],
+                               device const float* gamma  [[buffer(1)]],
+                               device float* output        [[buffer(2)]],
+                               constant uint& depth         [[buffer(3)]],
+                               constant float& epsilon      [[buffer(4)]],
+                               constant uint& use_residual  [[buffer(5)]],
+                               uint row [[threadgroup_position_in_grid]],
+                               uint tid [[thread_position_in_threadgroup]]) {
+  threadgroup float scratch[CT2_NORM_TG];
+  ct2_rms_norm_impl<float>(input, gamma, output, depth, epsilon, use_residual, row, tid, scratch);
+}
+
+kernel void ct2_rms_norm_half(device const half* input  [[buffer(0)]],
+                              device const half* gamma  [[buffer(1)]],
+                              device half* output        [[buffer(2)]],
+                              constant uint& depth         [[buffer(3)]],
+                              constant float& epsilon      [[buffer(4)]],
+                              constant uint& use_residual  [[buffer(5)]],
+                              uint row [[threadgroup_position_in_grid]],
+                              uint tid [[thread_position_in_threadgroup]]) {
+  threadgroup float scratch[CT2_NORM_TG];
+  ct2_rms_norm_impl<half>(input, gamma, output, depth, epsilon, use_residual, row, tid, scratch);
+}
+
+template <typename T>
+inline void ct2_layer_norm_impl(device const T* input, device const T* gamma,
+                                device const T* beta, device T* output,
+                                uint depth, float epsilon,
+                                uint row, uint tid,
+                                threadgroup float* s_sum, threadgroup float* s_sq) {
+  device const T* x = input + (ulong)row * (ulong)depth;
+  device T* y = output + (ulong)row * (ulong)depth;
+
+  float local_sum = 0.0f;
+  float local_sq = 0.0f;
+  for (uint j = tid; j < depth; j += CT2_NORM_TG) {
+    const float v = (float)x[j];
+    local_sum += v;
+    local_sq += v * v;
+  }
+  s_sum[tid] = local_sum;
+  s_sq[tid] = local_sq;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint s = CT2_NORM_TG / 2u; s > 0u; s >>= 1) {
+    if (tid < s) {
+      s_sum[tid] += s_sum[tid + s];
+      s_sq[tid] += s_sq[tid + s];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+
+  const float mean = s_sum[0] / (float)depth;
+  const float variance = max(s_sq[0] / (float)depth - mean * mean, 0.0f);
+  const float rstd = 1.0f / sqrt(variance + epsilon);
+  for (uint j = tid; j < depth; j += CT2_NORM_TG)
+    y[j] = (T)(((float)x[j] - mean) * rstd * (float)gamma[j] + (float)beta[j]);
+}
+
+kernel void ct2_layer_norm_float(device const float* input  [[buffer(0)]],
+                                 device const float* gamma  [[buffer(1)]],
+                                 device const float* beta   [[buffer(2)]],
+                                 device float* output        [[buffer(3)]],
+                                 constant uint& depth         [[buffer(4)]],
+                                 constant float& epsilon      [[buffer(5)]],
+                                 uint row [[threadgroup_position_in_grid]],
+                                 uint tid [[thread_position_in_threadgroup]]) {
+  threadgroup float s_sum[CT2_NORM_TG];
+  threadgroup float s_sq[CT2_NORM_TG];
+  ct2_layer_norm_impl<float>(input, gamma, beta, output, depth, epsilon, row, tid, s_sum, s_sq);
+}
+
+kernel void ct2_layer_norm_half(device const half* input  [[buffer(0)]],
+                                device const half* gamma  [[buffer(1)]],
+                                device const half* beta   [[buffer(2)]],
+                                device half* output        [[buffer(3)]],
+                                constant uint& depth         [[buffer(4)]],
+                                constant float& epsilon      [[buffer(5)]],
+                                uint row [[threadgroup_position_in_grid]],
+                                uint tid [[thread_position_in_threadgroup]]) {
+  threadgroup float s_sum[CT2_NORM_TG];
+  threadgroup float s_sq[CT2_NORM_TG];
+  ct2_layer_norm_impl<half>(input, gamma, beta, output, depth, epsilon, row, tid, s_sum, s_sq);
+}
 )MSL";
     }
 

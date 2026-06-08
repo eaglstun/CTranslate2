@@ -120,4 +120,34 @@ TEST_F(MetalTest, Float16SoftMaxMatchesFloat32) {
   expect_storage_eq(y16.to_float32(), y32, 2e-2);
 }
 
+TEST_F(MetalTest, Float16RMSNormMatchesFloat32) {
+  StorageView x({2, 4}, std::vector<float>{0.5, -1.0, 2.0, 0.25, 1.5, 0.75, -0.5, 1.0}, Device::METAL);
+  StorageView gamma({4}, std::vector<float>{1.0, 0.5, 2.0, 1.5}, Device::METAL);
+
+  StorageView y32(Device::METAL);
+  ops::RMSNorm()(gamma, x, y32);
+
+  StorageView y16(DataType::FLOAT16, Device::METAL);
+  ops::RMSNorm()(gamma.to(DataType::FLOAT16), x.to(DataType::FLOAT16), y16);
+  EXPECT_EQ(y16.dtype(), DataType::FLOAT16);
+
+  expect_storage_eq(y16.to_float32(), y32, 2e-2);
+}
+
+TEST_F(MetalTest, Float16LayerNormMatchesFloat32) {
+  StorageView x({2, 4}, std::vector<float>{0.5, -1.0, 2.0, 0.25, 1.5, 0.75, -0.5, 1.0}, Device::METAL);
+  StorageView gamma({4}, std::vector<float>{1.0, 0.5, 2.0, 1.5}, Device::METAL);
+  StorageView beta({4}, std::vector<float>{0.1, -0.1, 0.0, 0.2}, Device::METAL);
+
+  StorageView y32(Device::METAL);
+  ops::LayerNorm()(beta, gamma, x, y32);
+
+  StorageView y16(DataType::FLOAT16, Device::METAL);
+  ops::LayerNorm()(beta.to(DataType::FLOAT16), gamma.to(DataType::FLOAT16),
+                   x.to(DataType::FLOAT16), y16);
+  EXPECT_EQ(y16.dtype(), DataType::FLOAT16);
+
+  expect_storage_eq(y16.to_float32(), y32, 2e-2);
+}
+
 #endif  // CT2_WITH_METAL

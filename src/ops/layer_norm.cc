@@ -2,6 +2,10 @@
 
 #include "dispatch.h"
 
+#ifdef CT2_WITH_METAL
+#  include "metal/primitives.h"
+#endif
+
 namespace ctranslate2 {
   namespace ops {
 
@@ -42,6 +46,23 @@ namespace ctranslate2 {
         outer_size *= input.dim(i);
       for (dim_t i = axis + 1; i < input.rank(); ++i)
         inner_size *= input.dim(i);
+
+#ifdef CT2_WITH_METAL
+      // GPU path for the common case: normalizing the last axis with affine parameters.
+      // Other axes / missing affine fall back to the CPU reference.
+      if (input.device() == Device::METAL
+          && (input.dtype() == DataType::FLOAT32 || input.dtype() == DataType::FLOAT16)
+          && axis == input.rank() - 1 && beta && gamma) {
+        if (input.dtype() == DataType::FLOAT32)
+          metal::layer_norm(input.data<float>(), gamma->data<float>(), beta->data<float>(),
+                            output.data<float>(), outer_size, axis_size, _epsilon);
+        else
+          metal::layer_norm(input.data<float16_t>(), gamma->data<float16_t>(),
+                            beta->data<float16_t>(), output.data<float16_t>(),
+                            outer_size, axis_size, _epsilon);
+        return;
+      }
+#endif
 
       DEVICE_AND_FLOAT_DISPATCH("LayerNorm", input.device(), input.dtype(),
                                 (compute<D, T>(beta,

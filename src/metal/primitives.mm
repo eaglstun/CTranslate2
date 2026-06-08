@@ -106,5 +106,92 @@ namespace ctranslate2 {
       softmax_impl("ct2_softmax_half", log, input, lengths, output, batch_size, depth);
     }
 
+    // Must match CT2_NORM_TG in kernels_msl.h.
+    static constexpr NSUInteger kNormThreadgroup = 256;
+
+    namespace {
+      void rms_norm_impl(const char* pipeline_name,
+                         const void* input, const void* gamma, void* output,
+                         dim_t batch_size, dim_t depth, float epsilon, bool use_residual) {
+        if (batch_size == 0 || depth == 0)
+          return;
+
+        const BufferRange in_buffer = buffer_and_offset(input);
+        const BufferRange gamma_buffer = buffer_and_offset(gamma);
+        const BufferRange out_buffer = buffer_and_offset(output);
+
+        id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
+        id<MTLCommandBuffer> command_buffer = [get_command_queue() commandBuffer];
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        [encoder setComputePipelineState:pso];
+        [encoder setBuffer:in_buffer.buffer offset:in_buffer.offset atIndex:0];
+        [encoder setBuffer:gamma_buffer.buffer offset:gamma_buffer.offset atIndex:1];
+        [encoder setBuffer:out_buffer.buffer offset:out_buffer.offset atIndex:2];
+        const uint32_t depth_u = static_cast<uint32_t>(depth);
+        const uint32_t residual_u = use_residual ? 1u : 0u;
+        [encoder setBytes:&depth_u length:sizeof(depth_u) atIndex:3];
+        [encoder setBytes:&epsilon length:sizeof(epsilon) atIndex:4];
+        [encoder setBytes:&residual_u length:sizeof(residual_u) atIndex:5];
+
+        const MTLSize grid = MTLSizeMake(static_cast<NSUInteger>(batch_size), 1, 1);
+        const MTLSize group = MTLSizeMake(kNormThreadgroup, 1, 1);
+        [encoder dispatchThreadgroups:grid threadsPerThreadgroup:group];
+        [encoder endEncoding];
+        [command_buffer commit];
+        [command_buffer waitUntilCompleted];
+      }
+
+      void layer_norm_impl(const char* pipeline_name,
+                           const void* input, const void* gamma, const void* beta, void* output,
+                           dim_t batch_size, dim_t depth, float epsilon) {
+        if (batch_size == 0 || depth == 0)
+          return;
+
+        const BufferRange in_buffer = buffer_and_offset(input);
+        const BufferRange gamma_buffer = buffer_and_offset(gamma);
+        const BufferRange beta_buffer = buffer_and_offset(beta);
+        const BufferRange out_buffer = buffer_and_offset(output);
+
+        id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
+        id<MTLCommandBuffer> command_buffer = [get_command_queue() commandBuffer];
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        [encoder setComputePipelineState:pso];
+        [encoder setBuffer:in_buffer.buffer offset:in_buffer.offset atIndex:0];
+        [encoder setBuffer:gamma_buffer.buffer offset:gamma_buffer.offset atIndex:1];
+        [encoder setBuffer:beta_buffer.buffer offset:beta_buffer.offset atIndex:2];
+        [encoder setBuffer:out_buffer.buffer offset:out_buffer.offset atIndex:3];
+        const uint32_t depth_u = static_cast<uint32_t>(depth);
+        [encoder setBytes:&depth_u length:sizeof(depth_u) atIndex:4];
+        [encoder setBytes:&epsilon length:sizeof(epsilon) atIndex:5];
+
+        const MTLSize grid = MTLSizeMake(static_cast<NSUInteger>(batch_size), 1, 1);
+        const MTLSize group = MTLSizeMake(kNormThreadgroup, 1, 1);
+        [encoder dispatchThreadgroups:grid threadsPerThreadgroup:group];
+        [encoder endEncoding];
+        [command_buffer commit];
+        [command_buffer waitUntilCompleted];
+      }
+    }
+
+    void rms_norm(const float* input, const float* gamma, float* output,
+                  dim_t batch_size, dim_t depth, float epsilon, bool use_residual) {
+      rms_norm_impl("ct2_rms_norm_float", input, gamma, output, batch_size, depth, epsilon, use_residual);
+    }
+
+    void rms_norm(const float16_t* input, const float16_t* gamma, float16_t* output,
+                  dim_t batch_size, dim_t depth, float epsilon, bool use_residual) {
+      rms_norm_impl("ct2_rms_norm_half", input, gamma, output, batch_size, depth, epsilon, use_residual);
+    }
+
+    void layer_norm(const float* input, const float* gamma, const float* beta,
+                    float* output, dim_t batch_size, dim_t depth, float epsilon) {
+      layer_norm_impl("ct2_layer_norm_float", input, gamma, beta, output, batch_size, depth, epsilon);
+    }
+
+    void layer_norm(const float16_t* input, const float16_t* gamma, const float16_t* beta,
+                    float16_t* output, dim_t batch_size, dim_t depth, float epsilon) {
+      layer_norm_impl("ct2_layer_norm_half", input, gamma, beta, output, batch_size, depth, epsilon);
+    }
+
   }
 }

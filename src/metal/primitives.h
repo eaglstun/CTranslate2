@@ -33,6 +33,20 @@ namespace ctranslate2 {
                  dim_t batch_size,
                  dim_t depth);
 
+    // Row-wise RMS norm over the last dimension (depth) for batch_size rows. gamma is
+    // required; use_residual selects the (1 + gamma) variant. float32 and float16.
+    void rms_norm(const float* input, const float* gamma, float* output,
+                  dim_t batch_size, dim_t depth, float epsilon, bool use_residual);
+    void rms_norm(const float16_t* input, const float16_t* gamma, float16_t* output,
+                  dim_t batch_size, dim_t depth, float epsilon, bool use_residual);
+
+    // Row-wise layer norm with affine (gamma, beta both required) over the last
+    // dimension (depth) for batch_size rows. float32 and float16.
+    void layer_norm(const float* input, const float* gamma, const float* beta,
+                    float* output, dim_t batch_size, dim_t depth, float epsilon);
+    void layer_norm(const float16_t* input, const float16_t* gamma, const float16_t* beta,
+                    float16_t* output, dim_t batch_size, dim_t depth, float epsilon);
+
     // Single-precision GEMM on the GPU via Metal Performance Shaders, matching the
     // semantics of primitives<D>::gemm: C = alpha * op(A) * op(B) + beta * C, where A,
     // B, C are row-major with leading dimensions lda/ldb/ldc and op() transposes when
