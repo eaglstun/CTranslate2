@@ -4,6 +4,11 @@
 
 #include "dispatch.h"
 
+#ifdef CT2_WITH_METAL
+#  include <type_traits>
+#  include "metal/primitives.h"
+#endif
+
 namespace ctranslate2 {
   namespace ops {
 
@@ -94,6 +99,18 @@ namespace ctranslate2 {
         output_shape[output_shape.size() - 1] = n;
         c.resize(std::move(output_shape));
       }
+
+#ifdef CT2_WITH_METAL
+      // Graduate the float GEMM to the GPU via MPS (a.device(), not D, is the real
+      // device under the M2 CPU-reference binding). INT8/INT16 stay on the reference.
+      if constexpr (std::is_same<In, float>::value && std::is_same<Out, float>::value) {
+        if (a.device() == Device::METAL) {
+          metal::gemm(_trans_a, _trans_b, m, n, k, _alpha,
+                      a.data<In>(), lda, b.data<In>(), ldb, _beta, c.data<Out>(), ldc);
+          return;
+        }
+      }
+#endif
 
       primitives<D>::gemm(_a_is_packed, _b_is_packed,
                           _trans_a, _trans_b,

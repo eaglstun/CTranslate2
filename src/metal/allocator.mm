@@ -1,10 +1,11 @@
 #include "ctranslate2/allocator.h"
 #include "metal/device.h"
 
+#include <cstdint>
+#include <map>
 #include <mutex>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
 
 // Objective-C++ WITHOUT ARC (manual retain/release). newBufferWithLength: returns a +1
 // owned object which we store raw in the side table and [release] in free().
@@ -15,8 +16,10 @@ namespace ctranslate2 {
     // Allocator backed by shared-storage MTLBuffers. On Apple Silicon's unified memory
     // the buffer's `contents` pointer is directly CPU-addressable, so it satisfies the
     // pointer-based Allocator contract and StorageView can treat it like a host pointer
-    // (data<T>()). A side table maps that pointer back to its MTLBuffer for kernel
-    // dispatch and release.
+    // (data<T>()). An address-ordered side table maps the contents pointer back to its
+    // MTLBuffer for kernel dispatch, and supports range lookups so that pointers offset
+    // into an allocation (StorageView sub-views, strided-batch matrices) resolve to the
+    // owning buffer plus a byte offset.
     class MetalAllocator : public Allocator {
     public:
       void* allocate(size_t size, int /*device_index*/) override {
@@ -32,7 +35,7 @@ namespace ctranslate2 {
 
         void* ptr = [buffer contents];
         std::lock_guard<std::mutex> lock(_mutex);
-        _buffers.emplace(ptr, buffer);
+        _buffers.emplace(reinterpret_cast<uintptr_t>(ptr), Block{buffer, size});
         return ptr;
       }
 
@@ -40,24 +43,34 @@ namespace ctranslate2 {
         if (!ptr)
           return;
         std::lock_guard<std::mutex> lock(_mutex);
-        auto it = _buffers.find(ptr);
+        auto it = _buffers.find(reinterpret_cast<uintptr_t>(ptr));
         if (it == _buffers.end())
           return;
-        [it->second release];
+        [it->second.buffer release];
         _buffers.erase(it);
       }
 
-      id<MTLBuffer> buffer_for(const void* ptr) {
+      BufferRange buffer_and_offset(const void* ptr) {
+        const uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
         std::lock_guard<std::mutex> lock(_mutex);
-        auto it = _buffers.find(const_cast<void*>(ptr));
-        if (it == _buffers.end())
+        // Find the allocation with the greatest base address <= addr.
+        auto it = _buffers.upper_bound(addr);
+        if (it == _buffers.begin())
           throw std::runtime_error("Metal: pointer is not a tracked Metal buffer");
-        return it->second;
+        --it;
+        const uintptr_t base = it->first;
+        if (addr >= base + it->second.size)
+          throw std::runtime_error("Metal: pointer is not inside a tracked Metal buffer");
+        return BufferRange{it->second.buffer, static_cast<NSUInteger>(addr - base)};
       }
 
     private:
+      struct Block {
+        id<MTLBuffer> buffer;
+        size_t size;
+      };
       std::mutex _mutex;
-      std::unordered_map<void*, id<MTLBuffer>> _buffers;
+      std::map<uintptr_t, Block> _buffers;
     };
 
     static MetalAllocator& get_metal_allocator() {
@@ -65,8 +78,8 @@ namespace ctranslate2 {
       return allocator;
     }
 
-    id<MTLBuffer> buffer_for(const void* ptr) {
-      return get_metal_allocator().buffer_for(ptr);
+    BufferRange buffer_and_offset(const void* ptr) {
+      return get_metal_allocator().buffer_and_offset(ptr);
     }
 
   }

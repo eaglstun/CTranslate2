@@ -19,9 +19,16 @@ namespace ctranslate2 {
     // function of the given name from the embedded shader library.
     id<MTLComputePipelineState> get_pipeline(const char* function_name);
 
-    // Maps a pointer returned by the Metal allocator back to its backing MTLBuffer.
-    // Throws if the pointer was not produced by the Metal allocator.
-    id<MTLBuffer> buffer_for(const void* ptr);
+    // A Metal buffer together with a byte offset into it.
+    struct BufferRange {
+      id<MTLBuffer> buffer;
+      NSUInteger offset;
+    };
+
+    // Maps a pointer (possibly offset into a larger allocation, e.g. a StorageView
+    // sub-view or a strided-batch matrix) back to its backing MTLBuffer and the byte
+    // offset within it. Throws if the pointer is not inside any tracked allocation.
+    BufferRange buffer_and_offset(const void* ptr);
 
   }
 }

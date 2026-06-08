@@ -470,6 +470,7 @@ if (WITH_METAL)
     src/metal/device.mm
     src/metal/allocator.mm
     src/metal/primitives.mm
+    src/metal/gemm.mm
     )
   set_source_files_properties(${METAL_SOURCES} PROPERTIES LANGUAGE OBJCXX)
   list(APPEND SOURCES ${METAL_SOURCES})

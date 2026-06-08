@@ -10,20 +10,18 @@ namespace ctranslate2 {
       if (size == 0)
         return;
 
-      // The allocator returns one buffer per allocation and hands back its base
-      // `contents` pointer, so each tracked pointer maps to offset 0 of its buffer.
-      id<MTLBuffer> a_buffer = buffer_for(a);
-      id<MTLBuffer> b_buffer = buffer_for(b);
-      id<MTLBuffer> c_buffer = buffer_for(c);
+      const BufferRange a_buffer = buffer_and_offset(a);
+      const BufferRange b_buffer = buffer_and_offset(b);
+      const BufferRange c_buffer = buffer_and_offset(c);
 
       id<MTLComputePipelineState> pso = get_pipeline("ct2_add_float");
 
       id<MTLCommandBuffer> command_buffer = [get_command_queue() commandBuffer];
       id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
       [encoder setComputePipelineState:pso];
-      [encoder setBuffer:a_buffer offset:0 atIndex:0];
-      [encoder setBuffer:b_buffer offset:0 atIndex:1];
-      [encoder setBuffer:c_buffer offset:0 atIndex:2];
+      [encoder setBuffer:a_buffer.buffer offset:a_buffer.offset atIndex:0];
+      [encoder setBuffer:b_buffer.buffer offset:b_buffer.offset atIndex:1];
+      [encoder setBuffer:c_buffer.buffer offset:c_buffer.offset atIndex:2];
 
       const uint32_t n = static_cast<uint32_t>(size);
       [encoder setBytes:&n length:sizeof(n) atIndex:3];

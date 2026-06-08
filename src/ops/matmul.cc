@@ -2,6 +2,11 @@
 
 #include "dispatch.h"
 
+#ifdef CT2_WITH_METAL
+#  include <type_traits>
+#  include "metal/primitives.h"
+#endif
+
 namespace ctranslate2 {
   namespace ops {
 
@@ -59,10 +64,29 @@ namespace ctranslate2 {
       const dim_t ldc = n;
       const float beta = 0;
 
+      const dim_t stridea = m * k;
+      const dim_t strideb = k * n;
+      const dim_t stridec = m * n;
+
+#ifdef CT2_WITH_METAL
+      // Graduate the float GEMM to the GPU via MPS. The M2 dispatch binding runs other
+      // work on the CPU reference, so a.device() (not D) tells us the real device.
+      if constexpr (std::is_same<T, float>::value) {
+        if (a.device() == Device::METAL) {
+          if (batch_size > 1)
+            metal::gemm_batch_strided(_trans_a, _trans_b, m, n, k, _alpha,
+                                      a.data<T>(), lda, stridea,
+                                      b.data<T>(), ldb, strideb,
+                                      beta, c.data<T>(), ldc, stridec, batch_size);
+          else
+            metal::gemm(_trans_a, _trans_b, m, n, k, _alpha,
+                        a.data<T>(), lda, b.data<T>(), ldb, beta, c.data<T>(), ldc);
+          return;
+        }
+      }
+#endif
+
       if (batch_size > 1) {
-        const dim_t stridea = m * k;
-        const dim_t strideb = k * n;
-        const dim_t stridec = m * n;
         primitives<D>::gemm_batch_strided(_trans_a, _trans_b,
                                           m, n, k,
                                           _alpha,
