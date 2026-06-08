@@ -16,8 +16,54 @@ namespace ctranslate2 {
       , _alpha(alpha) {
     }
 
+#ifdef CT2_WITH_METAL
+    // Runs the matmul on the GPU via MPS for the float types Metal supports. Shares the
+    // shape logic with compute(); reached from operator() before the generic dispatch so
+    // it also covers fp16 (which the CPU-reference dispatch cannot handle).
+    template <typename T>
+    static void metal_matmul(bool trans_a, bool trans_b, float alpha,
+                             const StorageView& a, const StorageView& b, StorageView& c) {
+      dim_t m, k_a;
+      if (trans_a) { m = a.dim(-1); k_a = a.dim(-2); }
+      else         { m = a.dim(-2); k_a = a.dim(-1); }
+      dim_t k_b, n;
+      if (trans_b) { n = b.dim(-2); k_b = b.dim(-1); }
+      else         { n = b.dim(-1); k_b = b.dim(-2); }
+      if (k_a != k_b)
+        throw std::invalid_argument("MatMul: k dimension of inputs a and b should match");
+
+      const dim_t k = k_a;
+      const dim_t batch_size = a.size() / (m * k);
+
+      Shape output_shape(a.shape());
+      output_shape[output_shape.size() - 1] = n;
+      output_shape[output_shape.size() - 2] = m;
+      c.resize(std::move(output_shape));
+
+      const dim_t lda = trans_a ? m : k;
+      const dim_t ldb = trans_b ? k : n;
+      const dim_t ldc = n;
+      const float beta = 0;
+
+      if (batch_size > 1)
+        metal::gemm_batch_strided(trans_a, trans_b, m, n, k, alpha,
+                                  a.data<T>(), lda, m * k,
+                                  b.data<T>(), ldb, k * n,
+                                  beta, c.data<T>(), ldc, m * n, batch_size);
+      else
+        metal::gemm(trans_a, trans_b, m, n, k, alpha,
+                    a.data<T>(), lda, b.data<T>(), ldb, beta, c.data<T>(), ldc);
+    }
+#endif
+
     void MatMul::operator()(const StorageView& a, const StorageView& b, StorageView& c) const {
       PROFILE("MatMul");
+#ifdef CT2_WITH_METAL
+      if (a.device() == Device::METAL) {
+        if (a.dtype() == DataType::FLOAT32) { metal_matmul<float>(_trans_a, _trans_b, _alpha, a, b, c); return; }
+        if (a.dtype() == DataType::FLOAT16) { metal_matmul<float16_t>(_trans_a, _trans_b, _alpha, a, b, c); return; }
+      }
+#endif
       DEVICE_AND_FLOAT_DISPATCH("MatMul", a.device(), a.dtype(), (compute<D, T>(a, b, c)));
     }
 
@@ -67,24 +113,6 @@ namespace ctranslate2 {
       const dim_t stridea = m * k;
       const dim_t strideb = k * n;
       const dim_t stridec = m * n;
-
-#ifdef CT2_WITH_METAL
-      // Graduate the float GEMM to the GPU via MPS. The M2 dispatch binding runs other
-      // work on the CPU reference, so a.device() (not D) tells us the real device.
-      if constexpr (std::is_same<T, float>::value) {
-        if (a.device() == Device::METAL) {
-          if (batch_size > 1)
-            metal::gemm_batch_strided(_trans_a, _trans_b, m, n, k, _alpha,
-                                      a.data<T>(), lda, stridea,
-                                      b.data<T>(), ldb, strideb,
-                                      beta, c.data<T>(), ldc, stridec, batch_size);
-          else
-            metal::gemm(_trans_a, _trans_b, m, n, k, _alpha,
-                        a.data<T>(), lda, b.data<T>(), ldb, beta, c.data<T>(), ldc);
-          return;
-        }
-      }
-#endif
 
       if (batch_size > 1) {
         primitives<D>::gemm_batch_strided(_trans_a, _trans_b,

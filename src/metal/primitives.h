@@ -26,6 +26,12 @@ namespace ctranslate2 {
                  float* output,
                  dim_t batch_size,
                  dim_t depth);
+    void softmax(bool log,
+                 const float16_t* input,
+                 const int32_t* lengths,
+                 float16_t* output,
+                 dim_t batch_size,
+                 dim_t depth);
 
     // Single-precision GEMM on the GPU via Metal Performance Shaders, matching the
     // semantics of primitives<D>::gemm: C = alpha * op(A) * op(B) + beta * C, where A,
@@ -48,6 +54,24 @@ namespace ctranslate2 {
                             const float* b, dim_t ldb, dim_t strideb,
                             float beta,
                             float* c, dim_t ldc, dim_t stridec,
+                            dim_t batch_size);
+
+    // Half-precision (float16) overloads, computed via MPSDataTypeFloat16.
+    void gemm(bool transpose_a, bool transpose_b,
+              dim_t m, dim_t n, dim_t k,
+              float alpha,
+              const float16_t* a, dim_t lda,
+              const float16_t* b, dim_t ldb,
+              float beta,
+              float16_t* c, dim_t ldc);
+
+    void gemm_batch_strided(bool transpose_a, bool transpose_b,
+                            dim_t m, dim_t n, dim_t k,
+                            float alpha,
+                            const float16_t* a, dim_t lda, dim_t stridea,
+                            const float16_t* b, dim_t ldb, dim_t strideb,
+                            float beta,
+                            float16_t* c, dim_t ldc, dim_t stridec,
                             dim_t batch_size);
 
   }

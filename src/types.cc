@@ -118,6 +118,14 @@ namespace ctranslate2 {
       return false;
 #endif
     }
+#ifdef CT2_WITH_METAL
+    case Device::METAL:
+      // Apple GPUs support native half precision. Note this only enables fp16 for the
+      // operations that already have Metal kernels (GEMM, softmax); other ops on Metal
+      // run via the CPU reference, which is float32-only, so a full fp16 model requires
+      // those ops to be graduated to half kernels first.
+      return true;
+#endif
     default:
       return false;
     }

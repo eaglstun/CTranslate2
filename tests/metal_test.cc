@@ -6,6 +6,7 @@
 #include <vector>
 
 #include <ctranslate2/devices.h>
+#include <ctranslate2/ops/ops.h>
 #include <ctranslate2/storage_view.h>
 #include <ctranslate2/translator.h>
 
@@ -88,6 +89,35 @@ TEST_F(MetalTest, EndToEndTranslation) {
     EXPECT_EQ(metal_results[i].output(), cpu_results[i].output())
         << "Metal translation diverged from CPU for input " << i;
   }
+}
+
+// fp16 compute on Metal: GEMM (MPSDataTypeFloat16) and softmax (half kernel) should
+// match the float32 GPU result within half-precision tolerance.
+TEST_F(MetalTest, Float16GemmMatchesFloat32) {
+  StorageView a({2, 3}, std::vector<float>{1, 2, 3, 4, 5, 6}, Device::METAL);
+  StorageView b({3, 2}, std::vector<float>{6, 5, 4, 3, 2, 1}, Device::METAL);
+
+  StorageView c32(Device::METAL);
+  ops::MatMul()(a, b, c32);
+
+  StorageView c16(DataType::FLOAT16, Device::METAL);
+  ops::MatMul()(a.to(DataType::FLOAT16), b.to(DataType::FLOAT16), c16);
+  EXPECT_EQ(c16.dtype(), DataType::FLOAT16);
+
+  expect_storage_eq(c16.to_float32(), c32, 2e-2);
+}
+
+TEST_F(MetalTest, Float16SoftMaxMatchesFloat32) {
+  StorageView x({2, 4}, std::vector<float>{1, 2, 3, 4, 4, 3, 2, 1}, Device::METAL);
+
+  StorageView y32(Device::METAL);
+  ops::SoftMax()(x, y32);
+
+  StorageView y16(DataType::FLOAT16, Device::METAL);
+  ops::SoftMax()(x.to(DataType::FLOAT16), y16);
+  EXPECT_EQ(y16.dtype(), DataType::FLOAT16);
+
+  expect_storage_eq(y16.to_float32(), y32, 2e-2);
 }
 
 #endif  // CT2_WITH_METAL

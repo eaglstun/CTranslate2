@@ -47,6 +47,30 @@ namespace ctranslate2 {
     {
     }
 
+#ifdef CT2_WITH_METAL
+    // Float GEMM on the GPU via MPS, sharing the shape logic with compute(). Reached from
+    // operator() before the generic dispatch so it also covers fp16. Bias/activation are
+    // applied afterwards by the caller, exactly as for the CPU/CUDA paths.
+    template <typename T>
+    static void metal_gemm(float alpha, float beta, bool trans_a, bool trans_b,
+                           const StorageView& a, const StorageView& b, StorageView& c) {
+      const dim_t k = a.dim(trans_a ? -2 : -1);
+      const dim_t n = b.dim(trans_b ? -2 : -1);
+      const dim_t m = a.size() / k;  // Collapse leading dimensions.
+      const dim_t lda = trans_a ? m : k;
+      const dim_t ldb = trans_b ? k : n;
+      const dim_t ldc = n;
+
+      Shape output_shape(a.shape());
+      output_shape[output_shape.size() - 2] = a.dim(trans_a ? -1 : -2);  // m
+      output_shape[output_shape.size() - 1] = n;
+      c.resize(std::move(output_shape));
+
+      metal::gemm(trans_a, trans_b, m, n, k, alpha,
+                  a.data<T>(), lda, b.data<T>(), ldb, beta, c.data<T>(), ldc);
+    }
+#endif
+
     void Gemm::operator()(const StorageView& a,
                           const StorageView& b,
                           StorageView& c,
@@ -69,6 +93,16 @@ namespace ctranslate2 {
       case DataType::FLOAT32:
       case DataType::FLOAT16:
       case DataType::BFLOAT16: {
+#ifdef CT2_WITH_METAL
+        if (a.device() == Device::METAL && a.dtype() == DataType::FLOAT32) {
+          metal_gemm<float>(_alpha, _beta, _trans_a, _trans_b, a, b, c);
+          break;
+        }
+        if (a.device() == Device::METAL && a.dtype() == DataType::FLOAT16) {
+          metal_gemm<float16_t>(_alpha, _beta, _trans_a, _trans_b, a, b, c);
+          break;
+        }
+#endif
         DEVICE_AND_FLOAT_DISPATCH("Gemm", a.device(), a.dtype(),
                                   (compute<D, T, T>(a, b, c, a_shift_compensation)));
         break;
@@ -99,18 +133,6 @@ namespace ctranslate2 {
         output_shape[output_shape.size() - 1] = n;
         c.resize(std::move(output_shape));
       }
-
-#ifdef CT2_WITH_METAL
-      // Graduate the float GEMM to the GPU via MPS (a.device(), not D, is the real
-      // device under the M2 CPU-reference binding). INT8/INT16 stay on the reference.
-      if constexpr (std::is_same<In, float>::value && std::is_same<Out, float>::value) {
-        if (a.device() == Device::METAL) {
-          metal::gemm(_trans_a, _trans_b, m, n, k, _alpha,
-                      a.data<In>(), lda, b.data<In>(), ldb, _beta, c.data<Out>(), ldc);
-          return;
-        }
-      }
-#endif
 
       primitives<D>::gemm(_a_is_packed, _b_is_packed,
                           _trans_a, _trans_b,

@@ -48,16 +48,16 @@ namespace ctranslate2 {
       }
 
 #ifdef CT2_WITH_METAL
-      // Graduate float softmax to a real GPU kernel (a.device() is the real device even
-      // though the M2 binding dispatches other work with D=CPU).
-      if (x.device() == Device::METAL && x.dtype() == DataType::FLOAT32) {
+      // Graduate softmax to a real GPU kernel (a.device() is the real device even though
+      // the M2 binding dispatches other work with D=CPU). float32 and float16.
+      if (x.device() == Device::METAL
+          && (x.dtype() == DataType::FLOAT32 || x.dtype() == DataType::FLOAT16)) {
         const dim_t batch_size = x.size() / depth;
-        metal::softmax(_log,
-                       x.data<float>(),
-                       lengths ? lengths->data<int32_t>() : nullptr,
-                       y.data<float>(),
-                       batch_size,
-                       depth);
+        const int32_t* len = lengths ? lengths->data<int32_t>() : nullptr;
+        if (x.dtype() == DataType::FLOAT32)
+          metal::softmax(_log, x.data<float>(), len, y.data<float>(), batch_size, depth);
+        else
+          metal::softmax(_log, x.data<float16_t>(), len, y.data<float16_t>(), batch_size, depth);
         return;
       }
 #endif

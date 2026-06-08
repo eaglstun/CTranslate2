@@ -5,12 +5,13 @@ Status as of 2026-06-08. This document tracks the in-progress Apple Metal GPU ba
 
 ## TL;DR
 
-A new GPU backend for Apple Silicon. Four milestones are complete and verified on real
+A new GPU backend for Apple Silicon. Five milestones are complete and verified on real
 hardware: tensors live on the GPU, the entire op/layer/storage test suite runs on
-`Device::METAL`, matmul runs on Metal Performance Shaders, and a **full transformer
-translates end-to-end on the GPU** with output identical to the CPU. GEMM, softmax, and
-elementwise-add execute as real GPU kernels today; every other operation runs correctly
-via a CPU-reference path over unified memory, ready to be graduated to GPU kernels one at
+`Device::METAL`, matmul runs on Metal Performance Shaders, a **full transformer
+translates end-to-end on the GPU** with output identical to the CPU, and GEMM + softmax
+also run in **float16**. GEMM, softmax, and elementwise-add execute as real GPU kernels
+today; every other operation runs correctly (float32) via a CPU-reference path over
+unified memory, ready to be graduated to GPU kernels one at
 a time behind a regression net.
 
 ## Why this is tractable
@@ -145,24 +146,36 @@ attention and FFN matmuls now run on MPS — pass.
 - **GPU softmax:** `ct2_softmax_float` (threadgroup tree reduction), matching CPU
   semantics including `lengths` masking and log-softmax. Routed from the `SoftMax` op.
 
+### ✅ M5 — fp16 foundation
+
+fp16 for the ops already on the GPU. `mayiuse_float16(Device::METAL)` → true so the
+`FLOAT16` compute type resolves on Metal (`AUTO` left CPU-like, so fp16 is explicit
+opt-in). float16 overloads of `metal::gemm`/`gemm_batch_strided` (`MPSDataTypeFloat16`)
+and a `ct2_softmax_half` kernel. Op routing moved to the `operator()` level (the generic
+dispatch throws on fp16 in a non-CUDA build), covering fp32 + fp16 in one path. Verified
+by `Float16GemmMatchesFloat32` / `Float16SoftMaxMatchesFloat32` (parity vs fp32, tol
+2e-2). **A full fp16 model is not yet possible** — it needs the remaining decoder ops
+graduated to half kernels (the CPU reference is float32-only).
+
 ### Verification snapshot
 
-- Full METAL suite: **77 passed, 2 skipped, 0 failed** (skips = Conv1D dilation and
+- Full METAL suite: **79 passed, 2 skipped, 0 failed** (skips = Conv1D dilation and
   grouped-quantized, which the CPU reference does not implement).
-- Full suite (all devices): **264/268** — the lone failure is a pre-existing
+- Full suite (all devices): **266/270** — the lone failure is a pre-existing
   `CPU/...Conv1DGroupNoBiasQuantized` "No INT8 GEMM backend for CPU" artifact of the
   MKL-less build, unrelated to Metal.
 - CPU-only build: no new warnings introduced.
 
 ## What runs where today
 
-| Operation                                                                                               | Metal execution                                                  |
-| ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| GEMM / MatMul (float32)                                                                                 | **GPU** — MPSMatrixMultiplication                                |
-| SoftMax / LogSoftMax (float32)                                                                          | **GPU** — custom kernel                                          |
-| Elementwise add (float32)                                                                               | **GPU** — custom kernel                                          |
-| Everything else (norms, gather, rotary, bias/activation, sampling, concat/split, conv, quantization, …) | CPU reference over unified memory (correct, not yet accelerated) |
-| fp16 / bf16 compute                                                                                     | Not yet (float32 only on Metal)                                  |
+| Operation                                                                                               | Metal execution                                                                                               |
+| ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| GEMM / MatMul (float32 and float16)                                                                     | **GPU** — MPSMatrixMultiplication                                                                             |
+| SoftMax / LogSoftMax (float32 and float16)                                                              | **GPU** — custom kernel                                                                                       |
+| Elementwise add (float32)                                                                               | **GPU** — custom kernel                                                                                       |
+| Everything else (norms, gather, rotary, bias/activation, sampling, concat/split, conv, quantization, …) | CPU reference over unified memory (correct, float32 only)                                                     |
+| fp16 for ungraduated ops                                                                                | Not yet — CPU reference is float32-only, so a full fp16 model needs those ops graduated to half kernels first |
+| bf16 compute                                                                                            | Not yet                                                                                                       |
 
 ## What's left
 
@@ -179,15 +192,21 @@ reference via the existing suite.
 - Sampling: `TopK`, `TopPMask`, `Multinomial`
 - Remaining elementwise/`mul` variants used in residuals and gating
 
-### Medium term — fp16
+### fp16 — foundation done, full-model fp16 remaining
 
-Where Apple Silicon actually gets fast. Requires:
+Where Apple Silicon actually gets fast. The foundation shipped in M5: `mayiuse_float16`
+is true for Metal, and GEMM + softmax run in fp16. **A full fp16 model is still blocked**
+because the CPU-reference binding is float32-only — every op a model touches needs a half
+kernel. So full fp16 ≈ the "graduate more ops" list above, done with `half` kernels.
+Remaining fp16 work:
 
-- a `Device::METAL`-aware variant of `DEVICE_AND_FLOAT_DISPATCH` in `src/dispatch.h`
-  (it currently hardcodes `Device::CUDA` for fp16/bf16),
-- fp16 MPS GEMM (`MPSDataTypeFloat16`) and `half` kernels,
-- `mayiuse_float16(Device::METAL)` → true, plus `Device::METAL` branches in
-  `resolve_compute_type` and `get_preferred_size_multiple` in `src/types.cc`.
+- fp16 `half` kernels for the rest of the decoder path (norms, gather, rotary, bias/act).
+- Optionally a `Device::METAL`-aware `DEVICE_AND_FLOAT_DISPATCH` in `src/dispatch.h` (it
+  hardcodes `Device::CUDA` for fp16/bf16) if any fp16 op is routed through the generic
+  dispatch rather than at `operator()` level.
+- `get_preferred_size_multiple` `Device::METAL` branch in `src/types.cc` (padding hint;
+  currently returns 1).
+- Consider enabling fp16 in the `AUTO` compute-type path once the full path supports it.
 
 ### Performance work (after correctness)
 
