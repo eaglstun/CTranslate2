@@ -268,3 +268,8 @@ INSTANTIATE_TEST_SUITE_P(CUDA, LayerDeviceFPTest,
                                            FloatType{Device::CUDA, DataType::BFLOAT16, 1e-2}),
                          fp_test_name);
 #endif
+#ifdef CT2_WITH_METAL
+INSTANTIATE_TEST_SUITE_P(METAL, LayerDeviceFPTest,
+                         ::testing::Values(FloatType{Device::METAL, DataType::FLOAT32, 1e-5}),
+                         fp_test_name);
+#endif

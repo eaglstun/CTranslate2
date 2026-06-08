@@ -1254,7 +1254,8 @@ TEST_P(OpDeviceFPTest, Conv1DPaddingAndStride) {
 
 TEST_P(OpDeviceFPTest, Conv1DDilation) {
   const Device device = GetParam().device;
-  if (device == Device::CPU)
+  // Metal runs the CPU reference Conv1D, which has no dilation support.
+  if (device == Device::CPU || device == Device::METAL)
       GTEST_SKIP() << "Dilated convolution is not implemented for CPU.";
   const DataType dtype = GetParam().dtype;
   const float error = GetParam().error;
@@ -1420,5 +1421,13 @@ INSTANTIATE_TEST_SUITE_P(CUDA, OpDeviceFPTest,
                          ::testing::Values(FloatType{Device::CUDA, DataType::FLOAT32, 1e-5},
                                            FloatType{Device::CUDA, DataType::FLOAT16, 1e-2},
                                            FloatType{Device::CUDA, DataType::BFLOAT16, 4e-2}),
+                         fp_test_name);
+#endif
+#ifdef CT2_WITH_METAL
+// Metal currently executes the CPU reference kernels on unified memory, so results are
+// bit-for-bit the CPU path and fp32-only (no fp16/bf16 compute yet).
+INSTANTIATE_TEST_SUITE_P(METAL, OpDeviceTest, ::testing::Values(Device::METAL));
+INSTANTIATE_TEST_SUITE_P(METAL, OpDeviceFPTest,
+                         ::testing::Values(FloatType{Device::METAL, DataType::FLOAT32, 1e-5}),
                          fp_test_name);
 #endif
