@@ -4,6 +4,9 @@
 #  include "cuda/utils.h"
 #  include "cuda/random.h"
 #endif
+#ifdef CT2_WITH_METAL
+#  include "metal/utils.h"
+#endif
 #ifdef CT2_WITH_TENSOR_PARALLEL
 #  include <unistd.h>
 #endif
@@ -21,9 +24,17 @@ namespace ctranslate2 {
 #endif
     if (device == "cpu" || device == "CPU")
       return Device::CPU;
+    if (device == "metal" || device == "METAL")
+#ifdef CT2_WITH_METAL
+      return Device::METAL;
+#else
+      throw std::invalid_argument("This CTranslate2 package was not compiled with Metal support");
+#endif
     if (device == "auto" || device == "AUTO")
 #ifdef CT2_WITH_CUDA
       return cuda::has_gpu() ? Device::CUDA : Device::CPU;
+#elif defined(CT2_WITH_METAL)
+      return metal::has_gpu() ? Device::METAL : Device::CPU;
 #else
       return Device::CPU;
 #endif
@@ -34,6 +45,8 @@ namespace ctranslate2 {
     switch (device) {
     case Device::CUDA:
       return "cuda";
+    case Device::METAL:
+      return "metal";
     case Device::CPU:
       return "cpu";
     }
@@ -49,6 +62,12 @@ namespace ctranslate2 {
     case Device::CUDA:
 #ifdef CT2_WITH_CUDA
       return cuda::get_gpu_count();
+#else
+      return 0;
+#endif
+    case Device::METAL:
+#ifdef CT2_WITH_METAL
+      return metal::get_gpu_count();
 #else
       return 0;
 #endif
@@ -88,6 +107,20 @@ namespace ctranslate2 {
   }
 #endif
 
+#ifdef CT2_WITH_METAL
+  // A single default Metal device is supported, so the index is always 0.
+  template<>
+  int get_device_index<Device::METAL>() {
+    return 0;
+  }
+
+  template<>
+  void set_device_index<Device::METAL>(int index) {
+    if (index != 0)
+      throw std::invalid_argument("Invalid Metal device index: " + std::to_string(index));
+  }
+#endif
+
   int get_device_index(Device device) {
     int index = 0;
     DEVICE_DISPATCH(device, index = get_device_index<D>());
@@ -104,6 +137,10 @@ namespace ctranslate2 {
       const ScopedDeviceSetter scoped_device_setter(device, index);
       cudaDeviceSynchronize();
     }
+#elif defined(CT2_WITH_METAL)
+    if (device == Device::METAL)
+      metal::synchronize();
+    (void)index;
 #else
     (void)device;
     (void)index;
@@ -115,6 +152,9 @@ namespace ctranslate2 {
     if (device == Device::CUDA) {
       cudaStreamSynchronize(cuda::get_cuda_stream());
     }
+#elif defined(CT2_WITH_METAL)
+    if (device == Device::METAL)
+      metal::synchronize();
 #else
     (void)device;
 #endif
