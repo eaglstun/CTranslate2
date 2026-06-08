@@ -64,6 +64,18 @@ namespace ctranslate2 {
     void bias_add(const float16_t* value, const float16_t* bias, const float16_t* residual,
                   float16_t* output, dim_t size, dim_t depth, int activation);
 
+    // Standalone unary activation over `size` elements: output[i] = activation(input[i]).
+    // `activation` matches the ActivationType enum. float32 and float16.
+    void activation(const float* input, float* output, dim_t size, int act);
+    void activation(const float16_t* input, float16_t* output, dim_t size, int act);
+
+    // Elementwise multiply over `size` elements: c[i] = a[i] * (b_is_scalar ? scalar : b[i]).
+    // For the scalar case the value is passed by host value (the scalar operand may live on
+    // a different device) and `b` may be null. float32 and float16.
+    void mul(const float* a, const float* b, float* c, dim_t size, bool b_is_scalar, float scalar);
+    void mul(const float16_t* a, const float16_t* b, float16_t* c, dim_t size,
+             bool b_is_scalar, float scalar);
+
     // Type-agnostic gather: output[i] = data[batch_of(i)*batch_stride + indices[i]*copy_size],
     // where copy_size and batch_stride are in BYTES. Pointers must be Metal-allocated.
     void gather(const void* data, const int32_t* indices, void* output,

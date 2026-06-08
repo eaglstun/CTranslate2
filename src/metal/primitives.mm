@@ -295,6 +295,79 @@ namespace ctranslate2 {
       bias_add_impl("ct2_bias_add_half", value, bias, residual, output, size, depth, activation);
     }
 
+    namespace {
+      void activation_impl(const char* pipeline_name, const void* input, void* output,
+                           dim_t size, int act) {
+        if (size == 0)
+          return;
+        const BufferRange in_buffer = buffer_and_offset(input);
+        const BufferRange out_buffer = buffer_and_offset(output);
+
+        id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
+        id<MTLCommandBuffer> command_buffer = [get_command_queue() commandBuffer];
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        [encoder setComputePipelineState:pso];
+        [encoder setBuffer:in_buffer.buffer offset:in_buffer.offset atIndex:0];
+        [encoder setBuffer:out_buffer.buffer offset:out_buffer.offset atIndex:1];
+        const int32_t act32 = act;
+        [encoder setBytes:&act32 length:sizeof(act32) atIndex:2];
+
+        NSUInteger tg = pso.maxTotalThreadsPerThreadgroup;
+        if (tg > (NSUInteger)size) tg = size;
+        [encoder dispatchThreads:MTLSizeMake(size, 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+        [encoder endEncoding];
+        [command_buffer commit];
+        [command_buffer waitUntilCompleted];
+      }
+
+      void mul_impl(const char* pipeline_name, const void* a, const void* b, void* c,
+                    dim_t size, bool b_is_scalar, float scalar) {
+        if (size == 0)
+          return;
+        const BufferRange a_buffer = buffer_and_offset(a);
+        const BufferRange c_buffer = buffer_and_offset(c);
+        // For the scalar case b may be null / off-device; bind a as an unused dummy.
+        const BufferRange b_buffer = b_is_scalar ? a_buffer : buffer_and_offset(b);
+
+        id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
+        id<MTLCommandBuffer> command_buffer = [get_command_queue() commandBuffer];
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        [encoder setComputePipelineState:pso];
+        [encoder setBuffer:a_buffer.buffer offset:a_buffer.offset atIndex:0];
+        [encoder setBuffer:b_buffer.buffer offset:b_buffer.offset atIndex:1];
+        [encoder setBuffer:c_buffer.buffer offset:c_buffer.offset atIndex:2];
+        const uint32_t scalar_flag = b_is_scalar ? 1u : 0u;
+        [encoder setBytes:&scalar_flag length:sizeof(scalar_flag) atIndex:3];
+        [encoder setBytes:&scalar length:sizeof(scalar) atIndex:4];
+
+        NSUInteger tg = pso.maxTotalThreadsPerThreadgroup;
+        if (tg > (NSUInteger)size) tg = size;
+        [encoder dispatchThreads:MTLSizeMake(size, 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+        [encoder endEncoding];
+        [command_buffer commit];
+        [command_buffer waitUntilCompleted];
+      }
+    }
+
+    void activation(const float* input, float* output, dim_t size, int act) {
+      activation_impl("ct2_activation_float", input, output, size, act);
+    }
+
+    void activation(const float16_t* input, float16_t* output, dim_t size, int act) {
+      activation_impl("ct2_activation_half", input, output, size, act);
+    }
+
+    void mul(const float* a, const float* b, float* c, dim_t size, bool b_is_scalar, float scalar) {
+      mul_impl("ct2_mul_float", a, b, c, size, b_is_scalar, scalar);
+    }
+
+    void mul(const float16_t* a, const float16_t* b, float16_t* c, dim_t size,
+             bool b_is_scalar, float scalar) {
+      mul_impl("ct2_mul_half", a, b, c, size, b_is_scalar, scalar);
+    }
+
     void gather(const void* data, const int32_t* indices, void* output,
                 dim_t copy_size_bytes, dim_t batch_stride_bytes,
                 dim_t num_indices, dim_t num_indices_per_batch) {

@@ -385,6 +385,54 @@ kernel void ct2_bias_add_half(device const half* value    [[buffer(0)]],
   ct2_bias_add_impl<half>(value, bias, residual, output, depth, has_residual, act, gid);
 }
 
+// ---- Standalone activation ----  out[i] = act(in[i]).  `act` matches ActivationType.
+template <typename T>
+inline void ct2_activation_impl(device const T* x, device T* y, int act, uint gid) {
+  y[gid] = (T)ct2_apply_activation((float)x[gid], act);
+}
+
+kernel void ct2_activation_float(device const float* x [[buffer(0)]],
+                                 device float* y        [[buffer(1)]],
+                                 constant int& act       [[buffer(2)]],
+                                 uint gid [[thread_position_in_grid]]) {
+  ct2_activation_impl<float>(x, y, act, gid);
+}
+
+kernel void ct2_activation_half(device const half* x [[buffer(0)]],
+                                device half* y        [[buffer(1)]],
+                                constant int& act      [[buffer(2)]],
+                                uint gid [[thread_position_in_grid]]) {
+  ct2_activation_impl<half>(x, y, act, gid);
+}
+
+// ---- Elementwise multiply ----  c[i] = a[i] * (b_is_scalar ? scalar : b[i]).
+// When b_is_scalar, the scalar is passed by value (the scalar operand may live on the
+// host / a different device), and the b buffer is an unused dummy.
+template <typename T>
+inline void ct2_mul_impl(device const T* a, device const T* b, device T* c,
+                         uint b_is_scalar, float scalar, uint gid) {
+  const float bv = (b_is_scalar != 0u) ? scalar : (float)b[gid];
+  c[gid] = (T)((float)a[gid] * bv);
+}
+
+kernel void ct2_mul_float(device const float* a [[buffer(0)]],
+                          device const float* b [[buffer(1)]],
+                          device float* c        [[buffer(2)]],
+                          constant uint& b_is_scalar [[buffer(3)]],
+                          constant float& scalar     [[buffer(4)]],
+                          uint gid [[thread_position_in_grid]]) {
+  ct2_mul_impl<float>(a, b, c, b_is_scalar, scalar, gid);
+}
+
+kernel void ct2_mul_half(device const half* a [[buffer(0)]],
+                         device const half* b [[buffer(1)]],
+                         device half* c        [[buffer(2)]],
+                         constant uint& b_is_scalar [[buffer(3)]],
+                         constant float& scalar     [[buffer(4)]],
+                         uint gid [[thread_position_in_grid]]) {
+  ct2_mul_impl<half>(a, b, c, b_is_scalar, scalar, gid);
+}
+
 // ---- Gather ----  type-agnostic byte copy: one thread per gathered row.
 // output[i] = data[batch_of(i) * batch_stride + indices[i] * copy_size], copy_size bytes.
 kernel void ct2_gather_bytes(device const uchar* data    [[buffer(0)]],
