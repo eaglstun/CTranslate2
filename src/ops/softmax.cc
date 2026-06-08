@@ -2,6 +2,10 @@
 
 #include "dispatch.h"
 
+#ifdef CT2_WITH_METAL
+#  include "metal/primitives.h"
+#endif
+
 namespace ctranslate2 {
   namespace ops {
 
@@ -42,6 +46,21 @@ namespace ctranslate2 {
                                       + " which is different than the current batch size "
                                       + std::to_string(batch_size));
       }
+
+#ifdef CT2_WITH_METAL
+      // Graduate float softmax to a real GPU kernel (a.device() is the real device even
+      // though the M2 binding dispatches other work with D=CPU).
+      if (x.device() == Device::METAL && x.dtype() == DataType::FLOAT32) {
+        const dim_t batch_size = x.size() / depth;
+        metal::softmax(_log,
+                       x.data<float>(),
+                       lengths ? lengths->data<int32_t>() : nullptr,
+                       y.data<float>(),
+                       batch_size,
+                       depth);
+        return;
+      }
+#endif
 
       DEVICE_AND_FLOAT_DISPATCH("SoftMax", x.device(), x.dtype(), (compute<D, T>(x, lengths, y)));
     }

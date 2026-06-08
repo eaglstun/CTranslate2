@@ -7,6 +7,7 @@
 
 #include <ctranslate2/devices.h>
 #include <ctranslate2/storage_view.h>
+#include <ctranslate2/translator.h>
 
 #include "metal/primitives.h"
 #include "metal/utils.h"
@@ -64,6 +65,29 @@ TEST_F(MetalTest, ElementwiseAdd) {
 
   for (size_t i = 0; i < a_host.size(); ++i)
     EXPECT_FLOAT_EQ(result[i], a_host[i] + b_host[i]) << "at index " << i;
+}
+
+// End-to-end: run the full encoder-decoder transformer (the default transliteration
+// model) on the Metal device and require its output to match the CPU reference exactly.
+// This exercises the whole stack on Device::METAL — embeddings, attention (with MPS
+// matmuls), feed-forward, layer norm, and beam search.
+TEST_F(MetalTest, EndToEndTranslation) {
+  const std::vector<std::vector<std::string>> inputs = {
+    {"آ", "ت", "ز", "م", "و", "ن"},
+  };
+
+  Translator cpu_translator(default_model_dir(), Device::CPU);
+  Translator metal_translator(default_model_dir(), Device::METAL);
+
+  const auto cpu_results = cpu_translator.translate_batch(inputs);
+  const auto metal_results = metal_translator.translate_batch(inputs);
+
+  ASSERT_EQ(metal_results.size(), cpu_results.size());
+  for (size_t i = 0; i < cpu_results.size(); ++i) {
+    EXPECT_FALSE(metal_results[i].output().empty());
+    EXPECT_EQ(metal_results[i].output(), cpu_results[i].output())
+        << "Metal translation diverged from CPU for input " << i;
+  }
 }
 
 #endif  // CT2_WITH_METAL

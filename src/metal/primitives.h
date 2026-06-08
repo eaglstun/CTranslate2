@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
 #include "ctranslate2/types.h"
 
@@ -15,6 +16,16 @@ namespace ctranslate2 {
     // pointers of StorageViews allocated on Device::METAL (i.e. tracked by the Metal
     // allocator). The call is synchronous: it returns once the GPU work has completed.
     void add(const float* a, const float* b, float* c, size_t size);
+
+    // Row-wise softmax over the last dimension (depth) for batch_size rows, matching
+    // primitives/ops SoftMax semantics: optional per-row `lengths` masking (nullptr =
+    // full depth), and `log` for log-softmax. Synchronous. float32 only.
+    void softmax(bool log,
+                 const float* input,
+                 const int32_t* lengths,
+                 float* output,
+                 dim_t batch_size,
+                 dim_t depth);
 
     // Single-precision GEMM on the GPU via Metal Performance Shaders, matching the
     // semantics of primitives<D>::gemm: C = alpha * op(A) * op(B) + beta * C, where A,
