@@ -262,6 +262,36 @@ TEST_F(MetalTest, DISABLED_BenchmarkGemm) {
   }
 }
 
+// Isolate per-op ENCODE cost from GPU execution: time many GEMMs that are committed but
+// not waited (one flush at the end) vs. flush-per-iter. The gap is the wait/round-trip;
+// the batched number is the floor set by command-buffer + MPS-object creation + commit.
+TEST_F(MetalTest, DISABLED_BenchmarkGemmEncode) {
+  std::cout << "\n=== GEMM per-op cost: flush-per-iter vs batched-encode (ms/iter) ===\n";
+  for (dim_t n : {256, 1024}) {
+    const std::vector<float> av(n * n, 0.01f);
+    const std::vector<float> bv(n * n, 0.02f);
+    const int iters = 200;
+    StorageView a = StorageView({n, n}, av, Device::METAL).to(DataType::FLOAT16);
+    StorageView b = StorageView({n, n}, bv, Device::METAL).to(DataType::FLOAT16);
+    StorageView c(DataType::FLOAT16, Device::METAL);
+    const ops::MatMul mm;
+
+    const double per_iter = time_ms(iters, [&] { mm(a, b, c); synchronize_device(Device::METAL, 0); });
+
+    // Batched: encode all, flush once; report per-iter.
+    mm(a, b, c); synchronize_device(Device::METAL, 0);  // warmup
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < iters; ++i)
+      mm(a, b, c);
+    synchronize_device(Device::METAL, 0);
+    const auto t1 = std::chrono::steady_clock::now();
+    const double batched = std::chrono::duration<double, std::milli>(t1 - t0).count() / iters;
+
+    std::cout << "  n=" << n << " fp16:  flush-per-iter " << per_iter
+              << " ms,  batched-encode " << batched << " ms\n";
+  }
+}
+
 TEST_F(MetalTest, DISABLED_BenchmarkTranslation) {
   std::cout << "\n=== End-to-end translation, ms per batch of 32 ===\n";
   const std::vector<std::vector<std::string>> batch(32, {"آ", "ت", "ز", "م", "و", "ن"});

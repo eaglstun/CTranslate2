@@ -3,6 +3,9 @@
 
 #import <MetalPerformanceShaders/MetalPerformanceShaders.h>
 
+#include <map>
+#include <tuple>
+
 // Single- and half-precision GEMM on the GPU via Metal Performance Shaders.
 //
 // CTranslate2 StorageViews are row-major, and MPSMatrix is also row-major, so the
@@ -22,6 +25,34 @@ namespace ctranslate2 {
                                                      columns:columns
                                                     rowBytes:static_cast<NSUInteger>(ld) * element_size
                                                     dataType:data_type];
+      }
+
+      // MPSMatrixMultiplication is configured with dims/transpose/alpha/beta at init and
+      // takes the operand matrices only at encode time, so one object is reused for every
+      // GEMM of the same shape — and a decoder repeats a handful of shapes every layer and
+      // step. Caching them removes a per-op allocation (a measurable chunk of encode cost).
+      // Thread-local: an MPS kernel object must not be encoded from two threads at once.
+      using GemmKey = std::tuple<dim_t, dim_t, dim_t, bool, bool, float, float, int>;
+
+      MPSMatrixMultiplication* cached_gemm(dim_t m, dim_t n, dim_t k,
+                                           bool transpose_a, bool transpose_b,
+                                           float alpha, float beta) {
+        static thread_local std::map<GemmKey, MPSMatrixMultiplication*> cache;
+        const GemmKey key{m, n, k, transpose_a, transpose_b, alpha, beta, 0};
+        auto it = cache.find(key);
+        if (it != cache.end())
+          return it->second;
+        MPSMatrixMultiplication* mm =
+          [[MPSMatrixMultiplication alloc] initWithDevice:get_metal_device()
+                                            transposeLeft:transpose_a
+                                           transposeRight:transpose_b
+                                               resultRows:m
+                                            resultColumns:n
+                                          interiorColumns:k
+                                                    alpha:alpha
+                                                     beta:beta];
+        cache.emplace(key, mm);
+        return mm;
       }
 
       // Encodes one C = alpha * op(A) * op(B) + beta * C into the command buffer.
@@ -46,15 +77,7 @@ namespace ctranslate2 {
         MPSMatrix* c_matrix = [[MPSMatrix alloc] initWithBuffer:c offset:c_offset
                                  descriptor:descriptor(m, n, ldc, element_size, data_type)];
 
-        MPSMatrixMultiplication* mm =
-          [[MPSMatrixMultiplication alloc] initWithDevice:get_metal_device()
-                                            transposeLeft:transpose_a
-                                           transposeRight:transpose_b
-                                               resultRows:m
-                                            resultColumns:n
-                                          interiorColumns:k
-                                                    alpha:alpha
-                                                     beta:beta];
+        MPSMatrixMultiplication* mm = cached_gemm(m, n, k, transpose_a, transpose_b, alpha, beta);
         [mm encodeToCommandBuffer:command_buffer
                        leftMatrix:a_matrix
                       rightMatrix:b_matrix
@@ -63,7 +86,7 @@ namespace ctranslate2 {
         [a_matrix release];
         [b_matrix release];
         [c_matrix release];
-        [mm release];
+        // mm is owned by the thread-local cache; do not release.
       }
 
       template <typename T>

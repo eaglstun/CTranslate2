@@ -33,19 +33,19 @@ per-call dispatch overhead (command buffer commit + `waitUntilCompleted` + a fre
 
 ## End-to-end translation (batch of 32, tiny transliteration model)
 
-ms per batch (lower is better). "Sync per op" is the original commit+wait design; "Batched"
-removes the per-op block (commit asynchronously, flush only before a CPU read).
+ms per batch (lower is better), as each optimization landed. "sync per op" = original
+commit+wait; "batched" = commit asynchronously, flush only before a CPU read; "+MM cache" =
+also reuse `MPSMatrixMultiplication` objects by shape.
 
-|            | sync per op | batched  | CPU baseline |
-| ---------- | ----------- | -------- | ------------ |
-| Metal fp32 | 2419        | **2015** | 14           |
-| Metal fp16 | 1493        | **1183** | 14           |
+|            | sync per op | batched | +MM cache | CPU baseline |
+| ---------- | ----------- | ------- | --------- | ------------ |
+| Metal fp32 | 2419        | 2015    | **~1284** | 14           |
+| Metal fp16 | 1493        | 1183    | **~804**  | 14           |
 
-**Read:** Metal is dramatically _slower_ here — expected and informative. The test model is
-tiny (a char-level transliteration Transformer) whose decode loop issues many hundreds of
-_small_ ops. Batching removed the per-op block and helped ~17–21%, but did not close the
-gap, for two reasons covered in Analysis. The CPU runs the same tiny ops with no GPU API in
-the way and wins by ~100×.
+Cumulative ~1.9–2× faster than the original. The decisive change was caching the MPS GEMM
+objects (~35% on top of batching), which a measurement pinpointed (see Analysis). Metal is
+still dramatically slower than the CPU on this tiny model — its ops are too small to amortize
+any GPU API cost — but the gap roughly halved.
 
 ## Analysis
 
@@ -74,19 +74,40 @@ still worthwhile: it keeps the KV cache fully on-GPU and helps larger models, an
 parity-verified — it just isn't the perf lever here.) Note fp16 e2e is ~1.7× faster than
 fp32, so reduced memory bandwidth across all ops does help; the gap to CPU is API overhead.
 
-Remaining performance levers, revised by the above:
+**Update 2 — measured the per-op cost, then cut it.** A probe (`DISABLED_BenchmarkGemmEncode`)
+isolated GEMM encode from execution by timing many commits with one flush at the end:
 
-1. **Reduce per-op GPU-API overhead** — the actual bottleneck. Reuse
-   `MPSMatrixMultiplication`/encoder objects instead of allocating per call; consider a
-   single command buffer reused across a decode step (committed once) rather than one per
-   op. This is the change most likely to move the tiny-model number.
+|             | flush-per-iter | batched-encode (encode+commit only) |
+| ----------- | -------------- | ----------------------------------- |
+| n=256 fp16  | 0.22 ms        | **0.042 ms**                        |
+| n=1024 fp16 | 0.44 ms        | 0.19 ms                             |
+
+So at n=256 the per-op _encode_ cost is ~0.042 ms (command buffer + 3 `MPSMatrix` + 1
+`MPSMatrixMultiplication` + commit), and the wait/round-trip adds the rest. Since e2e already
+batches (no per-op wait), that **encode cost** is what hits thousands of times. Caching the
+`MPSMatrixMultiplication` objects by shape (they take operands only at encode time, and a
+decoder repeats a few shapes per layer/step) dropped encode to ~0.031 ms and **e2e by ~35%**
+(fp32 2015→~1284, fp16 1183→~804). Caching `MPSMatrixDescriptor` on top was net-zero (the
+alloc was already cheap) and was reverted.
+
+Remaining performance levers, revised again:
+
+1. **Reuse command buffers across ops** (one per decode step, committed once) to remove the
+   per-op command-buffer + commit cost — the largest remaining encode component. NON-TRIVIAL:
+   cross-thread data dependencies (e.g. Conv1D issues GEMMs on `parallel_for` workers whose
+   output a later main-thread op reads) require committing in dependency order, which the
+   current per-op-commit model gets for free via the FIFO queue. A naive shared/open command
+   buffer breaks that ordering — needs care.
 2. **Offline `.metallib`** — removes the first-use shader-compile cost.
-3. ~~Graduate per-step CPU-reference ops (Concat/Split) to GPU~~ — done; did not help e2e.
+3. ~~Cache `MPSMatrixMultiplication`~~ — done, ~35% e2e win.
+4. ~~Graduate per-step CPU-reference ops (Concat/Split) to GPU~~ — done; did not help e2e
+   (kept for correctness/larger models).
 
 The GEMM table already proves the upside: a real LLM (large hidden size, GEMM-dominated,
 fewer/bigger ops) sits at the favorable end and should show the fp16 advantage. This tiny
-model is the worst case for any GPU backend — its ops are too small to amortize any
-per-op API cost, which is why CPU (no GPU API in the path) wins by ~100×.
+model is the worst case for any GPU backend — its ops are too small to amortize any per-op
+API cost, which is why CPU (no GPU API in the path) still wins by ~90× even after the ~2×
+speedup.
 
 ## Caveats
 
