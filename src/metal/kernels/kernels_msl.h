@@ -233,6 +233,74 @@ kernel void ct2_rms_norm_half(device const half* input  [[buffer(0)]],
   ct2_rms_norm_impl<half>(input, gamma, output, depth, epsilon, use_residual, row, tid, scratch);
 }
 
+// Fused residual-add + RMSNorm. Writes BOTH sum = a + b (the new residual-stream value,
+// needed by the next residual add) and normed = rmsnorm(sum) * (use_residual ? 1+g : g).
+// vs separate Add+RMSNorm this removes one kernel launch and one device read pass (the Add
+// writes sum, then the norm re-reads it; here phase 2 re-reads the sum we just wrote — 3
+// reads instead of 4). Same tree reduction as ct2_rms_norm (SIMD-group reduction lost; see
+// the perf log). Buffers: a, b, gamma, sum_out, normed_out, then depth/epsilon/use_residual.
+template <typename T>
+inline void ct2_add_rms_norm_impl(device const T* a, device const T* b, device const T* gamma,
+                                  device T* sum_out, device T* normed_out,
+                                  uint depth, float epsilon, uint use_residual,
+                                  uint row, uint tid, threadgroup float* scratch) {
+  const ulong base = (ulong)row * (ulong)depth;
+  device const T* a_r = a + base;
+  device const T* b_r = b + base;
+  device T* s_r = sum_out + base;
+  device T* y_r = normed_out + base;
+
+  float local_ss = 0.0f;
+  for (uint j = tid; j < depth; j += CT2_NORM_TG) {
+    const float v = (float)a_r[j] + (float)b_r[j];
+    s_r[j] = (T)v;
+    local_ss += v * v;
+  }
+  scratch[tid] = local_ss;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint s = CT2_NORM_TG / 2u; s > 0u; s >>= 1) {
+    if (tid < s)
+      scratch[tid] += scratch[tid + s];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+
+  const float inv_rms = 1.0f / sqrt(scratch[0] / (float)depth + epsilon);
+  for (uint j = tid; j < depth; j += CT2_NORM_TG) {
+    const float g = (float)gamma[j];
+    y_r[j] = (T)((float)s_r[j] * inv_rms * (use_residual != 0u ? (1.0f + g) : g));
+  }
+}
+
+kernel void ct2_add_rms_norm_float(device const float* a [[buffer(0)]],
+                                   device const float* b [[buffer(1)]],
+                                   device const float* gamma [[buffer(2)]],
+                                   device float* sum_out    [[buffer(3)]],
+                                   device float* normed_out [[buffer(4)]],
+                                   constant uint& depth        [[buffer(5)]],
+                                   constant float& epsilon     [[buffer(6)]],
+                                   constant uint& use_residual [[buffer(7)]],
+                                   uint row [[threadgroup_position_in_grid]],
+                                   uint tid [[thread_position_in_threadgroup]]) {
+  threadgroup float scratch[CT2_NORM_TG];
+  ct2_add_rms_norm_impl<float>(a, b, gamma, sum_out, normed_out, depth, epsilon, use_residual,
+                               row, tid, scratch);
+}
+
+kernel void ct2_add_rms_norm_half(device const half* a [[buffer(0)]],
+                                  device const half* b [[buffer(1)]],
+                                  device const half* gamma [[buffer(2)]],
+                                  device half* sum_out    [[buffer(3)]],
+                                  device half* normed_out [[buffer(4)]],
+                                  constant uint& depth        [[buffer(5)]],
+                                  constant float& epsilon     [[buffer(6)]],
+                                  constant uint& use_residual [[buffer(7)]],
+                                  uint row [[threadgroup_position_in_grid]],
+                                  uint tid [[thread_position_in_threadgroup]]) {
+  threadgroup float scratch[CT2_NORM_TG];
+  ct2_add_rms_norm_impl<half>(a, b, gamma, sum_out, normed_out, depth, epsilon, use_residual,
+                              row, tid, scratch);
+}
+
 template <typename T>
 inline void ct2_layer_norm_impl(device const T* input, device const T* gamma,
                                 device const T* beta, device T* output,

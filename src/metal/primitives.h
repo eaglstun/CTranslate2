@@ -42,6 +42,15 @@ namespace ctranslate2 {
     void rms_norm(const float16_t* input, const float16_t* gamma, float16_t* output,
                   dim_t batch_size, dim_t depth, float epsilon, bool use_residual);
 
+    // Fused residual-add + RMSNorm: sum_out = a + b (the new residual stream), normed_out =
+    // rms_norm(sum_out). One launch + one fewer device read pass than Add then rms_norm.
+    void add_rms_norm(const float* a, const float* b, const float* gamma,
+                      float* sum_out, float* normed_out,
+                      dim_t batch_size, dim_t depth, float epsilon, bool use_residual);
+    void add_rms_norm(const float16_t* a, const float16_t* b, const float16_t* gamma,
+                      float16_t* sum_out, float16_t* normed_out,
+                      dim_t batch_size, dim_t depth, float epsilon, bool use_residual);
+
     // Row-wise layer norm with affine (gamma, beta both required) over the last
     // dimension (depth) for batch_size rows. float32 and float16.
     void layer_norm(const float* input, const float* gamma, const float* beta,

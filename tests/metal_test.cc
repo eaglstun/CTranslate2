@@ -233,6 +233,41 @@ TEST_F(MetalTest, Float16MultinomialRuns) {
   }
 }
 
+// Fused residual-add + RMSNorm must match the unfused Add then RMSNorm, for both the
+// residual sum and the normed output (fp32 and fp16).
+TEST_F(MetalTest, AddRMSNormMatchesUnfused) {
+  const dim_t rows = 4, depth = 8;
+  std::vector<float> av(rows * depth), bv(rows * depth), gv(depth);
+  for (size_t i = 0; i < av.size(); ++i) { av[i] = 0.1f * (i % 5) - 0.2f; bv[i] = 0.05f * (i % 3); }
+  for (size_t i = 0; i < gv.size(); ++i) gv[i] = 0.5f + 0.1f * i;
+  const float eps = 1e-6f;
+
+  for (DataType dt : {DataType::FLOAT32, DataType::FLOAT16}) {
+    StorageView a = StorageView({rows, depth}, av, Device::METAL).to(dt);
+    StorageView b = StorageView({rows, depth}, bv, Device::METAL).to(dt);
+    StorageView g = StorageView({depth}, gv, Device::METAL).to(dt);
+
+    StorageView sum_ref(dt, Device::METAL);
+    ops::Add()(a, b, sum_ref);
+    StorageView normed_ref(dt, Device::METAL);
+    ops::RMSNorm(eps, /*use_residual=*/false)(g, sum_ref, normed_ref);
+
+    StorageView sum(dt, Device::METAL); sum.resize_as(a);
+    StorageView normed(dt, Device::METAL); normed.resize_as(a);
+    const double tol = (dt == DataType::FLOAT16) ? 2e-2 : 1e-5;
+    if (dt == DataType::FLOAT16)
+      metal::add_rms_norm(a.data<float16_t>(), b.data<float16_t>(), g.data<float16_t>(),
+                          sum.data<float16_t>(), normed.data<float16_t>(), rows, depth, eps, false);
+    else
+      metal::add_rms_norm(a.data<float>(), b.data<float>(), g.data<float>(),
+                          sum.data<float>(), normed.data<float>(), rows, depth, eps, false);
+    metal::synchronize();
+
+    expect_storage_eq(sum.to_float32(), sum_ref.to_float32(), tol);
+    expect_storage_eq(normed.to_float32(), normed_ref.to_float32(), tol);
+  }
+}
+
 TEST_F(MetalTest, RotaryMatchesCPU) {
   // input is [batch, max_time, depth]; with is_transposed=true, max_time = dim(-2).
   const std::vector<float> in_vec = {0.1f, 0.2f, 0.3f, 0.4f, -0.5f, 0.6f, -0.7f, 0.8f};
@@ -362,6 +397,49 @@ TEST_F(MetalTest, DISABLED_BenchmarkReduction) {
 
       std::cout << "  rows=" << s.rows << " depth=" << s.depth << "  " << label
                 << ":  SoftMax " << sm << "  RMSNorm " << rn << "  LayerNorm " << ln << "  ms\n";
+    };
+    bench("fp32", DataType::FLOAT32);
+    bench("fp16", DataType::FLOAT16);
+    std::cout << "\n";
+  }
+}
+
+// Fusion A/B: residual-add + RMSNorm as two ops (ops::Add then ops::RMSNorm, two launches)
+// vs the single fused metal::add_rms_norm. The fused kernel removes one launch and one
+// device read pass; this measures whether that beats the two-op sequence on real shapes.
+TEST_F(MetalTest, DISABLED_BenchmarkAddRMSNorm) {
+  std::cout << "\n=== residual-Add + RMSNorm: two ops vs fused (ms/iter, speedup) ===\n";
+  struct Shape { dim_t rows; dim_t depth; };
+  for (Shape s : {Shape{16384, 512}, Shape{8192, 896}, Shape{4096, 2048}}) {
+    const std::vector<float> xv(size_t(s.rows) * s.depth, 0.01f);
+    const std::vector<float> gv(s.depth, 1.0f);
+    const int iters = 30;
+
+    auto bench = [&](const std::string& label, DataType dt) {
+      StorageView a = StorageView({s.rows, s.depth}, xv, Device::METAL).to(dt);
+      StorageView b = StorageView({s.rows, s.depth}, xv, Device::METAL).to(dt);
+      StorageView g = StorageView({s.depth}, gv, Device::METAL).to(dt);
+      StorageView sum(dt, Device::METAL); sum.resize_as(a);
+      StorageView normed(dt, Device::METAL); normed.resize_as(a);
+
+      const ops::Add add;
+      const ops::RMSNorm rms_norm;
+      const double two = time_ms(iters, [&] {
+        add(a, b, sum);
+        rms_norm(g, sum, normed);
+        synchronize_device(Device::METAL, 0);
+      });
+      const double fused = time_ms(iters, [&] {
+        if (dt == DataType::FLOAT16)
+          metal::add_rms_norm(a.data<float16_t>(), b.data<float16_t>(), g.data<float16_t>(),
+                              sum.data<float16_t>(), normed.data<float16_t>(), s.rows, s.depth, 1e-6f, false);
+        else
+          metal::add_rms_norm(a.data<float>(), b.data<float>(), g.data<float>(),
+                              sum.data<float>(), normed.data<float>(), s.rows, s.depth, 1e-6f, false);
+        synchronize_device(Device::METAL, 0);
+      });
+      std::cout << "  rows=" << s.rows << " depth=" << s.depth << "  " << label
+                << ":  two-op " << two << "  fused " << fused << "  (" << (two / fused) << "x)\n";
     };
     bench("fp32", DataType::FLOAT32);
     bench("fp16", DataType::FLOAT16);
