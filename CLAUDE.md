@@ -23,12 +23,20 @@ sudo make install && sudo ldconfig
 
 Requires a C++17 compiler and CMake ≥ 3.15. Defaults to the Intel MKL CPU backend (`WITH_MKL=ON`), which must be installed separately.
 
+**On Apple Silicon** the MKL default fails (x86-only) and so does the default Intel OpenMP runtime. Build with:
+
+```bash
+cmake .. -DWITH_MKL=OFF -DWITH_ACCELERATE=ON -DOPENMP_RUNTIME=NONE -DBUILD_TESTS=ON
+# add -DWITH_METAL=ON for the Metal GPU backend
+```
+
 Key CMake options (see `docs/installation.md` for the full table):
 
 | Option                                                                      | Default  | Purpose                                                                            |
 | --------------------------------------------------------------------------- | -------- | ---------------------------------------------------------------------------------- |
 | `WITH_CUDA` / `WITH_CUDNN`                                                  | OFF      | CUDA / cuDNN GPU backend                                                           |
 | `WITH_HIP`                                                                  | OFF      | AMD ROCm GPU backend                                                               |
+| `WITH_METAL`                                                                | OFF      | Apple Metal GPU backend (Apple Silicon only) — see `METAL_BACKEND.md`              |
 | `WITH_MKL` / `WITH_DNNL` / `WITH_OPENBLAS` / `WITH_RUY` / `WITH_ACCELERATE` | MKL only | CPU compute backends                                                               |
 | `WITH_TENSOR_PARALLEL`                                                      | OFF      | NCCL + MPI for multi-GPU tensor parallelism                                        |
 | `WITH_FLASH_ATTN`                                                           | OFF      | Flash Attention 2                                                                  |
@@ -82,6 +90,8 @@ The CLI (`cli/translator.cc`, installed as `ct2-translator`) carries two flags m
 - `--log_throughput` — target tokens/second on stderr (the metric to compare runs; higher is better).
 - `--log_profiling` — per-function execution profile (requires `ENABLE_PROFILING=ON`).
 
+Metal micro-benchmarks live in `tests/metal_test.cc` as `DISABLED_Benchmark*` cases; run with `--gtest_also_run_disabled_tests --gtest_filter='*Benchmark*'`. Results and analysis are in `METAL_BENCHMARKS.md`.
+
 ## Architecture
 
 ### Abstraction layers (lowest → highest)
@@ -111,6 +121,15 @@ src/ops/my_op_gpu.cu              # CUDA implementation
 ```
 
 Dispatch machinery lives in `src/dispatch.h`, `src/device_dispatch.h`, `src/type_dispatch.h`. Runtime CPU ISA selection is in `src/cpu/cpu_isa.*` and `src/cpu/cpu_info.*` (vectorized paths in `src/cpu/vec_avx.h`, `vec_avx512.h`, `vec_neon.h`). When `ENABLE_CPU_DISPATCH=ON` one binary holds several ISA variants chosen at runtime.
+
+### Apple Metal backend (`Device::METAL`)
+
+A GPU backend for Apple Silicon, in `src/metal/` (Objective-C++ `.mm` + MSL kernels in `kernels/kernels_msl.h`). **Read `METAL_BACKEND.md` before touching it** — it has the full design, file map, milestone status, and contributor gotchas; `METAL_BENCHMARKS.md` has perf numbers. Unlike AMD HIP (which reuses the CUDA `.cu` path), Metal is a genuinely separate backend. The load-bearing design choices a change must respect:
+
+- **It does NOT add `Device::METAL` as a real `DEVICE_CASE`.** Doing so would force `primitives<Device::METAL>`/`compute<Device::METAL,T>` to be instantiated at ~50 dispatch sites and break the link. Instead `device_dispatch.h` binds the METAL dispatch case to `constexpr Device D = Device::CPU` — the CPU kernels run correctly on Metal-resident data because Apple Silicon has **unified memory** (a shared-storage `MTLBuffer`'s `contents` pointer is CPU-addressable and satisfies the existing pointer-based `Allocator`/`StorageView` contract).
+- **GPU kernels are added by targeted routing**, not by flipping a switch: an op checks `x.device() == Device::METAL` at the `operator()` level and calls a `metal::` entry point (returning before the generic dispatch), else falls through to the CPU reference. Parity is verified by the existing op suite running on `Device::METAL` (`tests/ops_test.cc` etc. are parameterized over it; Metal-specific tests are in `tests/metal_test.cc`).
+- **Allocation/device-index must NOT follow the CPU binding** — `src/allocator.cc` and `src/devices.cc` early-return for `Device::METAL` so Metal StorageViews get real `MTLBuffer`s, not CPU memory.
+- The forward pass (GEMM via MPS, softmax, norms, rotary, gather, bias+activation, mul) runs on the GPU in fp32 and fp16; a full transformer runs end-to-end matching CPU output. Sampling/conv/etc. run via the CPU reference. The current perf bottleneck is **per-op command-buffer sync** (one `commit`+`waitUntilCompleted` per op) — see the benchmarks doc.
 
 ### Python side: converters and specs
 
