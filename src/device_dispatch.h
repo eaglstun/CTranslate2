@@ -4,6 +4,10 @@
 
 #include "ctranslate2/devices.h"
 
+#ifdef CT2_WITH_METAL
+#  include "metal/utils.h"
+#endif
+
 #define UNSUPPORTED_DEVICE_CASE(DEVICE)                       \
   case DEVICE: {                                              \
     throw std::runtime_error("unsupported device " #DEVICE);  \
@@ -28,8 +32,12 @@
 // Metal kernels via targeted routing. When CT2_WITH_METAL is not defined, Metal is an
 // explicit unsupported case (also silences -Wswitch).
 #ifdef CT2_WITH_METAL
+// Before running the CPU reference on Metal-resident memory, flush any pending GPU work so
+// the CPU sees up-to-date data (no-op when nothing is queued). This is the coherence point
+// that makes command-buffer batching safe.
 #  define METAL_DEVICE_CASE(STMTS)              \
   case Device::METAL: {                         \
+    ctranslate2::metal::flush();                \
     constexpr Device D = Device::CPU;           \
     STMTS;                                       \
     break;                                       \

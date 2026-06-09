@@ -79,14 +79,13 @@ namespace ctranslate2 {
         const BufferRange b_buffer = buffer_and_offset(b);
         const BufferRange c_buffer = buffer_and_offset(c);
 
-        id<MTLCommandBuffer> command_buffer = [get_command_queue() commandBuffer];
+        id<MTLCommandBuffer> command_buffer = new_command_buffer();
         encode_gemm(command_buffer, transpose_a, transpose_b, m, n, k, alpha, beta,
                     a_buffer.buffer, a_buffer.offset, lda,
                     b_buffer.buffer, b_buffer.offset, ldb,
                     c_buffer.buffer, c_buffer.offset, ldc,
                     element_size, data_type);
-        [command_buffer commit];
-        [command_buffer waitUntilCompleted];
+        commit_command_buffer(command_buffer);
       }
 
       template <typename T>
@@ -103,7 +102,7 @@ namespace ctranslate2 {
         const BufferRange b_buffer = buffer_and_offset(b);
         const BufferRange c_buffer = buffer_and_offset(c);
 
-        id<MTLCommandBuffer> command_buffer = [get_command_queue() commandBuffer];
+        id<MTLCommandBuffer> command_buffer = new_command_buffer();
         for (dim_t i = 0; i < batch_size; ++i) {
           encode_gemm(command_buffer, transpose_a, transpose_b, m, n, k, alpha, beta,
                       a_buffer.buffer, a_buffer.offset + i * stridea * element_size, lda,
@@ -111,8 +110,7 @@ namespace ctranslate2 {
                       c_buffer.buffer, c_buffer.offset + i * stridec * element_size, ldc,
                       element_size, data_type);
         }
-        [command_buffer commit];
-        [command_buffer waitUntilCompleted];
+        commit_command_buffer(command_buffer);
       }
 
     }

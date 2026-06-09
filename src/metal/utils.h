@@ -14,9 +14,11 @@ namespace ctranslate2 {
     // Number of usable Metal devices (0 or 1 in the current single-device model).
     int get_gpu_count();
 
-    // Blocks until all submitted Metal work has completed. Ops currently commit and
-    // wait synchronously, so this is a no-op today, but callers should not rely on
-    // that and should keep calling it where the CUDA backend synchronizes.
+    // Commits the current thread's open command buffer (if any) and blocks until it
+    // completes. This is the single point that makes pending GPU writes visible to the
+    // CPU; it is called before any CPU access to Metal-resident memory. synchronize() is
+    // an alias kept for parity with the CUDA backend's naming.
+    void flush();
     void synchronize();
 
   }

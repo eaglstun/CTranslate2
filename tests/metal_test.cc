@@ -63,6 +63,7 @@ TEST_F(MetalTest, ElementwiseAdd) {
   std::memcpy(b.data<float>(), b_host.data(), b_host.size() * sizeof(float));
 
   metal::add(a.data<float>(), b.data<float>(), c.data<float>(), a_host.size());
+  metal::synchronize();  // GPU work is batched; flush before reading on the host.
 
   std::vector<float> result(a_host.size());
   std::memcpy(result.data(), c.data<float>(), a_host.size() * sizeof(float));
@@ -247,7 +248,8 @@ TEST_F(MetalTest, DISABLED_BenchmarkGemm) {
       StorageView b = StorageView({n, n}, bv, dev).to(dt);
       StorageView c(dt, dev);
       const ops::MatMul mm;
-      const double ms = time_ms(iters, [&] { mm(a, b, c); });
+      // Flush each iteration so we measure GPU execution, not just command encoding.
+      const double ms = time_ms(iters, [&] { mm(a, b, c); synchronize_device(dev, 0); });
       const double gflops = 2.0 * double(n) * n * n / (ms * 1e6);
       std::cout << "  n=" << n << "  " << label << ":  " << ms << " ms,  "
                 << gflops << " GFLOPS\n";

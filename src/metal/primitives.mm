@@ -16,7 +16,7 @@ namespace ctranslate2 {
 
       id<MTLComputePipelineState> pso = get_pipeline("ct2_add_float");
 
-      id<MTLCommandBuffer> command_buffer = [get_command_queue() commandBuffer];
+      id<MTLCommandBuffer> command_buffer = new_command_buffer();
       id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
       [encoder setComputePipelineState:pso];
       [encoder setBuffer:a_buffer.buffer offset:a_buffer.offset atIndex:0];
@@ -37,8 +37,7 @@ namespace ctranslate2 {
       [encoder dispatchThreads:grid threadsPerThreadgroup:group];
       [encoder endEncoding];
 
-      [command_buffer commit];
-      [command_buffer waitUntilCompleted];
+      commit_command_buffer(command_buffer);
     }
 
     // Must match CT2_SOFTMAX_TG in kernels_msl.h.
@@ -64,7 +63,7 @@ namespace ctranslate2 {
 
         id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
 
-        id<MTLCommandBuffer> command_buffer = [get_command_queue() commandBuffer];
+        id<MTLCommandBuffer> command_buffer = new_command_buffer();
         id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
         [encoder setComputePipelineState:pso];
         [encoder setBuffer:in_buffer.buffer offset:in_buffer.offset atIndex:0];
@@ -83,8 +82,7 @@ namespace ctranslate2 {
         [encoder dispatchThreadgroups:grid threadsPerThreadgroup:group];
         [encoder endEncoding];
 
-        [command_buffer commit];
-        [command_buffer waitUntilCompleted];
+        commit_command_buffer(command_buffer);
       }
     }
 
@@ -121,7 +119,7 @@ namespace ctranslate2 {
         const BufferRange out_buffer = buffer_and_offset(output);
 
         id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
-        id<MTLCommandBuffer> command_buffer = [get_command_queue() commandBuffer];
+        id<MTLCommandBuffer> command_buffer = new_command_buffer();
         id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
         [encoder setComputePipelineState:pso];
         [encoder setBuffer:in_buffer.buffer offset:in_buffer.offset atIndex:0];
@@ -137,8 +135,7 @@ namespace ctranslate2 {
         const MTLSize group = MTLSizeMake(kNormThreadgroup, 1, 1);
         [encoder dispatchThreadgroups:grid threadsPerThreadgroup:group];
         [encoder endEncoding];
-        [command_buffer commit];
-        [command_buffer waitUntilCompleted];
+        commit_command_buffer(command_buffer);
       }
 
       void layer_norm_impl(const char* pipeline_name,
@@ -153,7 +150,7 @@ namespace ctranslate2 {
         const BufferRange out_buffer = buffer_and_offset(output);
 
         id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
-        id<MTLCommandBuffer> command_buffer = [get_command_queue() commandBuffer];
+        id<MTLCommandBuffer> command_buffer = new_command_buffer();
         id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
         [encoder setComputePipelineState:pso];
         [encoder setBuffer:in_buffer.buffer offset:in_buffer.offset atIndex:0];
@@ -168,8 +165,7 @@ namespace ctranslate2 {
         const MTLSize group = MTLSizeMake(kNormThreadgroup, 1, 1);
         [encoder dispatchThreadgroups:grid threadsPerThreadgroup:group];
         [encoder endEncoding];
-        [command_buffer commit];
-        [command_buffer waitUntilCompleted];
+        commit_command_buffer(command_buffer);
       }
     }
 
@@ -208,7 +204,7 @@ namespace ctranslate2 {
         const BufferRange out_buffer = buffer_and_offset(output);
 
         id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
-        id<MTLCommandBuffer> command_buffer = [get_command_queue() commandBuffer];
+        id<MTLCommandBuffer> command_buffer = new_command_buffer();
         id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
         [encoder setComputePipelineState:pso];
         [encoder setBuffer:in_buffer.buffer offset:in_buffer.offset atIndex:0];
@@ -229,8 +225,7 @@ namespace ctranslate2 {
         [encoder dispatchThreads:MTLSizeMake(total, 1, 1)
               threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
         [encoder endEncoding];
-        [command_buffer commit];
-        [command_buffer waitUntilCompleted];
+        commit_command_buffer(command_buffer);
       }
     }
 
@@ -262,7 +257,7 @@ namespace ctranslate2 {
         const BufferRange res_buffer = residual ? buffer_and_offset(residual) : value_buffer;
 
         id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
-        id<MTLCommandBuffer> command_buffer = [get_command_queue() commandBuffer];
+        id<MTLCommandBuffer> command_buffer = new_command_buffer();
         id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
         [encoder setComputePipelineState:pso];
         [encoder setBuffer:value_buffer.buffer offset:value_buffer.offset atIndex:0];
@@ -280,8 +275,7 @@ namespace ctranslate2 {
         [encoder dispatchThreads:MTLSizeMake(size, 1, 1)
               threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
         [encoder endEncoding];
-        [command_buffer commit];
-        [command_buffer waitUntilCompleted];
+        commit_command_buffer(command_buffer);
       }
     }
 
@@ -304,7 +298,7 @@ namespace ctranslate2 {
         const BufferRange out_buffer = buffer_and_offset(output);
 
         id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
-        id<MTLCommandBuffer> command_buffer = [get_command_queue() commandBuffer];
+        id<MTLCommandBuffer> command_buffer = new_command_buffer();
         id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
         [encoder setComputePipelineState:pso];
         [encoder setBuffer:in_buffer.buffer offset:in_buffer.offset atIndex:0];
@@ -317,8 +311,7 @@ namespace ctranslate2 {
         [encoder dispatchThreads:MTLSizeMake(size, 1, 1)
               threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
         [encoder endEncoding];
-        [command_buffer commit];
-        [command_buffer waitUntilCompleted];
+        commit_command_buffer(command_buffer);
       }
 
       void mul_impl(const char* pipeline_name, const void* a, const void* b, void* c,
@@ -331,7 +324,7 @@ namespace ctranslate2 {
         const BufferRange b_buffer = b_is_scalar ? a_buffer : buffer_and_offset(b);
 
         id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
-        id<MTLCommandBuffer> command_buffer = [get_command_queue() commandBuffer];
+        id<MTLCommandBuffer> command_buffer = new_command_buffer();
         id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
         [encoder setComputePipelineState:pso];
         [encoder setBuffer:a_buffer.buffer offset:a_buffer.offset atIndex:0];
@@ -346,8 +339,7 @@ namespace ctranslate2 {
         [encoder dispatchThreads:MTLSizeMake(size, 1, 1)
               threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
         [encoder endEncoding];
-        [command_buffer commit];
-        [command_buffer waitUntilCompleted];
+        commit_command_buffer(command_buffer);
       }
     }
 
@@ -379,7 +371,7 @@ namespace ctranslate2 {
       const BufferRange out_buffer = buffer_and_offset(output);
 
       id<MTLComputePipelineState> pso = get_pipeline("ct2_gather_bytes");
-      id<MTLCommandBuffer> command_buffer = [get_command_queue() commandBuffer];
+      id<MTLCommandBuffer> command_buffer = new_command_buffer();
       id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
       [encoder setComputePipelineState:pso];
       [encoder setBuffer:data_buffer.buffer offset:data_buffer.offset atIndex:0];
@@ -397,8 +389,7 @@ namespace ctranslate2 {
       [encoder dispatchThreads:MTLSizeMake(num_indices, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
       [encoder endEncoding];
-      [command_buffer commit];
-      [command_buffer waitUntilCompleted];
+      commit_command_buffer(command_buffer);
     }
 
   }

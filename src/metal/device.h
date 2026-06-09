@@ -15,6 +15,13 @@ namespace ctranslate2 {
     // The shared command queue used to submit work.
     id<MTLCommandQueue> get_command_queue();
 
+    // Create a fresh command buffer for an op to encode into.
+    id<MTLCommandBuffer> new_command_buffer();
+
+    // Commit a command buffer asynchronously (no wait) and record it as the global
+    // last-committed buffer that metal::flush() (see utils.h) waits on.
+    void commit_command_buffer(id<MTLCommandBuffer> command_buffer);
+
     // Returns (and lazily creates + caches) the compute pipeline state for the kernel
     // function of the given name from the embedded shader library.
     id<MTLComputePipelineState> get_pipeline(const char* function_name);

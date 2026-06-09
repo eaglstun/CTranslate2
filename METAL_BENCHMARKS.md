@@ -33,48 +33,50 @@ per-call dispatch overhead (command buffer commit + `waitUntilCompleted` + a fre
 
 ## End-to-end translation (batch of 32, tiny transliteration model)
 
-ms per batch (lower is better):
+ms per batch (lower is better). "Sync per op" is the original commit+wait design; "Batched"
+removes the per-op block (commit asynchronously, flush only before a CPU read).
 
-|            | ms/batch |
-| ---------- | -------- |
-| CPU fp32   | 14.5     |
-| Metal fp32 | 2419     |
-| Metal fp16 | 1493     |
+|            | sync per op | batched  | CPU baseline |
+| ---------- | ----------- | -------- | ------------ |
+| Metal fp32 | 2419        | **2015** | 14           |
+| Metal fp16 | 1493        | **1183** | 14           |
 
-**Read:** Metal is dramatically _slower_ here — and this is expected and informative. The
-test model is tiny (a char-level transliteration Transformer) whose decode loop issues
-many hundreds of _small_ ops. Every op currently does a synchronous GPU round-trip
-(commit + block-until-complete), so the workload is pure latency overhead, not compute.
-The CPU runs the same tiny ops with no dispatch barrier and wins by ~100×.
+**Read:** Metal is dramatically _slower_ here — expected and informative. The test model is
+tiny (a char-level transliteration Transformer) whose decode loop issues many hundreds of
+_small_ ops. Batching removed the per-op block and helped ~17–21%, but did not close the
+gap, for two reasons covered in Analysis. The CPU runs the same tiny ops with no GPU API in
+the way and wins by ~100×.
 
 ## Analysis
 
-The two results tell one story: **the kernels are fast, the dispatch model is not.**
+**The kernels are fast (see the GEMM table); the per-op overhead on a tiny model is not.**
 
-- Raw compute is healthy — MPS fp16 GEMM hits ~12 TFLOPS at n=2048 and beats the CPU
-  by 3.7×. The math is on the GPU and it's quick.
-- The bottleneck is **per-op synchronization**. Each op commits its own command buffer
-  and calls `waitUntilCompleted`, forcing a CPU↔GPU round-trip per op. For large GEMMs
-  the compute amortizes it; for a decode loop full of tiny ops it's ~all overhead.
+- Raw compute is healthy — MPS fp16 GEMM hits ~12 TFLOPS at n=2048 and beats the CPU by
+  3.7×. The math is on the GPU and it's quick.
+- Command-buffer batching (done) removed the per-op `waitUntilCompleted` block and bought
+  ~20% on end-to-end. But two costs remain dominant for the tiny model:
+  1. **Per-step flushes from CPU-reference ops.** The decode loop still runs some ops on
+     the CPU reference — notably the KV-cache `Concat` every step — and each forces a
+     flush (GPU sync) before it reads. That re-serializes the pipeline several times per
+     step.
+  2. **Fixed per-op GPU-API overhead.** Each op creates a command buffer and (for GEMM) a
+     fresh `MPSMatrixMultiplication`, then commits. At microsecond-scale compute, that
+     fixed cost dominates.
 
-This is a deliberate correctness-first baseline (M1–M10 prioritized "provably correct on
-real models"). The performance work is well-scoped and independent of correctness:
+Remaining performance levers, in rough priority:
 
-1. **Batch command buffers** — encode many ops into one command buffer and synchronize
-   once per layer/step instead of once per op. This is the single highest-impact change
-   for end-to-end latency.
-2. **Don't block per op** — only `waitUntilCompleted` when the CPU actually needs the
-   data (e.g. before sampling reads logits). Let the GPU pipeline ops.
-3. **Reuse MPS objects / pipeline state** — avoid allocating a new
-   `MPSMatrixMultiplication` per GEMM call.
-4. **Offline `.metallib`** — removes the first-use shader-compile cost.
+1. **Graduate the per-step CPU-reference ops to GPU kernels** (Concat/Split for the KV
+   cache first) so a decode step batches without intermediate flushes.
+2. **Reuse MPS objects / pipeline state** — avoid allocating a new
+   `MPSMatrixMultiplication` per GEMM call; cache encoders.
+3. **Offline `.metallib`** — removes the first-use shader-compile cost.
 
-Expectation after batching: the end-to-end gap should close sharply (the per-op barrier
-is the 100× factor), and larger models — where ops are bigger and the GEMM share is
-higher — should show the GPU/fp16 advantage that the n≥1024 GEMM numbers already prove.
+The GEMM table already proves the upside: a real LLM (large hidden size, GEMM-dominated,
+fewer/bigger ops) sits at the favorable end and should show the fp16 advantage. This tiny
+model is the worst case for any GPU backend.
 
 ## Caveats
 
-- Tiny model + tiny ops is the worst case for the current design; a real LLM (large
-  hidden size, big GEMMs) sits much closer to the favorable end of the GEMM table.
+- Tiny model + tiny ops is the worst case; a real LLM (large hidden size, big GEMMs) sits
+  much closer to the favorable end of the GEMM table.
 - Numbers are single-run averages on a warm machine; treat as indicative, not precise.

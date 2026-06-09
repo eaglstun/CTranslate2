@@ -105,9 +105,43 @@ namespace ctranslate2 {
       return has_gpu() ? 1 : 0;
     }
 
+    // Asynchronous submission. Each Metal op encodes its own command buffer and commits it
+    // WITHOUT waiting — so consecutive GPU ops pipeline instead of forcing a CPU<->GPU
+    // round-trip per op. The single command queue executes committed buffers in FIFO order,
+    // so the most-recently-committed buffer completing implies all prior work is done.
+    // flush() waits on that buffer; it is called before any CPU access to Metal memory
+    // (CPU-reference ops via METAL_DEVICE_CASE, synchronize, host copies). A GLOBAL (not
+    // thread-local) last-committed handle is required because ops may be issued from worker
+    // threads (e.g. Conv1D's parallel_for) while a different thread performs the read.
+    static std::mutex g_commit_mutex;
+    static id<MTLCommandBuffer> g_last_committed = nil;
+
+    id<MTLCommandBuffer> new_command_buffer() {
+      return [get_command_queue() commandBuffer];
+    }
+
+    void commit_command_buffer(id<MTLCommandBuffer> command_buffer) {
+      [command_buffer commit];
+      std::lock_guard<std::mutex> lock(g_commit_mutex);
+      [command_buffer retain];
+      [g_last_committed release];
+      g_last_committed = command_buffer;
+    }
+
+    void flush() {
+      id<MTLCommandBuffer> to_wait = nil;
+      {
+        std::lock_guard<std::mutex> lock(g_commit_mutex);
+        to_wait = [g_last_committed retain];
+      }
+      if (to_wait) {
+        [to_wait waitUntilCompleted];
+        [to_wait release];
+      }
+    }
+
     void synchronize() {
-      // Ops currently commit a command buffer and wait on it synchronously, so there is
-      // no outstanding asynchronous work to flush. Kept for parity with the CUDA backend.
+      flush();
     }
 
     id<MTLDevice> get_metal_device() {
