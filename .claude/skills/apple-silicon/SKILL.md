@@ -45,6 +45,14 @@ are easy to get wrong from memory.**
   their current 256-thread tree reductions. \_Read when writing or optimizing a reduction
   kernel in `kernels_msl.h`.*
 
+- **[references/math-functions-and-numeric-parity.md](references/math-functions-and-numeric-parity.md)**
+  — MSL math functions (`sqrt`/`rsqrt`/`divide`/`fma`/`exp`/`log`; no `erf`) and the
+  fast-vs-precise numeric reality: the library compiles with DEFAULT FAST MATH, under
+  which `sqrt` is `x*rsqrt(x)` and FMA contracts — so CPU parity rides on tolerance, the
+  `1.0f/sqrt` (not `rsqrt`) spelling, and float-accumulated reductions. Includes the ULP
+  tables and the `mathMode = Safe` lever. _Read when writing/debugging a norm, softmax,
+  or any reduction kernel whose output must match the CPU reference._
+
 - **[references/mps-matrix-multiplication.md](references/mps-matrix-multiplication.md)**
   — `MPSMatrixMultiplication` for GPU GEMM: `C = α·op(A)·op(B) + β·C`, initializer
   params, `encode(commandBuffer:…)`, `MPSMatrix`/`MPSMatrixDescriptor` (row-major,
@@ -91,8 +99,8 @@ Don't pre-build speculatively — pull on demand, same discipline as the rest of
 - **§6.16 Atomic Functions** (+ §6.16.1 memory order, §6.16.3 fences) — needed for any kernel
   that accumulates across threadgroups (e.g. a reduction writing partials, as in the
   spec's own reduce example).
-- **§6.6 Math Functions** — the authoritative list of what MSL provides (and the home of the
-  **no-`erf`** gotcha); worth a reference enumerating available vs missing math builtins.
+- ~~**§6.6 Math Functions**~~ — DONE: see `references/math-functions-and-numeric-parity.md`
+  (math builtins, no-`erf`, fast-vs-precise ULP tables, the fast-math parity trap).
 - **§6.10.1 / §4.4.1** Threadgroup & SIMD-group **synchronization** (barriers, `mem_flags`,
   the SIMD-group model) — partially covered in storage-and-synchronization.md; promote to
   its own reference if barrier semantics get hairy.

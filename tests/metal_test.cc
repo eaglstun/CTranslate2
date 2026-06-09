@@ -517,15 +517,19 @@ TEST_F(MetalTest, DISABLED_BenchmarkLLM) {
   // per scope, so absolute times are inflated, but the fp32-vs-fp16 comparison is apples to
   // apples. Set CT2_LLM_PROFILE=1.
   if (std::getenv("CT2_LLM_PROFILE")) {
-    GenerationOptions options;
-    options.beam_size = 1;
-    options.sampling_topk = 1;
-    options.max_length = 1;
-    options.min_length = 1;
-    options.include_prompt_in_result = false;
-    const std::vector<std::vector<std::string>> batch(1, make_prompt(512));
-
-    auto profile = [&](const std::string& label, Device dev, ComputeType ct) {
+    // Profile two regimes: prefill-bound (long prompt, 1 step → big GEMMs dominate) and
+    // decode-bound (short prompt, many 1-token steps → tiny matrix-vector ops, op-count
+    // bound). The op breakdown differs sharply; small-op fusions (e.g. add_rms_norm) matter
+    // most in decode. The profiler flushes per scope, so absolute times are inflated.
+    auto profile = [&](const std::string& label, Device dev, ComputeType ct,
+                       size_t prompt_len, size_t steps) {
+      GenerationOptions options;
+      options.beam_size = 1;
+      options.sampling_topk = 1;
+      options.max_length = steps;
+      options.min_length = steps;
+      options.include_prompt_in_result = false;
+      const std::vector<std::vector<std::string>> batch(1, make_prompt(prompt_len));
       auto model = models::Model::load(model_dir, dev, 0, ct);
       Generator generator(model);
       auto wait = [&] {
@@ -537,11 +541,11 @@ TEST_F(MetalTest, DISABLED_BenchmarkLLM) {
       init_profiling(dev, 1);
       for (int i = 0; i < 10; ++i)
         wait();
-      std::cerr << "\n##### PROFILE " << label << " (prefill bs=1, 10 iters) #####\n";
+      std::cerr << "\n##### PROFILE " << label << " #####\n";
       dump_profiling(std::cerr);
     };
-    profile("METAL fp32", Device::METAL, ComputeType::FLOAT32);
-    profile("METAL fp16", Device::METAL, ComputeType::FLOAT16);
+    profile("METAL fp16 PREFILL (prompt 512, 1 step)", Device::METAL, ComputeType::FLOAT16, 512, 1);
+    profile("METAL fp16 DECODE (prompt 8, 64 steps)", Device::METAL, ComputeType::FLOAT16, 8, 64);
     return;
   }
 
