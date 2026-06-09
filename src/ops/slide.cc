@@ -4,6 +4,10 @@
 
 #include "dispatch.h"
 
+#ifdef CT2_WITH_METAL
+#  include "metal/primitives.h"
+#endif
+
 namespace ctranslate2 {
   namespace ops {
 
@@ -34,6 +38,29 @@ namespace ctranslate2 {
       }
 
       if (!_no_copy) {
+#ifdef CT2_WITH_METAL
+        if (input.device() == Device::METAL) {
+          const dim_t item = input.item_size();
+          const dim_t stride_axis = input.stride(axis) == 0 ? 1 : input.stride(axis);
+          const dim_t src_step = input.dim(axis) * stride_axis;  // elements
+          dim_t copy_size = 1;
+          for (dim_t i = axis; i < output.rank(); ++i)
+            copy_size *= output.dim(i);
+          if (copy_size > 0) {
+            dim_t iter_size = 1;
+            for (dim_t i = 0; i < axis; ++i)
+              iter_size *= output.dim(i);
+            const void* in_base = nullptr;
+            TYPE_DISPATCH(input.dtype(), in_base = input.data<T>());
+            void* out_ptr = nullptr;
+            TYPE_DISPATCH(output.dtype(), out_ptr = output.data<T>());
+            metal::strided_copy(static_cast<const char*>(in_base) + _index * stride_axis * item,
+                                out_ptr,
+                                copy_size * item, src_step * item, copy_size * item, iter_size);
+          }
+          return;
+        }
+#endif
         DEVICE_AND_TYPE_DISPATCH(input.device(), input.dtype(), (compute<D, T>(input, output, _index)));
       }
     }

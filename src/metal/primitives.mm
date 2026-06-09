@@ -360,6 +360,37 @@ namespace ctranslate2 {
       mul_impl("ct2_mul_half", a, b, c, size, b_is_scalar, scalar);
     }
 
+    void strided_copy(const void* src, void* dst,
+                      dim_t copy_size_bytes, dim_t src_step_bytes, dim_t dst_step_bytes,
+                      dim_t iter_size) {
+      if (iter_size == 0 || copy_size_bytes == 0)
+        return;
+
+      const BufferRange src_buffer = buffer_and_offset(src);
+      const BufferRange dst_buffer = buffer_and_offset(dst);
+      const dim_t total = iter_size * copy_size_bytes;
+
+      id<MTLComputePipelineState> pso = get_pipeline("ct2_strided_copy_bytes");
+      id<MTLCommandBuffer> command_buffer = new_command_buffer();
+      id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+      [encoder setComputePipelineState:pso];
+      [encoder setBuffer:src_buffer.buffer offset:src_buffer.offset atIndex:0];
+      [encoder setBuffer:dst_buffer.buffer offset:dst_buffer.offset atIndex:1];
+      const uint32_t copy_u = static_cast<uint32_t>(copy_size_bytes);
+      const uint32_t src_step_u = static_cast<uint32_t>(src_step_bytes);
+      const uint32_t dst_step_u = static_cast<uint32_t>(dst_step_bytes);
+      [encoder setBytes:&copy_u length:sizeof(copy_u) atIndex:2];
+      [encoder setBytes:&src_step_u length:sizeof(src_step_u) atIndex:3];
+      [encoder setBytes:&dst_step_u length:sizeof(dst_step_u) atIndex:4];
+
+      NSUInteger tg = pso.maxTotalThreadsPerThreadgroup;
+      if (tg > (NSUInteger)total) tg = total;
+      [encoder dispatchThreads:MTLSizeMake(total, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+      [encoder endEncoding];
+      commit_command_buffer(command_buffer);
+    }
+
     void gather(const void* data, const int32_t* indices, void* output,
                 dim_t copy_size_bytes, dim_t batch_stride_bytes,
                 dim_t num_indices, dim_t num_indices_per_batch) {

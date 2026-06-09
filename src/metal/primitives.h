@@ -76,6 +76,13 @@ namespace ctranslate2 {
     void mul(const float16_t* a, const float16_t* b, float16_t* c, dim_t size,
              bool b_is_scalar, float scalar);
 
+    // Type-agnostic strided copy underlying Concat/Split/Slide: for i in [0, iter_size) and
+    // d in [0, copy_size_bytes), dst[i*dst_step_bytes + d] = src[i*src_step_bytes + d]. All
+    // sizes/strides are in BYTES. Pointers must be Metal-allocated.
+    void strided_copy(const void* src, void* dst,
+                      dim_t copy_size_bytes, dim_t src_step_bytes, dim_t dst_step_bytes,
+                      dim_t iter_size);
+
     // Type-agnostic gather: output[i] = data[batch_of(i)*batch_stride + indices[i]*copy_size],
     // where copy_size and batch_stride are in BYTES. Pointers must be Metal-allocated.
     void gather(const void* data, const int32_t* indices, void* output,

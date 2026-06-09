@@ -63,17 +63,30 @@ the way and wins by ~100×.
      fresh `MPSMatrixMultiplication`, then commits. At microsecond-scale compute, that
      fixed cost dominates.
 
-Remaining performance levers, in rough priority:
+**Update — concat/split moved to GPU, e2e unchanged.** The KV-cache `Concat`/`Split`
+were graduated to GPU kernels to remove the per-step flush (lever #1 below, now done).
+Result: **no measurable e2e change** (fp32 ~2000ms, fp16 ~1180ms, same as batched). The
+hypothesis that per-step flushes dominated was wrong. The data points instead at **fixed
+per-op GPU-API overhead** — each op creates a command buffer (+ a fresh
+`MPSMatrixMultiplication` per GEMM) and commits; at ~0.4ms × thousands of tiny ops per
+decode that overhead, not synchronization, is the bottleneck. (The GPU concat/split is
+still worthwhile: it keeps the KV cache fully on-GPU and helps larger models, and it's
+parity-verified — it just isn't the perf lever here.) Note fp16 e2e is ~1.7× faster than
+fp32, so reduced memory bandwidth across all ops does help; the gap to CPU is API overhead.
 
-1. **Graduate the per-step CPU-reference ops to GPU kernels** (Concat/Split for the KV
-   cache first) so a decode step batches without intermediate flushes.
-2. **Reuse MPS objects / pipeline state** — avoid allocating a new
-   `MPSMatrixMultiplication` per GEMM call; cache encoders.
-3. **Offline `.metallib`** — removes the first-use shader-compile cost.
+Remaining performance levers, revised by the above:
+
+1. **Reduce per-op GPU-API overhead** — the actual bottleneck. Reuse
+   `MPSMatrixMultiplication`/encoder objects instead of allocating per call; consider a
+   single command buffer reused across a decode step (committed once) rather than one per
+   op. This is the change most likely to move the tiny-model number.
+2. **Offline `.metallib`** — removes the first-use shader-compile cost.
+3. ~~Graduate per-step CPU-reference ops (Concat/Split) to GPU~~ — done; did not help e2e.
 
 The GEMM table already proves the upside: a real LLM (large hidden size, GEMM-dominated,
 fewer/bigger ops) sits at the favorable end and should show the fp16 advantage. This tiny
-model is the worst case for any GPU backend.
+model is the worst case for any GPU backend — its ops are too small to amortize any
+per-op API cost, which is why CPU (no GPU API in the path) wins by ~100×.
 
 ## Caveats
 

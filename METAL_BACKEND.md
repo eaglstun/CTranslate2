@@ -186,21 +186,22 @@ comparison-based and runs on the CPU reference; it is not a hot op).
 
 ## What runs where today
 
-| Operation                                                                                                | Metal execution                                                                                               |
-| -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| GEMM / MatMul (float32 and float16)                                                                      | **GPU** — MPSMatrixMultiplication                                                                             |
-| SoftMax / LogSoftMax (float32 and float16)                                                               | **GPU** — custom kernel                                                                                       |
-| RMSNorm (float32 and float16)                                                                            | **GPU** — custom kernel                                                                                       |
-| LayerNorm, last axis + affine (float32 and float16)                                                      | **GPU** — custom kernel                                                                                       |
-| Rotary / RoPE (float32 and float16)                                                                      | **GPU** — custom kernel                                                                                       |
-| Gather (all dtypes)                                                                                      | **GPU** — custom kernel                                                                                       |
-| BiasAdd + activation, last axis (float32 and float16)                                                    | **GPU** — fused custom kernel (ReLU/GELU/GELUTanh/GELUSigmoid/Swish/Tanh/Sigmoid)                             |
-| Standalone activations: ReLU/GELU/Swish/Sigmoid/Tanh (float32 and float16)                               | **GPU** — custom kernel                                                                                       |
-| Elementwise Mul (float32 and float16)                                                                    | **GPU** — custom kernel                                                                                       |
-| Elementwise add (float32)                                                                                | **GPU** — custom kernel                                                                                       |
-| Everything else (sampling, concat/split, general-axis LayerNorm/BiasAdd, conv, int Mul, quantization, …) | CPU reference over unified memory (correct, float32 only)                                                     |
-| fp16 for ungraduated ops                                                                                 | Not yet — CPU reference is float32-only, so a full fp16 model needs those ops graduated to half kernels first |
-| bf16 compute                                                                                             | Not yet                                                                                                       |
+| Operation                                                                                  | Metal execution                                                                                               |
+| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| GEMM / MatMul (float32 and float16)                                                        | **GPU** — MPSMatrixMultiplication                                                                             |
+| SoftMax / LogSoftMax (float32 and float16)                                                 | **GPU** — custom kernel                                                                                       |
+| RMSNorm (float32 and float16)                                                              | **GPU** — custom kernel                                                                                       |
+| LayerNorm, last axis + affine (float32 and float16)                                        | **GPU** — custom kernel                                                                                       |
+| Rotary / RoPE (float32 and float16)                                                        | **GPU** — custom kernel                                                                                       |
+| Gather (all dtypes)                                                                        | **GPU** — custom kernel                                                                                       |
+| BiasAdd + activation, last axis (float32 and float16)                                      | **GPU** — fused custom kernel (ReLU/GELU/GELUTanh/GELUSigmoid/Swish/Tanh/Sigmoid)                             |
+| Standalone activations: ReLU/GELU/Swish/Sigmoid/Tanh (float32 and float16)                 | **GPU** — custom kernel                                                                                       |
+| Elementwise Mul (float32 and float16)                                                      | **GPU** — custom kernel                                                                                       |
+| Elementwise add (float32)                                                                  | **GPU** — custom kernel                                                                                       |
+| Concat / Split / Slide (all dtypes)                                                        | **GPU** — strided-copy kernel                                                                                 |
+| Everything else (sampling, general-axis LayerNorm/BiasAdd, conv, int Mul, quantization, …) | CPU reference over unified memory (correct, float32 only)                                                     |
+| fp16 for ungraduated ops                                                                   | Not yet — CPU reference is float32-only, so a full fp16 model needs those ops graduated to half kernels first |
+| bf16 compute                                                                               | Not yet                                                                                                       |
 
 ## What's left
 

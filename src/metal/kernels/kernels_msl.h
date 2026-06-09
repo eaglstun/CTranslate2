@@ -433,6 +433,19 @@ kernel void ct2_mul_half(device const half* a [[buffer(0)]],
   ct2_mul_impl<half>(a, b, c, b_is_scalar, scalar, gid);
 }
 
+// ---- Strided copy ----  type-agnostic byte copy underlying Concat/Split/Slide:
+// dst[i*dst_step + d] = src[i*src_step + d] for i in [0,iter), d in [0,copy_size) (bytes).
+kernel void ct2_strided_copy_bytes(device const uchar* src   [[buffer(0)]],
+                                   device uchar* dst          [[buffer(1)]],
+                                   constant uint& copy_size    [[buffer(2)]],
+                                   constant uint& src_step     [[buffer(3)]],
+                                   constant uint& dst_step     [[buffer(4)]],
+                                   uint g [[thread_position_in_grid]]) {
+  const uint i = g / copy_size;
+  const uint d = g - i * copy_size;
+  dst[(ulong)i * dst_step + d] = src[(ulong)i * src_step + d];
+}
+
 // ---- Gather ----  type-agnostic byte copy: one thread per gathered row.
 // output[i] = data[batch_of(i) * batch_stride + indices[i] * copy_size], copy_size bytes.
 kernel void ct2_gather_bytes(device const uchar* data    [[buffer(0)]],
