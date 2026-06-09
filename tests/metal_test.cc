@@ -268,6 +268,43 @@ TEST_F(MetalTest, AddRMSNormMatchesUnfused) {
   }
 }
 
+// Fused residual-add + LayerNorm must match the unfused Add then LayerNorm (sum + normed).
+TEST_F(MetalTest, AddLayerNormMatchesUnfused) {
+  const dim_t rows = 4, depth = 8;
+  std::vector<float> av(rows * depth), bv(rows * depth), gv(depth), bt(depth);
+  for (size_t i = 0; i < av.size(); ++i) { av[i] = 0.1f * (i % 5) - 0.2f; bv[i] = 0.05f * (i % 3); }
+  for (size_t i = 0; i < gv.size(); ++i) { gv[i] = 0.5f + 0.1f * i; bt[i] = 0.01f * i - 0.03f; }
+  const float eps = 1e-5f;
+
+  for (DataType dt : {DataType::FLOAT32, DataType::FLOAT16}) {
+    StorageView a = StorageView({rows, depth}, av, Device::METAL).to(dt);
+    StorageView b = StorageView({rows, depth}, bv, Device::METAL).to(dt);
+    StorageView g = StorageView({depth}, gv, Device::METAL).to(dt);
+    StorageView beta = StorageView({depth}, bt, Device::METAL).to(dt);
+
+    StorageView sum_ref(dt, Device::METAL);
+    ops::Add()(a, b, sum_ref);
+    StorageView normed_ref(dt, Device::METAL);
+    ops::LayerNorm(-1, eps)(beta, g, sum_ref, normed_ref);
+
+    StorageView sum(dt, Device::METAL); sum.resize_as(a);
+    StorageView normed(dt, Device::METAL); normed.resize_as(a);
+    const double tol = (dt == DataType::FLOAT16) ? 2e-2 : 1e-5;
+    if (dt == DataType::FLOAT16)
+      metal::add_layer_norm(a.data<float16_t>(), b.data<float16_t>(), g.data<float16_t>(),
+                            beta.data<float16_t>(), sum.data<float16_t>(),
+                            normed.data<float16_t>(), rows, depth, eps);
+    else
+      metal::add_layer_norm(a.data<float>(), b.data<float>(), g.data<float>(),
+                            beta.data<float>(), sum.data<float>(),
+                            normed.data<float>(), rows, depth, eps);
+    metal::synchronize();
+
+    expect_storage_eq(sum.to_float32(), sum_ref.to_float32(), tol);
+    expect_storage_eq(normed.to_float32(), normed_ref.to_float32(), tol);
+  }
+}
+
 TEST_F(MetalTest, RotaryMatchesCPU) {
   // input is [batch, max_time, depth]; with is_transposed=true, max_time = dim(-2).
   const std::vector<float> in_vec = {0.1f, 0.2f, 0.3f, 0.4f, -0.5f, 0.6f, -0.7f, 0.8f};

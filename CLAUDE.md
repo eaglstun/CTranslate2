@@ -12,6 +12,20 @@ CTranslate2 is a C++ and Python library for efficient inference with Transformer
 
 The C++ library builds first, then the Python wrapper links against it. Submodules must be present (`git submodule update --init --recursive`).
 
+### Submodules (`third_party/`)
+
+All vendored dependencies live in `third_party/` as git submodules (see `.gitmodules`):
+
+| Submodule      | Upstream            | Used for                                                                                       |
+| -------------- | ------------------- | ---------------------------------------------------------------------------------------------- |
+| `cxxopts`      | jarro2783/cxxopts   | Command-line option parsing for the CLI clients (`cli/`); required only when `BUILD_CLI=ON`.   |
+| `spdlog`       | gabime/spdlog       | Logging (header-only); linked into the core library.                                           |
+| `cpu_features` | google/cpu_features | Runtime CPU feature/ISA detection backing `ENABLE_CPU_DISPATCH` (AVX/AVX2/AVX512/NEON select). |
+| `ruy`          | google/ruy          | Optional matrix-multiplication CPU backend; only built when `WITH_RUY=ON`.                     |
+| `thrust`       | NVIDIA/cccl         | CUDA headers — Thrust/CUB/libcudacxx — for the CUDA backend (`WITH_CUDA`).                     |
+| `cutlass`      | NVIDIA/cutlass      | CUDA GEMM/templates (headers) for the CUDA backend (`WITH_CUDA`).                              |
+| `googletest`   | google/googletest   | Google Test framework for the C++ test binary; only built when `BUILD_TESTS=ON`.               |
+
 ### C++ library
 
 ```bash

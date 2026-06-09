@@ -207,6 +207,57 @@ namespace ctranslate2 {
     }
 
     namespace {
+      void add_layer_norm_impl(const char* pipeline_name,
+                               const void* a, const void* b, const void* gamma, const void* beta,
+                               void* sum_out, void* normed_out,
+                               dim_t batch_size, dim_t depth, float epsilon) {
+        if (batch_size == 0 || depth == 0)
+          return;
+
+        const BufferRange a_buffer = buffer_and_offset(a);
+        const BufferRange b_buffer = buffer_and_offset(b);
+        const BufferRange gamma_buffer = buffer_and_offset(gamma);
+        const BufferRange beta_buffer = buffer_and_offset(beta);
+        const BufferRange sum_buffer = buffer_and_offset(sum_out);
+        const BufferRange normed_buffer = buffer_and_offset(normed_out);
+
+        id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
+        id<MTLCommandBuffer> command_buffer = new_command_buffer();
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        [encoder setComputePipelineState:pso];
+        [encoder setBuffer:a_buffer.buffer offset:a_buffer.offset atIndex:0];
+        [encoder setBuffer:b_buffer.buffer offset:b_buffer.offset atIndex:1];
+        [encoder setBuffer:gamma_buffer.buffer offset:gamma_buffer.offset atIndex:2];
+        [encoder setBuffer:beta_buffer.buffer offset:beta_buffer.offset atIndex:3];
+        [encoder setBuffer:sum_buffer.buffer offset:sum_buffer.offset atIndex:4];
+        [encoder setBuffer:normed_buffer.buffer offset:normed_buffer.offset atIndex:5];
+        const uint32_t depth_u = static_cast<uint32_t>(depth);
+        [encoder setBytes:&depth_u length:sizeof(depth_u) atIndex:6];
+        [encoder setBytes:&epsilon length:sizeof(epsilon) atIndex:7];
+
+        const MTLSize grid = MTLSizeMake(static_cast<NSUInteger>(batch_size), 1, 1);
+        const MTLSize group = MTLSizeMake(kNormThreadgroup, 1, 1);
+        [encoder dispatchThreadgroups:grid threadsPerThreadgroup:group];
+        [encoder endEncoding];
+        commit_command_buffer(command_buffer);
+      }
+    }
+
+    void add_layer_norm(const float* a, const float* b, const float* gamma, const float* beta,
+                        float* sum_out, float* normed_out,
+                        dim_t batch_size, dim_t depth, float epsilon) {
+      add_layer_norm_impl("ct2_add_layer_norm_float", a, b, gamma, beta, sum_out, normed_out,
+                          batch_size, depth, epsilon);
+    }
+
+    void add_layer_norm(const float16_t* a, const float16_t* b, const float16_t* gamma,
+                        const float16_t* beta, float16_t* sum_out, float16_t* normed_out,
+                        dim_t batch_size, dim_t depth, float epsilon) {
+      add_layer_norm_impl("ct2_add_layer_norm_half", a, b, gamma, beta, sum_out, normed_out,
+                          batch_size, depth, epsilon);
+    }
+
+    namespace {
       void rotary_impl(const char* pipeline_name,
                        const void* input, const void* sin, const void* cos, void* output,
                        dim_t batch_size, dim_t max_time, dim_t ndims, dim_t depth,

@@ -6,6 +6,10 @@
 #include "cpu/backend.h"
 #include "dispatch.h"
 
+#ifdef CT2_WITH_METAL
+#  include "metal/primitives.h"
+#endif
+
 namespace ctranslate2 {
   namespace layers {
 
@@ -469,6 +473,48 @@ namespace ctranslate2 {
         const ops::RMSNorm norm_op(_epsilon, _use_residual);
         norm_op(_gamma, input, output);
       }
+    }
+
+    void LayerNorm::add_norm(const StorageView& a, const StorageView& b,
+                             StorageView& sum_out, StorageView& normed_out) const {
+#ifdef CT2_WITH_METAL
+      const Device device = a.device();
+      const DataType dtype = a.dtype();
+      if (device == Device::METAL
+          && (dtype == DataType::FLOAT32 || dtype == DataType::FLOAT16)) {
+        const dim_t depth = a.dim(-1);
+        const dim_t batch_size = a.size() / depth;
+        sum_out.resize_as(a);
+        normed_out.resize_as(a);
+        if (_beta) {  // LayerNorm
+          if (dtype == DataType::FLOAT16)
+            metal::add_layer_norm(a.data<float16_t>(), b.data<float16_t>(),
+                                  _gamma.data<float16_t>(), _beta->data<float16_t>(),
+                                  sum_out.data<float16_t>(), normed_out.data<float16_t>(),
+                                  batch_size, depth, _epsilon);
+          else
+            metal::add_layer_norm(a.data<float>(), b.data<float>(),
+                                  _gamma.data<float>(), _beta->data<float>(),
+                                  sum_out.data<float>(), normed_out.data<float>(),
+                                  batch_size, depth, _epsilon);
+        } else {  // RMSNorm
+          if (dtype == DataType::FLOAT16)
+            metal::add_rms_norm(a.data<float16_t>(), b.data<float16_t>(),
+                                _gamma.data<float16_t>(), sum_out.data<float16_t>(),
+                                normed_out.data<float16_t>(), batch_size, depth,
+                                _epsilon, _use_residual);
+          else
+            metal::add_rms_norm(a.data<float>(), b.data<float>(),
+                                _gamma.data<float>(), sum_out.data<float>(),
+                                normed_out.data<float>(), batch_size, depth,
+                                _epsilon, _use_residual);
+        }
+        return;
+      }
+#endif
+      // Fallback (all non-Metal devices / other dtypes): the equivalent unfused sequence.
+      ops::Add()(a, b, sum_out);
+      operator()(sum_out, normed_out);
     }
 
 

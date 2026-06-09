@@ -161,6 +161,13 @@ namespace ctranslate2 {
       DataType output_type() const override;
       dim_t output_size() const override;
       void operator()(const StorageView& input, StorageView& output) const;
+
+      // Fused residual-add + norm: sum_out = a + b (the new residual-stream value),
+      // normed_out = norm(sum_out). On Metal this runs as a single fused kernel (one launch,
+      // one fewer device read pass); on every other device/dtype it falls back to the
+      // equivalent Add then norm, so callers can use it unconditionally.
+      void add_norm(const StorageView& a, const StorageView& b,
+                    StorageView& sum_out, StorageView& normed_out) const;
     private:
       const StorageView* _beta;
       const StorageView& _gamma;

@@ -58,6 +58,14 @@ namespace ctranslate2 {
     void layer_norm(const float16_t* input, const float16_t* gamma, const float16_t* beta,
                     float16_t* output, dim_t batch_size, dim_t depth, float epsilon);
 
+    // Fused residual-add + LayerNorm: sum_out = a + b, normed_out = layer_norm(sum_out).
+    void add_layer_norm(const float* a, const float* b, const float* gamma, const float* beta,
+                        float* sum_out, float* normed_out,
+                        dim_t batch_size, dim_t depth, float epsilon);
+    void add_layer_norm(const float16_t* a, const float16_t* b, const float16_t* gamma,
+                        const float16_t* beta, float16_t* sum_out, float16_t* normed_out,
+                        dim_t batch_size, dim_t depth, float epsilon);
+
     // Rotary position embedding over a [batch_size * max_time, depth] tensor; sin/cos are
     // [max_time, ndims]. Elements >= ndims are copied through. float32 and float16.
     void rotary(const float* input, const float* sin, const float* cos, float* output,

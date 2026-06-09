@@ -110,11 +110,10 @@ namespace ctranslate2 {
         // post_self_attn_layernorm
         (*_post_attention_layer_norm)(context, output);
 
-        // residual + hidden_states
-        ops::Add()(input, output, output);
-
-        context = std::move(output);
-        (*_pre_feedforward_layer_norm)(context, output);
+        // Fused residual-add + pre-FFN norm: context = input + output (the residual reused
+        // below), output = pre_feedforward_layer_norm(context). On Metal this is one fused
+        // kernel; elsewhere it falls back to the equivalent Add then norm.
+        _pre_feedforward_layer_norm->add_norm(input, output, context, output);
         hidden = std::move(output);
 
         // mlp
@@ -248,9 +247,9 @@ namespace ctranslate2 {
                              offset);
         }
         (*_post_attention_layer_norm)(context, output);
-        ops::Add()(output, input, output);
 
         if (_encoder_attention) {
+            ops::Add()(output, input, output);   // self-attention residual
             StorageView cross_attn_in = output;  // save for residual
 
             StorageView query_normalized(dtype, device);
@@ -276,10 +275,14 @@ namespace ctranslate2 {
                 (*_external_post_encoder_attention_layer_norm)(context, context);
             }
             ops::Add()(context, cross_attn_in, output);
+            context = std::move(output);
+            (*_pre_feedforward_layer_norm)(context, output);
         }
-
-        context = std::move(output);
-        (*_pre_feedforward_layer_norm)(context, output);
+        else {
+            // No cross attention (decoder-only): fuse the self-attention residual add with
+            // the pre-FFN norm. context = output + input (residual), output = norm(context).
+            _pre_feedforward_layer_norm->add_norm(output, input, context, output);
+        }
         hidden = std::move(output);
 
         _ff(hidden, output);

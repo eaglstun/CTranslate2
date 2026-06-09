@@ -361,6 +361,80 @@ kernel void ct2_layer_norm_half(device const half* input  [[buffer(0)]],
   ct2_layer_norm_impl<half>(input, gamma, beta, output, depth, epsilon, row, tid, s_sum, s_sq);
 }
 
+// Fused residual-add + LayerNorm (the LayerNorm analogue of ct2_add_rms_norm). Writes
+// sum = a + b (new residual stream) and normed = (sum-mean)/sqrt(var+eps)*gamma + beta.
+// Uses 1.0f/sqrt (NOT rsqrt) so the result double-rounds like the CPU's 1.0/std::sqrt under
+// the library's fast-math default (see apple-silicon/math-functions-and-numeric-parity.md).
+template <typename T>
+inline void ct2_add_layer_norm_impl(device const T* a, device const T* b,
+                                    device const T* gamma, device const T* beta,
+                                    device T* sum_out, device T* normed_out,
+                                    uint depth, float epsilon, uint row, uint tid,
+                                    threadgroup float* s_sum, threadgroup float* s_sq) {
+  const ulong base = (ulong)row * (ulong)depth;
+  device const T* a_r = a + base;
+  device const T* b_r = b + base;
+  device T* s_r = sum_out + base;
+  device T* y_r = normed_out + base;
+
+  float local_sum = 0.0f;
+  float local_sq = 0.0f;
+  for (uint j = tid; j < depth; j += CT2_NORM_TG) {
+    const float v = (float)a_r[j] + (float)b_r[j];
+    s_r[j] = (T)v;
+    local_sum += v;
+    local_sq += v * v;
+  }
+  s_sum[tid] = local_sum;
+  s_sq[tid] = local_sq;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint s = CT2_NORM_TG / 2u; s > 0u; s >>= 1) {
+    if (tid < s) {
+      s_sum[tid] += s_sum[tid + s];
+      s_sq[tid] += s_sq[tid + s];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+
+  const float mean = s_sum[0] / (float)depth;
+  const float variance = max(s_sq[0] / (float)depth - mean * mean, 0.0f);
+  const float rstd = 1.0f / sqrt(variance + epsilon);
+  for (uint j = tid; j < depth; j += CT2_NORM_TG)
+    y_r[j] = (T)(((float)s_r[j] - mean) * rstd * (float)gamma[j] + (float)beta[j]);
+}
+
+kernel void ct2_add_layer_norm_float(device const float* a [[buffer(0)]],
+                                     device const float* b [[buffer(1)]],
+                                     device const float* gamma [[buffer(2)]],
+                                     device const float* beta  [[buffer(3)]],
+                                     device float* sum_out    [[buffer(4)]],
+                                     device float* normed_out [[buffer(5)]],
+                                     constant uint& depth     [[buffer(6)]],
+                                     constant float& epsilon  [[buffer(7)]],
+                                     uint row [[threadgroup_position_in_grid]],
+                                     uint tid [[thread_position_in_threadgroup]]) {
+  threadgroup float s_sum[CT2_NORM_TG];
+  threadgroup float s_sq[CT2_NORM_TG];
+  ct2_add_layer_norm_impl<float>(a, b, gamma, beta, sum_out, normed_out, depth, epsilon,
+                                 row, tid, s_sum, s_sq);
+}
+
+kernel void ct2_add_layer_norm_half(device const half* a [[buffer(0)]],
+                                    device const half* b [[buffer(1)]],
+                                    device const half* gamma [[buffer(2)]],
+                                    device const half* beta  [[buffer(3)]],
+                                    device half* sum_out    [[buffer(4)]],
+                                    device half* normed_out [[buffer(5)]],
+                                    constant uint& depth     [[buffer(6)]],
+                                    constant float& epsilon  [[buffer(7)]],
+                                    uint row [[threadgroup_position_in_grid]],
+                                    uint tid [[thread_position_in_threadgroup]]) {
+  threadgroup float s_sum[CT2_NORM_TG];
+  threadgroup float s_sq[CT2_NORM_TG];
+  ct2_add_layer_norm_impl<half>(a, b, gamma, beta, sum_out, normed_out, depth, epsilon,
+                                row, tid, s_sum, s_sq);
+}
+
 // ---- Rotary (RoPE) ----  one thread per element of the [batch*max_time, depth] tensor.
 // sin/cos are indexed by time only (t * ndims). Elements >= ndims are copied through.
 template <typename T>
