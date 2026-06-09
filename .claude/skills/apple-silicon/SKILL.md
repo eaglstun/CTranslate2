@@ -70,7 +70,24 @@ are easy to get wrong from memory.**
   synchronization: async commit, completion handlers, semaphores, and how that maps to
   CT2's global `flush()` / `synchronize()` model and the global-vs-thread-local
   command-buffer lesson. _Read when touching allocation, `device.mm` command-buffer
-  lifecycle, or debugging stale/garbage GPU reads._
+  lifecycle, or debugging stale/garbage GPU reads. Covers the **mechanics**; the
+  **performance reasoning** is the next reference._
+
+- **[references/dispatch-overlap-and-perf-model.md](references/dispatch-overlap-and-perf-model.md)**
+  — **The canonical home for the backend's perf conclusions.** The per-op GPU-API floor and
+  the CPU/GPU **overlap principle** (per-op commit lets the GPU run op N while the CPU
+  encodes N+1), the prefill-wins / decode-loses regime split, and the WINS (async batching
+  ~20%, MPS-object shape-cache ~35%, the fp16 `Add` fix 27×). Critically the **graveyard**:
+  command-buffer reuse — tried, parity-passed, measured −23% on bs8 prefill, REVERTED,
+  here's why — so nobody re-digs it. _Read before chasing a perf change or when tempted to
+  "batch the command buffers."_
+
+- **[references/benchmarking-and-profiling.md](references/benchmarking-and-profiling.md)**
+  — The methodology that produced every number above: the `DISABLED_Benchmark*` harness +
+  gtest flags, `CT2_LLM_MODEL` / `CT2_LLM_PROFILE` / `ENABLE_PROFILING`, and the
+  **probe-isolation trick** (commit many, flush once) that separates per-op encode cost
+  from GPU execution — how the 0.042→0.031 ms floor was found. "Profile, don't guess," with
+  the worked `Add`-regression tale. _Read before measuring a change or claiming a speedup._
 
 ## Conventions for this skill
 

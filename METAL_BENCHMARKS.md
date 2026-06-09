@@ -173,8 +173,11 @@ parenthesized values are before it:
 - **Metal's compute path is healthy.** Prefill — big compute-bound GEMMs — is where Metal
   wins (fp16 bs=8 559 ms vs CPU 1432 ms). The GPU is good at the math; the remaining loss is
   the per-op overhead of the _decode loop_, not the math.
-- **Command-buffer reuse remains the #1 lever for decode**, confirmed by a real model: the
-  decode loop is API-overhead-bound exactly as on the tiny model. Secondary follow-up: the
+- **The decode loop is API-overhead-bound** on the real model exactly as on the tiny one —
+  but command-buffer reuse is **NOT** the lever (it was tried and reverted; see lever #1 in
+  the Analysis above: batching one commit per step destroys CPU/GPU overlap, −23% bs8
+  prefill). Per-op commit is already near-optimal; the real path forward is _fewer, bigger_
+  ops per step (e.g. a fused attention kernel), not fewer commits. Secondary follow-up: the
   profiler also showed RMSNorm ~2.5× slower in fp16 (152 → 377 ms) — smaller than `Add`,
   worth a look but not the headline.
 

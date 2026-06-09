@@ -44,6 +44,15 @@ MPS, the op-graduation procedure). When a task is "how does CT2 do X" → here; 
   a norms task about block structure; the kernel/numerics side is the `apple-silicon`
   skill._
 
+- **[references/attention-and-kv-cache.md](references/attention-and-kv-cache.md)**
+  — `MultiHeadAttention` structure: fused QKV projection → `Split`, the
+  `split_heads`/`combine_heads` layout transforms, **GQA/MQA** head grouping via
+  `replicate_heads` (Tile, not a copy-loop), **RoPE** (`RotaryEmbeddings::apply`, the
+  `offset` trick), and the **KV cache grown one step per token** by `Concat` on the time dim
+  (plus sliding-window `Slide`). The structural why-so-many-tiny-ops behind the decode loop.
+  _Read for the decode-step data flow, GQA/RoPE, or before touching the cache; the per-op
+  perf consequence is the `apple-silicon` skill (`dispatch-overlap-and-perf-model.md`)._
+
 - **[references/specs-and-converters.md](references/specs-and-converters.md)**
   — The model import pipeline: external checkpoint → converter → spec (declarative
   weight/layer layout) → serialized CT2 model → C++ loader via `model_factory.cc`. The
