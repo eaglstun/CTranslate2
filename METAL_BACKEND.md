@@ -5,14 +5,14 @@ Status as of 2026-06-08. This document tracks the in-progress Apple Metal GPU ba
 
 ## TL;DR
 
-A new GPU backend for Apple Silicon. Five milestones are complete and verified on real
-hardware: tensors live on the GPU, the entire op/layer/storage test suite runs on
-`Device::METAL`, matmul runs on Metal Performance Shaders, a **full transformer
-translates end-to-end on the GPU** with output identical to the CPU, and GEMM + softmax
-also run in **float16**. GEMM, softmax, and elementwise-add execute as real GPU kernels
-today; every other operation runs correctly (float32) via a CPU-reference path over
-unified memory, ready to be graduated to GPU kernels one at
-a time behind a regression net.
+A new GPU backend for Apple Silicon. **A full encoder-decoder transformer runs
+end-to-end on Metal in both float32 and float16, with output matching the CPU.** The
+entire per-token forward pass — GEMM (MPS), softmax, RMSNorm, LayerNorm, rotary/RoPE,
+gather, bias+activation, standalone activations, and elementwise mul/add — executes as
+real GPU kernels, in both precisions, covering GPT-2-style and Llama/Mistral-style
+(SwiGLU) architectures. The remaining ops (sampling, concat/split, conv, quantization)
+run correctly via a CPU-reference path over unified memory, behind a full regression net
+(the existing op/layer/storage suites all run on `Device::METAL`).
 
 ## Why this is tractable
 
@@ -154,14 +154,32 @@ opt-in). float16 overloads of `metal::gemm`/`gemm_batch_strided` (`MPSDataTypeFl
 and a `ct2_softmax_half` kernel. Op routing moved to the `operator()` level (the generic
 dispatch throws on fp16 in a non-CUDA build), covering fp32 + fp16 in one path. Verified
 by `Float16GemmMatchesFloat32` / `Float16SoftMaxMatchesFloat32` (parity vs fp32, tol
-2e-2). **A full fp16 model is not yet possible** — it needs the remaining decoder ops
-graduated to half kernels (the CPU reference is float32-only).
+2e-2). At this milestone a full fp16 model was not yet possible (more ops needed half
+kernels); M6–M9 closed that, and M10 verified it.
+
+### ✅ M6–M9 — the rest of the forward pass
+
+Real GPU kernels (float + half) for **RMSNorm**, **LayerNorm** (last-axis affine),
+**Rotary/RoPE**, **Gather** (type-agnostic byte copy), **fused BiasAdd + activation**,
+**standalone activations** (ReLU/GELU×3/Swish/Sigmoid/Tanh), and **elementwise Mul** —
+each routed via the targeted-routing pattern and parity-checked against the CPU reference
+(the existing op-suite tests flip to GPU execution). GELU uses a `ct2_erf` approximation
+since Metal has no `erf`. The kernel library compiles lazily so a kernel bug can't break
+allocation/MPS.
+
+### ✅ M10 — fp16 inference end-to-end
+
+`MetalTest.EndToEndTranslationFloat16` loads the model with `ComputeType::FLOAT16` and
+translates entirely in fp16 on Metal, output matching CPU fp32. Running it surfaced one
+fp16 gap — `TopK` (the non-CUDA float dispatch rejects fp16) — fixed by calling the
+already-instantiated `compute<Device::CPU, float16_t, int32_t>` directly (TopK is
+comparison-based and runs on the CPU reference; it is not a hot op).
 
 ### Verification snapshot
 
-- Full METAL suite: **79 passed, 2 skipped, 0 failed** (skips = Conv1D dilation and
+- Full METAL suite: **84 passed, 2 skipped, 0 failed** (skips = Conv1D dilation and
   grouped-quantized, which the CPU reference does not implement).
-- Full suite (all devices): **266/270** — the lone failure is a pre-existing
+- Full suite (all devices): **271/275** — the lone failure is a pre-existing
   `CPU/...Conv1DGroupNoBiasQuantized` "No INT8 GEMM backend for CPU" artifact of the
   MKL-less build, unrelated to Metal.
 - CPU-only build: no new warnings introduced.

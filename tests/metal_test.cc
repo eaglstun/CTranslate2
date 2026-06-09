@@ -6,6 +6,7 @@
 #include <vector>
 
 #include <ctranslate2/devices.h>
+#include <ctranslate2/models/model.h>
 #include <ctranslate2/ops/ops.h>
 #include <ctranslate2/storage_view.h>
 #include <ctranslate2/translator.h>
@@ -89,6 +90,27 @@ TEST_F(MetalTest, EndToEndTranslation) {
     EXPECT_EQ(metal_results[i].output(), cpu_results[i].output())
         << "Metal translation diverged from CPU for input " << i;
   }
+}
+
+// Run the whole encoder-decoder in float16 on Metal: weights and activations are fp16,
+// so this exercises the integration of every fp16 Metal kernel (GEMM, softmax, layer
+// norm, bias+activation, gather, …). Requires the forward pass to be fp16-complete.
+TEST_F(MetalTest, EndToEndTranslationFloat16) {
+  const std::vector<std::vector<std::string>> inputs = {{"آ", "ت", "ز", "م", "و", "ن"}};
+
+  Translator cpu_translator(default_model_dir(), Device::CPU);
+  const auto cpu_results = cpu_translator.translate_batch(inputs);
+
+  auto model = models::Model::load(default_model_dir(), Device::METAL, 0,
+                                   ComputeType::FLOAT16);
+  Translator metal_translator(model);
+  const auto metal_results = metal_translator.translate_batch(inputs);
+
+  ASSERT_EQ(metal_results.size(), cpu_results.size());
+  EXPECT_FALSE(metal_results[0].output().empty());
+  // fp16 may diverge slightly from fp32; for this small model the decoded tokens still
+  // match. If a larger model diverges, relax this to a BLEU/overlap check.
+  EXPECT_EQ(metal_results[0].output(), cpu_results[0].output());
 }
 
 // fp16 compute on Metal: GEMM (MPSDataTypeFloat16) and softmax (half kernel) should
