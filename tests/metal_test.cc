@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <sstream>
 #include <vector>
 
 #include <cstdlib>
@@ -600,6 +601,133 @@ TEST_F(MetalTest, DISABLED_BenchmarkLLM) {
       std::cout << "\n";
     }
   }
+}
+
+// CPU-vs-Metal DECODE-PARITY gate for a real decoder-only LLM. This exercises the
+// autoregressive Generator path — rotary at nonzero positions, KV-cache append/read, the
+// per-step decode loop — which the tiny transliteration EndToEnd test does NOT cover
+// (that's encoder-decoder). Greedy + forced length = deterministic, so Metal fp32 MUST
+// reproduce CPU fp32 token-for-token; a mismatch means a Metal op is wrong, not "fp16
+// noise". This is the assertion the speed-only BenchmarkLLM lacks — it stops "fast" from
+// silently meaning "fast garbage". Point CT2_LLM_MODEL at a converted decoder dir (e.g.
+// Qwen2.5-0.5B). No decoder-only model ships in test data, so this is a manual gate via
+// env var, not a CI gate; supply a model to run it.
+TEST_F(MetalTest, DISABLED_DecodeParityLLM) {
+  const char* model_env = std::getenv("CT2_LLM_MODEL");
+  if (!model_env)
+    GTEST_SKIP() << "Set CT2_LLM_MODEL to a converted decoder-only model directory";
+  const std::string model_dir(model_env);
+
+  // Prompt selection. CAVEAT (learned the hard way): a meaningless prompt can make BOTH
+  // backends degenerate into the SAME loop, so CPU==Metal holds on garbage and the gate
+  // FALSE-PASSES. Real bugs only surface on a prompt the model actually computes over —
+  // for BOS-sensitive models (e.g. Gemma2) that means a leading <bos>. So pass a real,
+  // model-appropriate prompt via CT2_LLM_PROMPT (space-separated token pieces, e.g.
+  // "<bos> The") to make this a meaningful gate; the synthetic default below only proves
+  // the loop runs deterministically.
+  std::vector<std::string> prompt =
+      {"ing", "ion", "ent", "ate", "ation", "ort", "ame", "ist"};
+  if (const char* prompt_env = std::getenv("CT2_LLM_PROMPT")) {
+    prompt.clear();
+    std::istringstream iss(prompt_env);
+    for (std::string tok; iss >> tok;)
+      prompt.push_back(tok);
+  }
+  const size_t steps = 24;
+
+  GenerationOptions options;
+  options.beam_size = 1;
+  options.sampling_topk = 1;            // greedy / deterministic
+  options.max_length = steps;
+  options.min_length = steps;           // forbid early EOS so the decode loop runs fully
+  options.include_prompt_in_result = false;
+  const std::vector<std::vector<std::string>> batch(1, prompt);
+
+  auto gen = [&](Device dev, ComputeType ct) {
+    auto model = models::Model::load(model_dir, dev, 0, ct);
+    Generator generator(model);
+    auto futures = generator.generate_batch_async(batch, options);
+    return futures[0].get().sequences[0];
+  };
+
+  const auto cpu     = gen(Device::CPU,   ComputeType::FLOAT32);
+  const auto metal32 = gen(Device::METAL, ComputeType::FLOAT32);
+  const auto metal16 = gen(Device::METAL, ComputeType::FLOAT16);
+
+  auto prefix_match = [](const std::vector<std::string>& a, const std::vector<std::string>& b) {
+    size_t n = 0;
+    for (size_t i = 0; i < std::min(a.size(), b.size()); ++i, ++n)
+      if (a[i] != b[i]) break;
+    return n;
+  };
+  auto dump = [](const char* label, const std::vector<std::string>& s) {
+    std::cerr << "  " << label << " (" << s.size() << "): ";
+    for (auto& t : s) std::cerr << t << "|";
+    std::cerr << "\n";
+  };
+  std::cerr << "\nDecode parity (" << model_dir << "), " << steps << " greedy steps:\n";
+  dump("CPU   fp32", cpu);
+  dump("METAL fp32", metal32);
+  dump("METAL fp16", metal16);
+  std::cerr << "  fp32 prefix match: " << prefix_match(cpu, metal32) << "/" << cpu.size()
+            << "   fp16 prefix match: " << prefix_match(cpu, metal16) << "/" << cpu.size() << "\n";
+
+  // fp32 Metal runs the SAME precision as CPU, so any divergence is a wrong Metal op,
+  // not rounding. This is the real correctness gate.
+  EXPECT_EQ(metal32, cpu) << "Metal fp32 decode diverged from CPU fp32 — a Metal op is incorrect.";
+  // fp16 may flip the occasional argmax on a near-tie, but must NOT collapse (the
+  // <pad>-forever failure mode); require it to track CPU for most of the sequence.
+  EXPECT_GT(prefix_match(cpu, metal16), cpu.size() / 2)
+      << "Metal fp16 decode collapsed early (not mere rounding) — suspect a real Metal bug.";
+}
+
+// Report-only diagnostic for the fused pre_post (Gemma2-style) add_norm path. Set
+// CT2_GEMMA_MODEL to a converted Gemma2 dir. NOTE: this does NOT assert Metal==CPU because
+// Gemma2 has a SEPARATE, PRE-EXISTING Metal correctness bug — Metal emits '<pad>' forever
+// while CPU is coherent, and this reproduces with the add_norm fusion DISABLED, so it is not
+// caused by the fusion (verified 2026-06-09: fused and unfused Metal output are byte-
+// identical). The fusion itself is validated by AddRMSNorm/AddLayerNormMatchesUnfused. Once
+// the Gemma2-Metal bug is fixed, restore an EXPECT_EQ(metal32, cpu) here as the e2e gate.
+TEST_F(MetalTest, DISABLED_Gemma2PrePostParity) {
+  const char* model_env = std::getenv("CT2_GEMMA_MODEL");
+  if (!model_env)
+    GTEST_SKIP() << "Set CT2_GEMMA_MODEL to a converted Gemma2 model directory";
+  const std::string model_dir(model_env);
+
+  GenerationOptions options;
+  options.beam_size = 1;
+  options.sampling_topk = 1;            // greedy / deterministic
+  options.max_length = 24;
+  options.min_length = 24;
+  options.include_prompt_in_result = false;
+  const std::vector<std::vector<std::string>> batch(1, {"<bos>", "The"});
+
+  auto gen = [&](Device dev, ComputeType ct) {
+    auto model = models::Model::load(model_dir, dev, 0, ct);
+    Generator generator(model);
+    auto futures = generator.generate_batch_async(batch, options);
+    return futures[0].get().sequences[0];
+  };
+
+  const auto cpu = gen(Device::CPU, ComputeType::FLOAT32);
+  const auto metal32 = gen(Device::METAL, ComputeType::FLOAT32);
+  const auto metal16 = gen(Device::METAL, ComputeType::FLOAT16);
+
+  auto prefix_match = [](const std::vector<std::string>& a, const std::vector<std::string>& b) {
+    size_t n = 0;
+    for (size_t i = 0; i < std::min(a.size(), b.size()); ++i) {
+      if (a[i] != b[i]) break;
+      ++n;
+    }
+    return n;
+  };
+  std::cerr << "\nGemma2 greedy (" << cpu.size() << " tokens):\n";
+  std::cerr << "  CPU fp32   : "; for (auto& t : cpu) std::cerr << t << "|"; std::cerr << "\n";
+  std::cerr << "  METAL fp32 : "; for (auto& t : metal32) std::cerr << t << "|"; std::cerr << "\n";
+  std::cerr << "  METAL fp32 prefix match vs CPU: " << prefix_match(cpu, metal32) << "/" << cpu.size() << "\n";
+  std::cerr << "  METAL fp16 prefix match vs CPU: " << prefix_match(cpu, metal16) << "/" << cpu.size() << "\n";
+  if (metal32 != cpu)
+    std::cerr << "  (Metal != CPU: pre-existing Gemma2-on-Metal bug, NOT the add_norm fusion)\n";
 }
 
 #endif  // CT2_WITH_METAL
