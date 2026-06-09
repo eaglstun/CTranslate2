@@ -53,12 +53,10 @@ are easy to get wrong from memory.**
   tables and the `mathMode = Safe` lever. _Read when writing/debugging a norm, softmax,
   or any reduction kernel whose output must match the CPU reference._
 
-- **[references/norm-placement-in-transformers.md](references/norm-placement-in-transformers.md)**
-  — CT2-architecture, not Metal: where a norm sits in the block (pre / post / pre-post
-  "sandwich" / parallel-residual), across the three layers `specs/` → `converters/` →
-  `src/layers/transformer.cc` (verified line numbers). Placement is CPU orchestration and
-  never touches `src/metal/`. _Read for a norms task that's about block structure rather
-  than the kernel; pair with `math-functions-and-numeric-parity.md` for the kernel side._
+> Norm **placement** (pre / post / pre-post sandwich / parallel-residual) is CPU
+> orchestration, not Metal — it moved to the **`ct2-internals`** skill
+> (`norm-placement-in-transformers.md`). A norms task spans both skills: structure there,
+> kernel numerics (this skill's `math-functions-and-numeric-parity.md`) here.
 
 - **[references/mps-matrix-multiplication.md](references/mps-matrix-multiplication.md)**
   — `MPSMatrixMultiplication` for GPU GEMM: `C = α·op(A)·op(B) + β·C`, initializer

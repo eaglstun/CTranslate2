@@ -90,5 +90,6 @@ lines **1627, 1931, 2177, 3839, 3863, 4101** (verified). Standard pre-norm model
   or non-last-axis norm, that's a CPU-reference fallback, not a placement issue.
 - So a norms task that's really about _placement_ (pre/post/sandwich/parallel-residual)
   is done entirely in the three files above and never opens `src/metal/`. A norms task
-  about the _kernel_ (parity, fp16, reductions) is the inverse — see
-  `math-functions-and-numeric-parity.md` and `simd-group-functions.md`.
+  about the _kernel_ (parity, fp16, reductions) is the inverse — that lives in the
+  **`apple-silicon` skill** (`math-functions-and-numeric-parity.md` and
+  `simd-group-functions.md`), not here.
