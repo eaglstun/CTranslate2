@@ -196,6 +196,43 @@ TEST_F(MetalTest, Float16BiasAddGELUMatchesFloat32) {
   expect_storage_eq(out16.to_float32(), out32, 2e-2);
 }
 
+TEST_F(MetalTest, Float16TopPMaskMatchesFloat32) {
+  // Well-separated logits so the nucleus (top-p) set is identical in fp16 and fp32.
+  StorageView x({2, 5}, std::vector<float>{1.0, 3.0, 0.5, 2.0, 0.1,
+                                           0.2, 0.4, 2.5, 1.0, 0.3}, Device::METAL);
+  // mask of 0 is representable in fp16 (a large-negative mask would saturate to -inf).
+  ops::TopPMask topp(/*p=*/0.8f, /*mask_value=*/0.0f);
+
+  StorageView out32(Device::METAL);
+  topp(x, out32);
+
+  StorageView out16(DataType::FLOAT16, Device::METAL);
+  topp(x.to(DataType::FLOAT16), out16);
+  EXPECT_EQ(out16.dtype(), DataType::FLOAT16);
+
+  expect_storage_eq(out16.to_float32(), out32, 2e-2);
+}
+
+TEST_F(MetalTest, Float16MultinomialRuns) {
+  // Multinomial is RNG-based, so this verifies the fp16 path runs (does not throw on the
+  // non-CUDA float dispatch) and produces valid in-range samples, rather than exact parity.
+  StorageView probs({2, 4}, std::vector<float>{0.1, 0.2, 0.3, 0.4,
+                                               0.4, 0.3, 0.2, 0.1}, Device::METAL);
+  ops::Multinomial multinomial(/*sample_size=*/1);
+
+  StorageView out16(DataType::INT32, Device::METAL);
+  EXPECT_NO_THROW(multinomial(probs.to(DataType::FLOAT16), out16));
+  EXPECT_EQ(out16.dtype(), DataType::INT32);
+
+  const StorageView out_cpu = out16.to(Device::CPU);
+  EXPECT_EQ(out_cpu.size(), 2);
+  const auto* idx = out_cpu.data<int32_t>();
+  for (dim_t i = 0; i < out_cpu.size(); ++i) {
+    EXPECT_GE(idx[i], 0);
+    EXPECT_LT(idx[i], 4);
+  }
+}
+
 TEST_F(MetalTest, RotaryMatchesCPU) {
   // input is [batch, max_time, depth]; with is_transposed=true, max_time = dim(-2).
   const std::vector<float> in_vec = {0.1f, 0.2f, 0.3f, 0.4f, -0.5f, 0.6f, -0.7f, 0.8f};
@@ -294,6 +331,41 @@ TEST_F(MetalTest, DISABLED_BenchmarkGemmEncode) {
 
     std::cout << "  n=" << n << " fp16:  flush-per-iter " << per_iter
               << " ms,  batched-encode " << batched << " ms\n";
+  }
+}
+
+// Row-reduction kernels (softmax / rms_norm / layer_norm). One threadgroup per row; the
+// reduction is the cost being optimized. Representative LLM shapes: attention-score softmax
+// (many rows, key-length depth) and norms (rows = batch*seq, depth = hidden). A/B harness
+// for the SIMD-group-reduction rewrite — run before and after the kernel change.
+TEST_F(MetalTest, DISABLED_BenchmarkReduction) {
+  std::cout << "\n=== Row-reduction ops on METAL (ms/iter, flush per iter) ===\n";
+  struct Shape { dim_t rows; dim_t depth; };
+  for (Shape s : {Shape{16384, 512}, Shape{8192, 896}, Shape{4096, 2048}}) {
+    const std::vector<float> xv(size_t(s.rows) * s.depth, 0.01f);
+    const std::vector<float> gv(s.depth, 1.0f);
+    const std::vector<float> bv(s.depth, 0.0f);
+    const int iters = 30;
+
+    auto bench = [&](const std::string& label, DataType dt) {
+      StorageView x = StorageView({s.rows, s.depth}, xv, Device::METAL).to(dt);
+      StorageView g = StorageView({s.depth}, gv, Device::METAL).to(dt);
+      StorageView b = StorageView({s.depth}, bv, Device::METAL).to(dt);
+      StorageView y(dt, Device::METAL);
+
+      const ops::SoftMax softmax;
+      const double sm = time_ms(iters, [&] { softmax(x, y); synchronize_device(Device::METAL, 0); });
+      const ops::RMSNorm rms_norm;
+      const double rn = time_ms(iters, [&] { rms_norm(g, x, y); synchronize_device(Device::METAL, 0); });
+      const ops::LayerNorm layer_norm;
+      const double ln = time_ms(iters, [&] { layer_norm(b, g, x, y); synchronize_device(Device::METAL, 0); });
+
+      std::cout << "  rows=" << s.rows << " depth=" << s.depth << "  " << label
+                << ":  SoftMax " << sm << "  RMSNorm " << rn << "  LayerNorm " << ln << "  ms\n";
+    };
+    bench("fp32", DataType::FLOAT32);
+    bench("fp16", DataType::FLOAT16);
+    std::cout << "\n";
   }
 }
 

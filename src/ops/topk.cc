@@ -2,6 +2,10 @@
 
 #include "dispatch.h"
 
+#ifdef CT2_WITH_METAL
+#  include "metal/utils.h"
+#endif
+
 namespace ctranslate2 {
   namespace ops {
 
@@ -22,6 +26,9 @@ namespace ctranslate2 {
       // CPU reference over unified memory). The generic float dispatch rejects fp16 on a
       // non-CUDA build, so call the already-instantiated fp16 path directly.
       if (x.device() == Device::METAL && x.dtype() == DataType::FLOAT16) {
+        // x is produced asynchronously on the GPU; flush before the CPU reference reads it
+        // over unified memory (the coherence point METAL_DEVICE_CASE provides otherwise).
+        metal::synchronize();
         compute<Device::CPU, float16_t, int32_t>(x, values, indices);
         return;
       }
