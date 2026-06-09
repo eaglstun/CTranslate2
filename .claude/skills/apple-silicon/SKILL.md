@@ -94,6 +94,11 @@ are easy to get wrong from memory.**
 - Each reference cites its Apple source URL at the top and ends with a
   `### Relevance to the CT2 Metal backend` section connecting the API to specific files.
 - Keep SKILL.md lean: one-line pointers only. Detail lives in `references/`.
+- **Code citations here drift.** Run `bash scripts/audit-citations.sh` (`-q` for
+  problems-only) to flag missing files / out-of-range lines / ambiguous basenames; it
+  prints each cited line so you can eyeball content drift it can't auto-detect. Most refs
+  here cite by symbol/filename (drift-proof) — but a "verified on DATE" stamp dies the
+  moment the file changes, so re-run rather than trust it.
 - To add a topic from Apple's **DocC docs** (Metal framework API — `MTLDevice`,
   `MPSMatrixMultiplication`, etc.): fetch via the DocC JSON endpoint
   (`https://developer.apple.com/tutorials/data/documentation/<path>.json` — the human

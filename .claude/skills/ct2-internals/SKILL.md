@@ -70,3 +70,8 @@ MPS, the op-graduation procedure). When a task is "how does CT2 do X" → here; 
   acting on a citation. Prefer quoting a function/macro name the reader can find.
 - To add a reference: read the actual code, cite file:line, stay device-agnostic (push
   backend specifics to `apple-silicon`), add a one-line pointer above.
+- **Before trusting any `file:line` here, run `bash scripts/audit-citations.sh`** (`-q`
+  for problems-only). It flags missing files, out-of-range lines, and ambiguous basenames;
+  it CANNOT see content drift (a line that moved a few rows), so it prints each cited line
+  for a fast eyeball. A "verified on DATE" note is worthless once the file is touched again —
+  only a fresh run counts. (`transformer.cc`'s citations silently drifted ~8 lines this way.)

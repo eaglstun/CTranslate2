@@ -37,7 +37,7 @@ Where placement actually executes.
 detected at runtime by the presence of all four norm objects:
 
 ```cpp
-// transformer.cc:97  "Check if using pre_post_layer_norm pattern (T5Gemma style)"
+// layers/transformer.cc:97  "Check if using pre_post_layer_norm pattern (T5Gemma style)"
 const bool pre_post_layer_norm = _input_layer_norm && _post_attention_layer_norm
                               && _pre_feedforward_layer_norm && _post_feedforward_layer_norm;
 :101  if (pre_post_layer_norm) { ... }         // the sandwich execution path

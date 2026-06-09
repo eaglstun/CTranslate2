@@ -28,9 +28,13 @@ Two regimes fall out of that single fact:
   real LLM, and by ~90× on a tiny transliteration model. **fp16 buys almost nothing here**
   (32→35, 60→61 tok/s) because the bottleneck is API overhead, not memory bandwidth.
 
-The GEMM scaling table is the proof: CPU wins below n≈1024, Metal fp16 crosses over at
-n=1024 and hits **3.7× at n=2048**. A model's _total_ size doesn't move it between
-regimes — the _per-op_ shape does. A 500M-param model still decodes one tiny op at a time.
+The GEMM scaling table is the proof: CPU wins below n≈1024, and Metal fp16 hits a stable
+**3.7× at n=2048** — the first _dependable_ GPU win. (n=1024 sits right on the crossover
+and is a **variance trap**: re-measured 2026-06-09 it swung 0.85×–2.26× vs CPU across 4
+back-to-back runs, 2.7× spread — too small to saturate the GPU, too big for overhead to
+dominate, so don't quote it as a clean win. See `METAL_BENCHMARKS.md`.) A model's _total_
+size doesn't move it between regimes — the _per-op_ shape does. A 500M-param model still
+decodes one tiny op at a time.
 
 ## The CPU/GPU overlap principle — why per-op commit is already near-optimal
 

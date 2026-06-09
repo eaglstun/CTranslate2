@@ -25,15 +25,25 @@ Throughput in GFLOPS (higher is better), `2·n³` flops.
 | ---- | --------------------- | ---------------- | ---------------- | ----------------- |
 | 256  | 1710                  | 155              | 180              | 0.11×             |
 | 512  | 2655                  | 860              | 976              | 0.37×             |
-| 1024 | 3053                  | 2139             | 5158             | 1.69×             |
+| 1024 | 3053                  | 2139             | 5158 ⚠️          | 1.69× ⚠️          |
 | 2048 | 3231                  | 7711             | 11966            | **3.70×**         |
 
 ms/iter at n=2048: CPU 5.32, Metal fp32 2.23, Metal fp16 1.44.
 
-**Read:** the GPU wins at scale. By n=1024 Metal fp16 overtakes the CPU; at n=2048 it is
-**3.7× faster** than Accelerate and fp16 is ~1.5× the fp32 GPU rate. Below n≈1024 the
-per-call dispatch overhead (command buffer commit + `waitUntilCompleted` + a fresh
-`MPSMatrixMultiplication` object per call) dominates and the CPU wins easily.
+> ⚠️ **n=1024 is a variance trap — the 5158 / 1.69× above is one lucky draw, not a stable
+> fact.** Re-measured 2026-06-09 on the same M4 Max, n=1024 Metal fp16 swung **2395–6370
+> GFLOPS across 4 back-to-back runs (2.7× spread)** → vs-CPU anywhere from **0.85× to
+> 2.26×**. It straddles the crossover: big enough that dispatch overhead isn't everything,
+> too small to saturate the GPU, so one slow iter (clock ramp / thermal / scheduler) skews
+> the 20-iter average. n=256/512/2048 and the encode floor (below) re-confirmed cleanly the
+> same day; **only n=1024 is noisy.** Treat **n=2048 as the first _dependable_ Metal win**,
+> not n=1024.
+
+**Read:** the GPU wins at scale. By **n=2048** Metal fp16 is **3.7× faster** than
+Accelerate (a stable, repeatable result) and fp16 is ~1.5× the fp32 GPU rate; n=1024 is a
+coin-flip near the crossover (see the variance note). Below n≈1024 the per-call dispatch
+overhead (command buffer commit + `waitUntilCompleted` + a fresh `MPSMatrixMultiplication`
+object per call) dominates and the CPU wins easily.
 
 ## End-to-end translation (batch of 32, tiny transliteration model)
 
@@ -94,6 +104,11 @@ decoder repeats a few shapes per layer/step) dropped encode to ~0.031 ms and **e
 (fp32 2015→~1284, fp16 1183→~804). Caching `MPSMatrixDescriptor` on top was net-zero (the
 alloc was already cheap) and was reverted.
 
+_Re-confirmed 2026-06-09 (same M4 Max, after that day's `primitives.mm` changes): the probe
+read **0.029 ms batched-encode at n=256** (vs 0.165 ms flush-per-iter), squarely on the
+~0.031 ms post-cache floor — the encode floor is stable and the MM cache is still in effect.
+Unlike the n=1024 GEMM throughput number above, this probe reproduces tightly._
+
 Remaining performance levers, revised again:
 
 1. ~~**Reuse command buffers across ops** (one per decode step, committed once)~~ — **TRIED,
@@ -118,6 +133,33 @@ fewer/bigger ops) sits at the favorable end and should show the fp16 advantage. 
 model is the worst case for any GPU backend — its ops are too small to amortize any per-op
 API cost, which is why CPU (no GPU API in the path) still wins by ~90× even after the ~2×
 speedup.
+
+## Op fusion: residual-Add + norm (`DISABLED_BenchmarkAddRMSNorm`)
+
+The first **positive** Metal perf lever (the SIMD-group-reduction rewrite was measured dead
+— the row reductions are memory-bound, see the skill notes). Instead of optimizing _how_ a
+reduction computes, fusion cuts _op count + memory passes_: one `ct2_add_rms_norm` /
+`ct2_add_layer_norm` kernel reads `a`,`b`, writes both `sum = a+b` (the next residual) and
+`norm(sum)·γ`, vs separate `ops::Add` then `ops::RMSNorm` — one fewer launch, 4 device read
+passes → 3. Integrated into the Gemma2/T5Gemma `pre_post_layer_norm` path (byte-identical
+fused≡unfused, e2e-verified on real gemma-2-2b).
+
+Speedup (two-op / fused), **4 back-to-back runs, M4 Max, 2026-06-09** — and like the GEMM
+table, the overhead-bound cells are noisy, so this is reported as ranges, not point values:
+
+| shape (rows×depth)        | fp32 (4 runs)                 | fp16 (4 runs)                       |
+| ------------------------- | ----------------------------- | ----------------------------------- |
+| 8192×896 (typical hidden) | **~1.3× (1.27–1.39, stable)** | **~1.25× (1.16–1.31, stable)**      |
+| 4096×2048 (large depth)   | ~1.1× (1.08–1.17, stable)     | 1.2–1.8× (noisy)                    |
+| 16384×512 (many rows)     | 1.7–2.5× (win, noisy)         | **0.77–1.72× (wild: loss→big win)** |
+
+**Read:** fusion is a **real, repeatable ~1.25–1.3× at the mid-depths that match real LLM
+hidden sizes** (8192×896) — the cells to trust. The launch-overhead-bound extremes (many
+rows, and fp16 generally) swing wildly run-to-run (one fp16 run dipped to 0.77×, a loss);
+their _expected_ value is a win but any single draw is a coin-flip — do not quote them.
+The mechanism (cut launches/passes) is why it helps decode without killing CPU/GPU overlap,
+unlike command-buffer reuse — so fusion, not commit-batching, is the right lever for the
+weak decode regime. _Numbers are single-run-per-cell averages; treat as indicative._
 
 ## Real decoder LLM (Qwen2.5-0.5B, fp32 weights)
 

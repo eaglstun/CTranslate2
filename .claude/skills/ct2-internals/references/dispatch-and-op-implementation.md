@@ -28,7 +28,7 @@ src/ops/softmax_gpu.cu              # CUDA implementation
 **Header (`include/ctranslate2/ops/softmax.h`)** — pure interface. The compute kernel is a private templated method `compute<D, T>`; the header never names a device backend or guards anything with `#ifdef`:
 
 ```cpp
-// softmax.h:8-23
+// ops/softmax.h:8-23
 class SoftMax : public UnaryOp {
 public:
   SoftMax(bool log = false);
