@@ -14,13 +14,32 @@ namespace ctranslate2 {
 #include <metal_stdlib>
 using namespace metal;
 
+// Elementwise add with an optional scalar second operand (b_is_scalar): when set, every
+// element adds `scalar` instead of b[gid] (b may then be an unused dummy buffer). Compute
+// in float and cast back so half has the same rounding as the fp32 path.
+template <typename T>
+inline void ct2_add_impl(device const T* a, device const T* b, device T* c,
+                         uint b_is_scalar, float scalar, uint gid) {
+  const float bv = (b_is_scalar != 0u) ? scalar : (float)b[gid];
+  c[gid] = (T)((float)a[gid] + bv);
+}
+
 kernel void ct2_add_float(device const float* a [[buffer(0)]],
                           device const float* b [[buffer(1)]],
-                          device float* c       [[buffer(2)]],
-                          constant uint& n      [[buffer(3)]],
+                          device float* c        [[buffer(2)]],
+                          constant uint& b_is_scalar [[buffer(3)]],
+                          constant float& scalar     [[buffer(4)]],
                           uint gid [[thread_position_in_grid]]) {
-  if (gid < n)
-    c[gid] = a[gid] + b[gid];
+  ct2_add_impl<float>(a, b, c, b_is_scalar, scalar, gid);
+}
+
+kernel void ct2_add_half(device const half* a [[buffer(0)]],
+                         device const half* b [[buffer(1)]],
+                         device half* c        [[buffer(2)]],
+                         constant uint& b_is_scalar [[buffer(3)]],
+                         constant float& scalar     [[buffer(4)]],
+                         uint gid [[thread_position_in_grid]]) {
+  ct2_add_impl<half>(a, b, c, b_is_scalar, scalar, gid);
 }
 
 // One threadgroup per row, CT2_SOFTMAX_TG threads each. Matches the CPU softmax: per row

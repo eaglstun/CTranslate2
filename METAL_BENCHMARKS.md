@@ -109,8 +109,72 @@ model is the worst case for any GPU backend — its ops are too small to amortiz
 API cost, which is why CPU (no GPU API in the path) still wins by ~90× even after the ~2×
 speedup.
 
+## Real decoder LLM (Qwen2.5-0.5B, fp32 weights)
+
+The end-to-end numbers above are a _tiny_ transliteration model — the worst case for any
+GPU backend. To test the "a real LLM sits at the favorable end of the GEMM table" claim,
+we converted **Qwen2.5-0.5B-Instruct** (RoPE + RMSNorm + SwiGLU + GQA — exercises the
+M6–M9 kernels) and benchmarked greedy generation on CPU vs Metal. Reproduce:
+
+```bash
+PYTHONPATH=python python -c "import sys; sys.argv=['x','--model','Qwen/Qwen2.5-0.5B-Instruct','--output_dir','/tmp/qwen0.5b-ct2','--quantization','float32','--force']; from ctranslate2.converters.transformers import main; main()"
+CT2_LLM_MODEL=/tmp/qwen0.5b-ct2 ./tests/ctranslate2_test ../tests/data \
+  --gtest_also_run_disabled_tests --gtest_filter='MetalTest.DISABLED_BenchmarkLLM'
+```
+
+**Decode-bound** (prompt 32, generate 32 tokens) — tok/s, higher is better:
+
+|         | CPU fp32 | Metal fp32 | Metal fp16 |
+| ------- | -------- | ---------- | ---------- |
+| batch 1 | **~76**  | 32         | 35         |
+| batch 8 | **~174** | 60         | 61         |
+
+**Prefill-bound** (prompt 512, generate 1 token — isolates the one big seq×hidden GEMM) —
+ms, lower is better. Both columns are **after** the GPU-`Add` fix described below; the
+parenthesized values are before it:
+
+|         | CPU fp32 | Metal fp32    | Metal fp16        |
+| ------- | -------- | ------------- | ----------------- |
+| batch 1 | 200      | **119** (130) | **98** (284 ⚠️)   |
+| batch 8 | **1432** | 2273 (2757)   | **559** (1815) 🔥 |
+
+**Read:**
+
+- **The bottleneck is the decode loop, not compute.** In the decode-bound regime Metal
+  loses ~2× to the CPU and fp16 buys little (32→35, 60→61) — autoregressive decode runs at
+  `m = batch`, so every decode-step GEMM is a tall-skinny matrix–_vector_ product far down
+  in the n<1024 region where per-op API overhead dominates and the CPU (no GPU API in its
+  path) wins. The model having 500M params doesn't help: each _step_ still issues many tiny
+  ops. This is what **command-buffer reuse** (one command buffer per decode step) targets.
+- **fp16 prefill now wins big — once a real bug was found.** The first run showed fp16 bs=1
+  prefill _slower_ than fp32 (284 vs 130 ms), which looked like an MPS-fp16 weakness. A
+  profiler run (`CT2_LLM_PROFILE=1`) said otherwise: the GEMMs were identical in both
+  precisions; the entire regression was the elementwise **`Add`** op (the residual
+  connections), which exploded **27×** in fp16 (51 ms → 1376 ms over 10 iters). Cause: the
+  M1 `metal::add` kernel was never wired into the `Add` op, so `Add` ran on the CPU
+  reference — fast SIMD in fp32, but catastrophic software-emulated `half` arithmetic in
+  fp16, plus a pipeline flush per residual (48 per forward). Routing `Add` to a real GPU
+  kernel (fp32 + fp16, mirroring `Mul`) fixed it: **fp16 bs=8 prefill 1815 → 559 ms (3.2×),
+  now 2.6× faster than CPU and 4× faster than Metal fp32.** This is the "where Apple Silicon
+  gets fast" result. fp32 improved too (the removed flushes), as predicted.
+- **Metal's compute path is healthy.** Prefill — big compute-bound GEMMs — is where Metal
+  wins (fp16 bs=8 559 ms vs CPU 1432 ms). The GPU is good at the math; the remaining loss is
+  the per-op overhead of the _decode loop_, not the math.
+- **Command-buffer reuse remains the #1 lever for decode**, confirmed by a real model: the
+  decode loop is API-overhead-bound exactly as on the tiny model. Secondary follow-up: the
+  profiler also showed RMSNorm ~2.5× slower in fp16 (152 → 377 ms) — smaller than `Add`,
+  worth a look but not the headline.
+
+Lesson (again): **profile, don't guess.** The intuitive culprit (MPS fp16 GEMM) was fine;
+the real one was an op that had quietly never been on the GPU at all.
+
+Benchmark: `MetalTest.DISABLED_BenchmarkLLM`, model path via `CT2_LLM_MODEL`; add
+`CT2_LLM_PROFILE=1` (needs `-DENABLE_PROFILING=ON`) for the per-op breakdown.
+
 ## Caveats
 
 - Tiny model + tiny ops is the worst case; a real LLM (large hidden size, big GEMMs) sits
-  much closer to the favorable end of the GEMM table.
+  much closer to the favorable end of the GEMM table — but autoregressive **decode** is
+  still tiny-op territory (batch-sized GEMMs), so the per-op-overhead bottleneck persists
+  until command buffers are reused. Prefill (big GEMM) already wins at batch 1.
 - Numbers are single-run averages on a warm machine; treat as indicative, not precise.

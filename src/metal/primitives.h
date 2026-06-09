@@ -12,10 +12,12 @@
 namespace ctranslate2 {
   namespace metal {
 
-    // Element-wise c[i] = a[i] + b[i] over `size` floats. The pointers must be data()
-    // pointers of StorageViews allocated on Device::METAL (i.e. tracked by the Metal
-    // allocator). The call is synchronous: it returns once the GPU work has completed.
-    void add(const float* a, const float* b, float* c, size_t size);
+    // Elementwise add over `size` elements: c[i] = a[i] + (b_is_scalar ? scalar : b[i]).
+    // The a/c pointers must be data() pointers of StorageViews on Device::METAL; when
+    // b_is_scalar, b is ignored (the scalar is read on the host and passed by value).
+    void add(const float* a, const float* b, float* c, dim_t size, bool b_is_scalar, float scalar);
+    void add(const float16_t* a, const float16_t* b, float16_t* c, dim_t size,
+             bool b_is_scalar, float scalar);
 
     // Row-wise softmax over the last dimension (depth) for batch_size rows, matching
     // primitives/ops SoftMax semantics: optional per-row `lengths` masking (nullptr =

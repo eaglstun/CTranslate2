@@ -197,7 +197,7 @@ comparison-based and runs on the CPU reference; it is not a hot op).
 | BiasAdd + activation, last axis (float32 and float16)                                      | **GPU** — fused custom kernel (ReLU/GELU/GELUTanh/GELUSigmoid/Swish/Tanh/Sigmoid)                             |
 | Standalone activations: ReLU/GELU/Swish/Sigmoid/Tanh (float32 and float16)                 | **GPU** — custom kernel                                                                                       |
 | Elementwise Mul (float32 and float16)                                                      | **GPU** — custom kernel                                                                                       |
-| Elementwise add (float32)                                                                  | **GPU** — custom kernel                                                                                       |
+| Elementwise add (float32 and float16)                                                      | **GPU** — custom kernel (the residual connections; fp16 path added after profiling a real LLM)                |
 | Concat / Split / Slide (all dtypes)                                                        | **GPU** — strided-copy kernel                                                                                 |
 | Everything else (sampling, general-axis LayerNorm/BiasAdd, conv, int Mul, quantization, …) | CPU reference over unified memory (correct, float32 only)                                                     |
 | fp16 for ungraduated ops                                                                   | Not yet — CPU reference is float32-only, so a full fp16 model needs those ops graduated to half kernels first |

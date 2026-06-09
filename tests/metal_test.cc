@@ -7,9 +7,14 @@
 #include <iostream>
 #include <vector>
 
+#include <cstdlib>
+
 #include <ctranslate2/devices.h>
+#include <ctranslate2/generator.h>
+#include <ctranslate2/generation.h>
 #include <ctranslate2/models/model.h>
 #include <ctranslate2/ops/ops.h>
+#include <ctranslate2/profiler.h>
 #include <ctranslate2/storage_view.h>
 #include <ctranslate2/translator.h>
 
@@ -62,7 +67,7 @@ TEST_F(MetalTest, ElementwiseAdd) {
   std::memcpy(a.data<float>(), a_host.data(), a_host.size() * sizeof(float));
   std::memcpy(b.data<float>(), b_host.data(), b_host.size() * sizeof(float));
 
-  metal::add(a.data<float>(), b.data<float>(), c.data<float>(), a_host.size());
+  metal::add(a.data<float>(), b.data<float>(), c.data<float>(), n, /*b_is_scalar=*/false, 0.f);
   metal::synchronize();  // GPU work is batched; flush before reading on the host.
 
   std::vector<float> result(a_host.size());
@@ -306,6 +311,104 @@ TEST_F(MetalTest, DISABLED_BenchmarkTranslation) {
   run("CPU   fp32", Device::CPU, ComputeType::FLOAT32);
   run("METAL fp32", Device::METAL, ComputeType::FLOAT32);
   run("METAL fp16", Device::METAL, ComputeType::FLOAT16);
+}
+
+// Real decoder-only LLM end-to-end, vs the tiny transliteration model above. The tiny
+// model is the worst case for any GPU backend (ops too small to amortize per-op API
+// cost); a real LLM has large hidden size and GEMM-dominated layers, the favorable end of
+// the GEMM table. Point CT2_LLM_MODEL at a converted decoder dir (e.g. Qwen2.5-0.5B).
+TEST_F(MetalTest, DISABLED_BenchmarkLLM) {
+  const char* model_env = std::getenv("CT2_LLM_MODEL");
+  if (!model_env)
+    GTEST_SKIP() << "Set CT2_LLM_MODEL to a converted decoder-only model directory";
+  const std::string model_dir(model_env);
+
+  // Synthetic prompt built from tokens known to exist in a byte-level BPE vocab. Content
+  // is irrelevant to op shapes — only prompt length and the forced step count matter.
+  const std::vector<std::string> content =
+      {"ing", "ion", "ent", "ate", "ation", "ort", "ame", "ist", "ers", "ass", "int", "urn"};
+  auto make_prompt = [&](size_t len) {
+    std::vector<std::string> p;
+    p.reserve(len);
+    for (size_t i = 0; i < len; ++i)
+      p.push_back(content[i % content.size()]);
+    return p;
+  };
+
+  auto run = [&](const std::string& label, Device dev, ComputeType ct,
+                 size_t batch_size, size_t prompt_len, size_t decode_steps) {
+    GenerationOptions options;
+    options.beam_size = 1;
+    options.sampling_topk = 1;             // greedy / deterministic
+    options.max_length = decode_steps;     // stop after exactly decode_steps new tokens
+    options.min_length = decode_steps;     // forbid early EOS so every run does the same work
+    options.include_prompt_in_result = false;
+
+    auto model = models::Model::load(model_dir, dev, 0, ct);
+    Generator generator(model);
+    const std::vector<std::vector<std::string>> batch(batch_size, make_prompt(prompt_len));
+
+    auto wait = [&] {
+      auto futures = generator.generate_batch_async(batch, options);
+      for (auto& f : futures)
+        f.get();
+    };
+
+    wait();  // warmup (includes first-GEMM MPS pipeline build)
+    const int iters = 3;
+    const double ms = time_ms(iters, wait);
+    const double toks = double(batch_size) * decode_steps;  // decode throughput
+    std::cout << "  bs=" << batch_size << "  " << label << ":  " << ms << " ms,  "
+              << (toks / (ms / 1000.0)) << " tok/s\n";
+  };
+
+  // Profiling mode (build with -DENABLE_PROFILING=ON): isolate WHY fp16 prefill is slower
+  // than fp32 at bs=1 by dumping the per-op time breakdown for each. The profiler flushes
+  // per scope, so absolute times are inflated, but the fp32-vs-fp16 comparison is apples to
+  // apples. Set CT2_LLM_PROFILE=1.
+  if (std::getenv("CT2_LLM_PROFILE")) {
+    GenerationOptions options;
+    options.beam_size = 1;
+    options.sampling_topk = 1;
+    options.max_length = 1;
+    options.min_length = 1;
+    options.include_prompt_in_result = false;
+    const std::vector<std::vector<std::string>> batch(1, make_prompt(512));
+
+    auto profile = [&](const std::string& label, Device dev, ComputeType ct) {
+      auto model = models::Model::load(model_dir, dev, 0, ct);
+      Generator generator(model);
+      auto wait = [&] {
+        auto futures = generator.generate_batch_async(batch, options);
+        for (auto& f : futures)
+          f.get();
+      };
+      wait();  // warmup
+      init_profiling(dev, 1);
+      for (int i = 0; i < 10; ++i)
+        wait();
+      std::cerr << "\n##### PROFILE " << label << " (prefill bs=1, 10 iters) #####\n";
+      dump_profiling(std::cerr);
+    };
+    profile("METAL fp32", Device::METAL, ComputeType::FLOAT32);
+    profile("METAL fp16", Device::METAL, ComputeType::FLOAT16);
+    return;
+  }
+
+  // Two regimes: a decode-bound run (short prompt, many tiny batch=N steps) and a
+  // prefill-bound run (long prompt → one big seq×hidden GEMM, 1 decode step) that isolates
+  // the compute-bound path where the GEMM table predicts Metal should win.
+  struct Regime { const char* name; size_t prompt; size_t decode; };
+  for (const Regime r : {Regime{"decode-bound", 32, 32}, Regime{"prefill-bound", 512, 1}}) {
+    std::cout << "\n--- " << r.name << ": prompt=" << r.prompt
+              << ", decode=" << r.decode << " ---\n";
+    for (size_t bs : {size_t(1), size_t(8)}) {
+      run("CPU   fp32", Device::CPU, ComputeType::FLOAT32, bs, r.prompt, r.decode);
+      run("METAL fp32", Device::METAL, ComputeType::FLOAT32, bs, r.prompt, r.decode);
+      run("METAL fp16", Device::METAL, ComputeType::FLOAT16, bs, r.prompt, r.decode);
+      std::cout << "\n";
+    }
+  }
 }
 
 #endif  // CT2_WITH_METAL
