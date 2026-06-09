@@ -5,7 +5,9 @@ so it lives here next to `math-functions-and-numeric-parity.md`, which covers th
 kernel-side numerics). This file is about **where** a LayerNorm/RMSNorm sits in a
 transformer block, not how it's computed.
 
-**Line numbers below were verified by grep on 2026-06-09.** Model-family attributions
+**Line numbers below re-verified by grep on 2026-06-09** (the `transformer.cc` citations
+drifted ~5–10 lines after `ct2_nan_tripwire` instrumentation landed mid-day and were
+corrected; spec/converter lines were unaffected). Model-family attributions
 are intentionally NOT asserted — grep `pre_post_layer_norm=` / `pre_norm=` in the
 converter to map a line to a family yourself; the subagent that first surfaced these
 guessed some names.
@@ -26,26 +28,27 @@ Where placement actually executes.
 
 ```cpp
 // transformer.cc
-:13   , _pre_norm(pre_norm)
-:23   if (_layer_norm && _pre_norm) { ... }   // norm BEFORE the sublayer (pre-norm)
-:49   if (_layer_norm && !_pre_norm) ...       // norm AFTER the sublayer (post-norm)
+:18   , _pre_norm(pre_norm)
+:28   if (_layer_norm && _pre_norm) { ... }   // norm BEFORE the sublayer (pre-norm)
+:59   if (_layer_norm && !_pre_norm) ...       // norm AFTER the sublayer (post-norm)
 ```
 
 **Pre-post "sandwich" (norm both before AND after each sublayer)** — supported, and
 detected at runtime by the presence of all four norm objects:
 
 ```cpp
-// transformer.cc:88  "Check if using pre_post_layer_norm pattern (T5Gemma style)"
+// transformer.cc:97  "Check if using pre_post_layer_norm pattern (T5Gemma style)"
 const bool pre_post_layer_norm = _input_layer_norm && _post_attention_layer_norm
                               && _pre_feedforward_layer_norm && _post_feedforward_layer_norm;
-:91   if (pre_post_layer_norm) { ... }         // the sandwich execution path
+:101  if (pre_post_layer_norm) { ... }         // the sandwich execution path
 ```
 
 The four `*_layer_norm` fields are built via `build_optional_layer<LayerNorm>` at
-`:69` and `:72` (encoder layer) and `:171` / `:176` (decoder layer) — they're optional,
+`:79`–`:82` (encoder layer) and `:180`–`:185` (decoder layer) — they're optional,
 so absence = the model doesn't use the sandwich. The decoder also has a
 **parallel-residual / shared-norm** variant in the same file, keyed on
-`_shared_layer_norm` / `_input_layer_norm`.
+`_shared_layer_norm` (`:179`) / `_input_layer_norm`. (The FFN-local sandwich check
+recurs at `:247`.)
 
 ## 2. Python specs — `python/ctranslate2/specs/transformer_spec.py`
 
