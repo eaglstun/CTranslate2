@@ -43,7 +43,11 @@ Land trust in small bites. Slow path; only worth it with a maintainer's signal.
 
 A blog post / technical writeup ("adding a Metal backend to CTranslate2 with
 unified-memory tricks") is arguably more portfolio value than a PR buried in someone
-else's repo. The per-op command-buffer-sync bottleneck story alone is good content.
+else's repo. The perf-investigation arc alone is good content: profiling a real LLM,
+finding the `Add` op had silently never been on the GPU (27× fp16 blowup), then
+implementing command-buffer reuse — the "obvious" #1 lever — and **measuring it
+neutral-to-negative** because batching kills CPU/GPU overlap. Three disproven hypotheses
+and a "measure, don't guess" through-line is a better story than a clean win.
 
 This already has a home: ai.ericeaglstun.com has a `deep-dives/` section
 (`~/Documents/web/ericeaglstun-ai/content/deep-dives/`) already running an Apple-Silicon

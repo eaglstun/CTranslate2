@@ -1,9 +1,13 @@
 # Metal Backend — Benchmarks
 
-Initial performance measurements for the CTranslate2 Apple Metal backend. These are a
-**correctness-first baseline**, not an optimized result — the backend currently commits a
-command buffer and `waitUntilCompleted` per op, which is the dominant cost for small ops
-(see Analysis).
+Performance measurements for the CTranslate2 Apple Metal backend, tracking the optimization
+journey from the first **correctness-first baseline** (which committed a command buffer and
+`waitUntilCompleted` per op — the dominant cost for small ops) through async command-buffer
+batching, MPS-GEMM object caching, and the GPU `Add`/fp16 fix, to a real-LLM evaluation. The
+headline finding (see the Qwen2.5-0.5B section and Analysis): Metal **wins** the GEMM-heavy
+prefill but **loses** tiny-op autoregressive decode to a fundamental per-op GPU-API floor —
+and command-buffer reuse, the long-assumed fix for that floor, was implemented and measured
+neutral-to-negative (it kills CPU/GPU overlap).
 
 ## Setup
 
@@ -92,16 +96,22 @@ alloc was already cheap) and was reverted.
 
 Remaining performance levers, revised again:
 
-1. **Reuse command buffers across ops** (one per decode step, committed once) to remove the
-   per-op command-buffer + commit cost — the largest remaining encode component. NON-TRIVIAL:
-   cross-thread data dependencies (e.g. Conv1D issues GEMMs on `parallel_for` workers whose
-   output a later main-thread op reads) require committing in dependency order, which the
-   current per-op-commit model gets for free via the FIFO queue. A naive shared/open command
-   buffer breaks that ordering — needs care.
-2. **Offline `.metallib`** — removes the first-use shader-compile cost.
+1. ~~**Reuse command buffers across ops** (one per decode step, committed once)~~ — **TRIED,
+   MEASURED NEUTRAL-TO-NEGATIVE, REVERTED.** Implemented in full (per-thread open command
+   buffer; ops append instead of committing; flush commits the calling thread's batch first;
+   per-`parallel_for`-chunk commit to fix the predicted Conv1D cross-thread orphan, which the
+   8 Conv1D tests caught exactly as expected). It passed full parity but on Qwen2.5-0.5B it
+   was flat on bs1 decode and a regression elsewhere (bs8 decode −6%, **bs8 prefill −23%**).
+   Reason: committing once per batch **destroys CPU/GPU overlap** — per-op commit lets the GPU
+   run op N while the CPU encodes op N+1; one big batch leaves the GPU idle until the final
+   commit. For GEMM-heavy regimes the lost overlap outweighs the saved commit cost. So commit
+   count was never the real bottleneck; **per-op commit (post-MM-cache) is already near-optimal.**
+2. **Offline `.metallib`** — removes the first-use shader-compile cost. (Unmeasured.)
 3. ~~Cache `MPSMatrixMultiplication`~~ — done, ~35% e2e win.
 4. ~~Graduate per-step CPU-reference ops (Concat/Split) to GPU~~ — done; did not help e2e
    (kept for correctness/larger models).
+5. ~~GPU elementwise `Add` (residual) for fp16~~ — done; fixed a 27× fp16 `Add` regression,
+   made fp16 prefill win (see the LLM section above).
 
 The GEMM table already proves the upside: a real LLM (large hidden size, GEMM-dominated,
 fewer/bigger ops) sits at the favorable end and should show the fp16 advantage. This tiny
@@ -145,7 +155,10 @@ parenthesized values are before it:
   `m = batch`, so every decode-step GEMM is a tall-skinny matrix–_vector_ product far down
   in the n<1024 region where per-op API overhead dominates and the CPU (no GPU API in its
   path) wins. The model having 500M params doesn't help: each _step_ still issues many tiny
-  ops. This is what **command-buffer reuse** (one command buffer per decode step) targets.
+  ops. NOTE: **command-buffer reuse** (batching ops into one commit per step) was implemented
+  to attack this and **did not help** — it was neutral on bs1 decode and a regression on
+  GEMM-heavy regimes because batching destroys CPU/GPU overlap (see the levers list above).
+  Per-op commit is already near-optimal; the tiny-op decode floor is the GPU-API cost itself.
 - **fp16 prefill now wins big — once a real bug was found.** The first run showed fp16 bs=1
   prefill _slower_ than fp32 (284 vs 130 ms), which looked like an MPS-fp16 weakness. A
   profiler run (`CT2_LLM_PROFILE=1`) said otherwise: the GEMMs were identical in both

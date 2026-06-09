@@ -95,8 +95,11 @@ get plain CPU memory and GPU kernels could not find their buffers.
 from MSL embedded as a C++ raw string in `src/metal/kernels/kernels_msl.h`. (Runtime
 compilation avoids `.metallib` path-resolution issues with the bare shared library; an
 offline `.metallib` is a future optimization.) Compute pipeline states are cached per
-kernel name. Each `metal::` op currently commits one command buffer and waits
-synchronously.
+kernel name. Each `metal::` op commits its own command buffer asynchronously (no per-op
+wait); `metal::flush()` waits on the last-committed buffer before any CPU access to Metal
+memory. Reusing one command buffer across many ops (committing once per step) was tried and
+reverted — it removed CPU/GPU overlap and regressed GEMM-heavy regimes; see
+`METAL_BENCHMARKS.md`.
 
 ## File map
 
@@ -232,7 +235,10 @@ Remaining fp16 work:
 
 ### Performance work (after correctness)
 
-- Batch op encoding into fewer command buffers / reduce per-op synchronize.
+- ~~Batch op encoding into fewer command buffers / reduce per-op synchronize.~~ — tried and
+  reverted: per-thread command-buffer reuse (one commit per step) measured neutral-to-negative
+  on a real LLM because it destroys CPU/GPU overlap; per-op async commit is already
+  near-optimal. See `METAL_BENCHMARKS.md`.
 - Offline `.metallib` compilation (faster startup than `newLibraryWithSource`), located
   at runtime via `dladdr()` with a source-compile fallback.
 - Avoid the first-GEMM MPS pipeline warmup cost on the hot path.
