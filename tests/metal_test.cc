@@ -2,7 +2,9 @@
 
 #ifdef CT2_WITH_METAL
 
+#include <chrono>
 #include <cstring>
+#include <iostream>
 #include <vector>
 
 #include <ctranslate2/devices.h>
@@ -216,6 +218,62 @@ TEST_F(MetalTest, RotaryMatchesCPU) {
   rotary(in_m.to(DataType::FLOAT16), sin_m.to(DataType::FLOAT16), cos_m.to(DataType::FLOAT16),
          y16, true);
   expect_storage_eq(y16.to_float32(), ref, 2e-2);
+}
+
+// ---------------------------------------------------------------------------
+// Benchmarks (disabled by default; run with:
+//   ./ctranslate2_test <data> --gtest_also_run_disabled_tests --gtest_filter='*Benchmark*')
+// ---------------------------------------------------------------------------
+
+template <typename Fn>
+static double time_ms(int iters, Fn&& fn) {
+  fn();  // warmup (MPS pipeline compilation, allocator priming, …)
+  const auto t0 = std::chrono::steady_clock::now();
+  for (int i = 0; i < iters; ++i)
+    fn();
+  const auto t1 = std::chrono::steady_clock::now();
+  return std::chrono::duration<double, std::milli>(t1 - t0).count() / iters;
+}
+
+TEST_F(MetalTest, DISABLED_BenchmarkGemm) {
+  std::cout << "\n=== Square GEMM (m=n=k), ms/iter and GFLOPS ===\n";
+  for (dim_t n : {256, 512, 1024, 2048}) {
+    const std::vector<float> av(n * n, 0.01f);
+    const std::vector<float> bv(n * n, 0.02f);
+    const int iters = n <= 512 ? 50 : (n <= 1024 ? 20 : 8);
+
+    auto run = [&](const std::string& label, Device dev, DataType dt) {
+      StorageView a = StorageView({n, n}, av, dev).to(dt);
+      StorageView b = StorageView({n, n}, bv, dev).to(dt);
+      StorageView c(dt, dev);
+      const ops::MatMul mm;
+      const double ms = time_ms(iters, [&] { mm(a, b, c); });
+      const double gflops = 2.0 * double(n) * n * n / (ms * 1e6);
+      std::cout << "  n=" << n << "  " << label << ":  " << ms << " ms,  "
+                << gflops << " GFLOPS\n";
+    };
+
+    run("CPU   fp32", Device::CPU, DataType::FLOAT32);
+    run("METAL fp32", Device::METAL, DataType::FLOAT32);
+    run("METAL fp16", Device::METAL, DataType::FLOAT16);
+    std::cout << "\n";
+  }
+}
+
+TEST_F(MetalTest, DISABLED_BenchmarkTranslation) {
+  std::cout << "\n=== End-to-end translation, ms per batch of 32 ===\n";
+  const std::vector<std::vector<std::string>> batch(32, {"آ", "ت", "ز", "م", "و", "ن"});
+
+  auto run = [&](const std::string& label, Device dev, ComputeType ct) {
+    auto model = models::Model::load(default_model_dir(), dev, 0, ct);
+    Translator translator(model);
+    const double ms = time_ms(10, [&] { translator.translate_batch(batch); });
+    std::cout << "  " << label << ":  " << ms << " ms/batch\n";
+  };
+
+  run("CPU   fp32", Device::CPU, ComputeType::FLOAT32);
+  run("METAL fp32", Device::METAL, ComputeType::FLOAT32);
+  run("METAL fp16", Device::METAL, ComputeType::FLOAT16);
 }
 
 #endif  // CT2_WITH_METAL
