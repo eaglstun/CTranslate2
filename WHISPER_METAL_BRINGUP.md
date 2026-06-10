@@ -41,12 +41,21 @@ and is SIGKILLed on long audio. All three map cleanly onto already-known roadmap
 > | speed    | (died)            | 1.01× RT                       |
 >
 > 30s-clip fp16 output is byte-identical to CPU fp32; full-file output matches the CPU
-> baseline (108 segs / 9329 chars) modulo normal fp16 segmentation variance. Throughput is
-> still modest for a _small_ model (per-op GPU dispatch overhead dominates — the known story
-> in `METAL_BENCHMARKS.md`); fp16 large-v3 is the interesting next measurement now that it no
-> longer dies. **Item #4** (CPU int8 unavailable in the MKL-less build) remains open — it
-> surfaces as `CPU/OpDeviceFPTest.Conv1DGroupNoBiasQuantized` failing with "No INT8 GEMM
-> backend for CPU".
+> baseline (108 segs / 9329 chars) modulo normal fp16 segmentation variance.
+>
+> **Perf reality (measured, large-v3, 30s clip — full table in `whisperX/bench/results.tsv`):**
+> Metal is now correct and memory-safe but **slower than CPU** for Whisper. large-v3 metal
+> fp16 = 0.41× RT (4.1 GB), metal fp32 = 0.27× RT (8.0 GB), **cpu fp32 = 1.41× RT** (8.3 GB) —
+> CPU is ~3.4× faster. Whisper is **decode-bound** (autoregressive, many tiny sequential ops),
+> which is exactly where Metal loses to the per-op GPU-API floor (`METAL_BENCHMARKS.md`); the
+> bigger large-v3 GEMMs don't amortize because the decode loop, not the GEMMs, dominates. So
+> the "fp16 large-v3 is where Apple Silicon wins" guess did NOT pan out — the win here is
+> functional (it runs, correct, half the memory in fp16), not throughput. Notably, **large-v3
+> metal fp32 now RUNS (was report failure #2's SIGKILL on even 30s)** — the autorelease-pool
+> fix resolves #2 directly.
+>
+> **Item #4** (CPU int8 unavailable in the MKL-less build) remains open — it surfaces as
+> `CPU/OpDeviceFPTest.Conv1DGroupNoBiasQuantized` failing with "No INT8 GEMM backend for CPU".
 
 ## Environment
 

@@ -88,6 +88,15 @@ CPU binding — `get_allocator(Device)` (`src/allocator.cc`) and `get_device_ind
 allocator/index. If they fell through to the CPU-bound dispatch, Metal StorageViews would
 get plain CPU memory and GPU kernels could not find their buffers.
 
+**fp16 gotcha for un-graduated ops.** An op with no `metal::` kernel falls through to the
+CPU-reference path — but that reference is **float32-only**, and `DEVICE_AND_FLOAT_DISPATCH`
+(`src/dispatch.h`) has no fp16 case off CUDA, so an fp16 input on Metal throws
+`"<Op> only supports float types"`. Until such an op is graduated to a GPU kernel, give it a
+Metal fp16 branch that **upcasts to fp32, runs the CPU-reference path over unified memory, and
+downcasts back** (see `Conv1D` in `src/ops/conv1d.cc` and `ApplyTimestampRules` in
+`src/models/whisper.cc` — both unblocked fp16 Whisper this way). Whisper/Wav2Vec2 conv-stem
+models hit this first because the encoder leads with `Conv1D`.
+
 ### Kernels & device context
 
 `src/metal/device.mm` holds a process-wide singleton: `MTLDevice`, one
@@ -100,6 +109,18 @@ wait); `metal::flush()` waits on the last-committed buffer before any CPU access
 memory. Reusing one command buffer across many ops (committing once per step) was tried and
 reverted — it removed CPU/GPU overlap and regressed GEMM-heavy regimes; see
 `METAL_BENCHMARKS.md`.
+
+**Autorelease pool (load-bearing — a long run will be OOM-killed without it).** Command
+buffers (`[queue commandBuffer]`), compute encoders, and `MPSMatrixDescriptor`s are
+autoreleased (+0). CTranslate2 drives ops from C++ worker threads that have **no run loop**,
+so without an explicit pool these objects never drain and accumulate as **wired** memory for
+the entire run — process heap RSS stays flat while the GPU/wired footprint balloons until the
+OS SIGKILLs the process (this is what made a 730s Whisper transcribe die at ~155s). Each op is
+a flat `new_command_buffer() → encode → commit_command_buffer()` pair, so `new_command_buffer()`
+pushes a thread-local `NSAutoreleasePool` and `commit_command_buffer()` drains it, bracketing
+exactly that op's autoreleased temporaries (the committed buffer survives the drain because
+`g_last_committed` retains it). **Any new code path that creates Metal objects outside a
+new→commit pair must wrap itself in `@autoreleasepool`.**
 
 ## File map
 
