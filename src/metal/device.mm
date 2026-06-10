@@ -116,16 +116,36 @@ namespace ctranslate2 {
     static std::mutex g_commit_mutex;
     static id<MTLCommandBuffer> g_last_committed = nil;
 
+    // Per-op autorelease pool. Command buffers ([queue commandBuffer]), compute encoders, and
+    // MPSMatrixDescriptors are all autoreleased (+0). CTranslate2 issues ops from C++ worker
+    // threads that have no run loop, so without an explicit pool these objects are never
+    // drained — over a long op chain (e.g. Whisper's 730s transcribe) they accumulate as wired
+    // memory until the OS kills the process, while heap RSS stays flat. Each op is a flat
+    // new_command_buffer() -> encode -> commit_command_buffer() pair, so we push a thread-local
+    // pool in new_command_buffer() and drain it in commit_command_buffer(), bracketing exactly
+    // that op's autoreleased temporaries. The committed buffer is retained by g_last_committed,
+    // so it outlives the drain.
+    static thread_local NSAutoreleasePool* g_op_pool = nil;
+
     id<MTLCommandBuffer> new_command_buffer() {
+      g_op_pool = [[NSAutoreleasePool alloc] init];
       return [get_command_queue() commandBuffer];
     }
 
     void commit_command_buffer(id<MTLCommandBuffer> command_buffer) {
       [command_buffer commit];
-      std::lock_guard<std::mutex> lock(g_commit_mutex);
-      [command_buffer retain];
-      [g_last_committed release];
-      g_last_committed = command_buffer;
+      {
+        std::lock_guard<std::mutex> lock(g_commit_mutex);
+        [command_buffer retain];
+        [g_last_committed release];
+        g_last_committed = command_buffer;
+      }
+      // Drain this op's autoreleased temporaries (encoder, descriptors, the command buffer's
+      // own +0). The retain above keeps the committed buffer alive past the drain.
+      if (g_op_pool) {
+        [g_op_pool release];
+        g_op_pool = nil;
+      }
     }
 
     void flush() {

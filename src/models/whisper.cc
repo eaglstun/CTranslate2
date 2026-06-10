@@ -817,6 +817,15 @@ namespace ctranslate2 {
           StorageView log_probs(logits.dtype(), logits.device());
           ops::LogSoftMax()(logits, log_probs);
 
+#ifdef CT2_WITH_METAL
+          // should_sample_timestamp dispatches via DEVICE_AND_FLOAT_DISPATCH (no fp16 case off
+          // CUDA) and uses the fp32-only CPU-reference primitives, so an fp16 log_probs on Metal
+          // would throw "only supports float types". This is a tiny per-step reduction that only
+          // READS log_probs (the logits themselves are untouched) — upcast to fp32 for it.
+          if (log_probs.device() == Device::METAL && log_probs.dtype() == DataType::FLOAT16)
+            log_probs = log_probs.to_float32();
+#endif
+
           for (const dim_t batch_id : check_timestamps_prob_for_batch) {
             bool sample_timestamp = false;
 

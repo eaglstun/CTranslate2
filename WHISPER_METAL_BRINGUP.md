@@ -13,16 +13,40 @@ during the encoder forward pass**, and **fp32 small is correct but ~5× slower t
 and is SIGKILLed on long audio. All three map cleanly onto already-known roadmap gaps
 (Conv1D is "Deferred / out of scope"; perf work is "after correctness").
 
-> **UPDATE 2026-06-09 — failure #1 (fp16 Conv1D throw) is FIXED.** `src/ops/conv1d.cc` now
-> detects fp16 on Metal and upcasts to fp32, runs the proven CPU-reference conv over unified
-> memory, and downcasts back (the CPU reference is fp32-only). Covered by
-> `MetalTest.Float16Conv1DMatchesFloat32`. This unblocks the fp16 encoder reaching Conv1D;
-> the **SIGKILL (#2/#3) is still the open usability blocker** and needs the Python/audio rig
+> **UPDATE 2026-06-09 — failures #1, #2, and #3 are ALL FIXED. fp16 Whisper now transcribes
+> the full 730s file on Metal end-to-end.** Three root causes, three commits:
 >
-> - a Metal allocations profiler to confirm command-buffer accumulation vs a single oversized
->   staging alloc. (Item #4, CPU int8 unavailable in the MKL-less build, is also still open —
->   it surfaces as `CPU/OpDeviceFPTest.Conv1DGroupNoBiasQuantized` failing with "No INT8 GEMM
->   backend for CPU".)
+> 1. **fp16 throws in the encoder (#1).** Two ops fell to the fp32-only CPU reference and
+>    threw on fp16: **Conv1D** (`src/ops/conv1d.cc`) and **ApplyTimestampRules**
+>    (`src/models/whisper.cc`). Both now upcast fp16→fp32, run the proven CPU-reference path
+>    over unified memory, and downcast back. Conv1D parity is covered by
+>    `MetalTest.Float16Conv1DMatchesFloat32`. (commit `fp16 Conv1D on Metal`)
+> 2. **The SIGKILL (#2/#3) was a missing autorelease pool — NOT what anyone guessed.** It was
+>    not unbounded heap (RSS _plateaus_), not command-buffer backlog (a forced flush cadence
+>    didn't help), and not the allocator (it's direct new/release, no pool). The real cause:
+>    `[queue commandBuffer]`, compute encoders, and `MPSMatrixDescriptor`s are autoreleased
+>    (+0), and CTranslate2 drives ops from C++ worker threads with no run loop, so the
+>    autorelease pool **never drained** — those objects piled up as wired memory for the whole
+>    run until the OS killed the process. Fix (`src/metal/device.mm`): push a thread-local
+>    `NSAutoreleasePool` in `new_command_buffer()` and drain it in `commit_command_buffer()`,
+>    bracketing each op's autoreleased temporaries (the committed buffer is retained by
+>    `g_last_committed`, so it survives the drain). (commit `autorelease pool`)
+>
+> **Measured impact** (small, metal, fp16, full 730s `westvet.m4a`, beam_size=5):
+>
+> |          | before            | after                          |
+> | -------- | ----------------- | ------------------------------ |
+> | outcome  | SIGKILL @ ~155s   | **DONE: 102 segs, 9411 chars** |
+> | peak RSS | 9.07 GB, climbing | **2.06 GB, flat**              |
+> | speed    | (died)            | 1.01× RT                       |
+>
+> 30s-clip fp16 output is byte-identical to CPU fp32; full-file output matches the CPU
+> baseline (108 segs / 9329 chars) modulo normal fp16 segmentation variance. Throughput is
+> still modest for a _small_ model (per-op GPU dispatch overhead dominates — the known story
+> in `METAL_BENCHMARKS.md`); fp16 large-v3 is the interesting next measurement now that it no
+> longer dies. **Item #4** (CPU int8 unavailable in the MKL-less build) remains open — it
+> surfaces as `CPU/OpDeviceFPTest.Conv1DGroupNoBiasQuantized` failing with "No INT8 GEMM
+> backend for CPU".
 
 ## Environment
 
