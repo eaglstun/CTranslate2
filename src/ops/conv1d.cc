@@ -48,6 +48,29 @@ namespace ctranslate2 {
 
       output.resize({batch_size, out_channels, output_length});
 
+#ifdef CT2_WITH_METAL
+      // Conv1D has no Metal kernel; on Metal it runs the CPU reference over unified memory
+      // (METAL binds to the CPU dispatch case). That reference is float32-only, so an fp16
+      // input — e.g. Whisper's encoder conv stem in fp16 — would hit the generic
+      // "only supports float types" throw. Upcast to fp32, run the proven CPU-reference path,
+      // and downcast the result back to fp16. (Quantized conv keeps its own path: qscale is
+      // null here for the float16 Whisper/Wav2Vec2 conv stems.)
+      if (input.device() == Device::METAL && input.dtype() == DataType::FLOAT16) {
+        const StorageView input32 = input.to_float32();
+        const StorageView weight32 = weight.to_float32();
+        StorageView output32(DataType::FLOAT32, input.device());
+        output32.resize({batch_size, out_channels, output_length});
+        if (bias) {
+          const StorageView bias32 = bias->to_float32();
+          compute<Device::CPU, float>(input32, weight32, &bias32, output32, qscale);
+        } else {
+          compute<Device::CPU, float>(input32, weight32, nullptr, output32, qscale);
+        }
+        output = output32.to_float16();
+        return;
+      }
+#endif
+
       DEVICE_AND_FLOAT_DISPATCH("Conv1D", input.device(), input.dtype(),
                                 (compute<D, T>(input, weight, bias, output, qscale)));
     }

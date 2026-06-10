@@ -181,6 +181,31 @@ TEST_F(MetalTest, Float16LayerNormMatchesFloat32) {
   expect_storage_eq(y16.to_float32(), y32, 2e-2);
 }
 
+TEST_F(MetalTest, Float16Conv1DMatchesFloat32) {
+  // Whisper's encoder leads with a Conv1D in fp16. Conv1D has no Metal kernel, so it runs the
+  // float32-only CPU reference over unified memory; fp16 used to throw "only supports float
+  // types". The fp16 path now upcasts to fp32 and downcasts back — verify it runs and matches.
+  const StorageView input({1, 2, 6}, std::vector<float>{
+      0.5f, -1.0f, 2.0f, 0.25f, 1.5f, 0.75f,
+      -0.5f, 1.0f, 0.3f, -0.7f, 1.2f, 0.4f}, Device::METAL);
+  const StorageView weight({3, 2, 3}, std::vector<float>{
+      0.1f, 0.2f, 0.3f, -0.1f, 0.0f, 0.1f,
+      0.2f, -0.2f, 0.1f, 0.3f, 0.1f, -0.1f,
+      0.0f, 0.2f, -0.3f, 0.1f, 0.1f, 0.1f}, Device::METAL);
+  const StorageView bias({3}, std::vector<float>{0.1f, -0.2f, 0.3f}, Device::METAL);
+
+  const ops::Conv1D conv(/*stride=*/1, /*padding=*/1);
+
+  StorageView y32(Device::METAL);
+  conv(input, weight, bias, y32);
+
+  StorageView y16(DataType::FLOAT16, Device::METAL);
+  conv(input.to(DataType::FLOAT16), weight.to(DataType::FLOAT16), bias.to(DataType::FLOAT16), y16);
+  EXPECT_EQ(y16.dtype(), DataType::FLOAT16);
+
+  expect_storage_eq(y16.to_float32(), y32, 2e-2);
+}
+
 TEST_F(MetalTest, Float16BiasAddGELUMatchesFloat32) {
   StorageView value({2, 3}, std::vector<float>{0.5, -1.0, 2.0, 1.5, 0.75, -0.5}, Device::METAL);
   StorageView bias({3}, std::vector<float>{0.1, -0.2, 0.3}, Device::METAL);
