@@ -1,14 +1,9 @@
 #include "ctranslate2/layers/transformer.h"
 
 #include <cmath>
-#include <cstdlib>
-#include <iostream>
 
 namespace ctranslate2 {
   namespace layers {
-
-    // Debug NaN/Inf tripwire (defined below; forward-declared for FeedForwardNetwork use).
-    static void ct2_nan_tripwire(const char* tag, const StorageView& sv, dim_t offset);
 
     FeedForwardNetwork::FeedForwardNetwork(const models::Model& model,
                                            const std::string& scope,
@@ -34,19 +29,14 @@ namespace ctranslate2 {
       const DataType dtype = input.dtype();
 
       StorageView inner(dtype, device);
-      ct2_nan_tripwire("ffn_0_input", *x, -1);
       _ff1(*x, inner);
-      ct2_nan_tripwire("ffn_a_gate+act", inner, -1);
       if (_ff1_noact) {
         StorageView linear(dtype, device);
         (*_ff1_noact)(*x, linear);
-        ct2_nan_tripwire("ffn_b_up", linear, -1);
         ops::Mul()(linear, inner, inner);
-        ct2_nan_tripwire("ffn_c_glu_mul", inner, -1);
       }
 
       _ff2(inner, output, _layer_norm ? &input : nullptr);
-      ct2_nan_tripwire("ffn_d_down", output, -1);
 
       if (_tensor_parallel) {
         Shape shape = output.shape();
@@ -202,28 +192,6 @@ namespace ctranslate2 {
       {
     }
 
-    // Debug: env-gated NaN/Inf tripwire. Prints only when a tensor contains NaN/Inf, so the
-    // FIRST line identifies the exact sub-op that detonated. Reading via to(CPU) flushes Metal.
-    static void ct2_nan_tripwire(const char* tag, const StorageView& sv, dim_t offset) {
-      static const bool on = std::getenv("CT2_DUMP_LAYERS") != nullptr;
-      if (!on)
-        return;
-      if (sv.dtype() != DataType::FLOAT32 && sv.dtype() != DataType::FLOAT16)
-        return;
-      const StorageView host = sv.to(Device::CPU).to_float32();
-      const auto v = host.to_vector<float>();
-      bool bad = false;
-      double maxabs = 0;
-      for (const float x : v) {
-        if (std::isnan(x) || std::isinf(x)) bad = true;
-        maxabs = std::max(maxabs, double(std::abs(x)));
-      }
-      if (bad || maxabs > 1e4)
-        std::cerr << "[NANCHK] " << tag << " offset=" << offset
-                  << " n=" << v.size() << " maxabs=" << maxabs
-                  << (bad ? " <-- NaN/Inf" : " <-- BIG") << "\n";
-    }
-
     void TransformerDecoderLayer::operator()(const StorageView& input,
                                              const StorageView* input_length,
                                              const StorageView* memory,
@@ -249,7 +217,6 @@ namespace ctranslate2 {
         StorageView hidden(dtype, device);
         StorageView context(dtype, device);
         (*_input_layer_norm)(input, hidden);
-        ct2_nan_tripwire("1_input_norm", hidden, offset);
 
         if (_has_merged_encoder_attention) {
           static_cast<MultiHeadAttention*>(_self_attention.get())->forward_merged(
@@ -279,9 +246,7 @@ namespace ctranslate2 {
                              position_bias,
                              offset);
         }
-        ct2_nan_tripwire("2_self_attn", context, offset);
         (*_post_attention_layer_norm)(context, output);
-        ct2_nan_tripwire("3_post_attn_norm", output, offset);
 
         if (_encoder_attention) {
             ops::Add()(output, input, output);   // self-attention residual
@@ -318,15 +283,12 @@ namespace ctranslate2 {
             // the pre-FFN norm. context = output + input (residual), output = norm(context).
             _pre_feedforward_layer_norm->add_norm(output, input, context, output);
         }
-        ct2_nan_tripwire("4_preffn_addnorm", output, offset);
         hidden = std::move(output);
 
         _ff(hidden, output);
-        ct2_nan_tripwire("5_ffn", output, offset);
 
         hidden = std::move(output);
         (*_post_feedforward_layer_norm)(hidden, output);
-        ct2_nan_tripwire("6_postffn_norm", output, offset);
         ops::Add()(output, context, output);
 
         // Gemma 4 layer scalar
@@ -849,28 +811,6 @@ namespace ctranslate2 {
                         offset);
           *layer_in_chunk = std::move(layer_out);
 
-          // Debug: env-gated per-layer checksum dump to localize the first CPU-vs-Metal
-          // divergence (set CT2_DUMP_LAYERS). Reading via to(Device::CPU) flushes Metal,
-          // so the values are coherent. fp32-vs-fp32 only — this is a correctness probe.
-          static const bool ct2_dump_layers = std::getenv("CT2_DUMP_LAYERS") != nullptr;
-          if (ct2_dump_layers) {
-            const StorageView host = layer_in_chunk->to(Device::CPU).to_float32();
-            const auto vals = host.to_vector<float>();
-            double sum = 0, sumabs = 0, maxabs = 0;
-            for (const float v : vals) {
-              sum += v;
-              sumabs += std::abs(v);
-              maxabs = std::max(maxabs, double(std::abs(v)));
-            }
-            std::cerr << "[CT2_DUMP] step=" << step << " layer=" << l
-                      << " n=" << vals.size()
-                      << " sum=" << sum << " sumabs=" << sumabs << " maxabs=" << maxabs
-                      << " v0=" << (vals.empty() ? 0.f : vals[0])
-                      << " v1=" << (vals.size() > 1 ? vals[1] : 0.f)
-                      << " v2=" << (vals.size() > 2 ? vals[2] : 0.f)
-                      << "\n";
-          }
-
           if (layer_attention) {
             alignment_heads.emplace_back(dtype, device);
             ops::Gather(1, 1)(*layer_attention, *heads_to_select, alignment_heads.back());
@@ -905,17 +845,6 @@ namespace ctranslate2 {
       if (outputs) {
         if (_output_norm)
           (*_output_norm)(layer_in, layer_in);
-        static const bool ct2_dump_head = std::getenv("CT2_DUMP_LAYERS") != nullptr;
-        if (ct2_dump_head && _output_norm) {
-          const StorageView host = layer_in.to(Device::CPU).to_float32();
-          const auto vals = host.to_vector<float>();
-          double sum = 0, sumabs = 0;
-          for (const float v : vals) { sum += v; sumabs += std::abs(v); }
-          std::cerr << "[CT2_OUTNORM] step=" << step << " n=" << vals.size()
-                    << " sum=" << sum << " sumabs=" << sumabs
-                    << " v0=" << (vals.empty() ? 0.f : vals[0])
-                    << " v1=" << (vals.size() > 1 ? vals[1] : 0.f) << "\n";
-        }
         if (_project_out) {
           (*_project_out)(layer_in, layer_out);
           layer_in = std::move(layer_out);
@@ -926,17 +855,6 @@ namespace ctranslate2 {
 
         if (return_logits) {
           _proj(layer_in, *outputs);
-          if (ct2_dump_head) {
-            const StorageView host = outputs->to(Device::CPU).to_float32();
-            const auto vals = host.to_vector<float>();
-            size_t argmax = 0;
-            float mx = -1e30f;
-            for (size_t i = 0; i < vals.size(); ++i)
-              if (vals[i] > mx) { mx = vals[i]; argmax = i; }
-            std::cerr << "[CT2_LOGITS] step=" << step << " n=" << vals.size()
-                      << " argmax=" << argmax << " max=" << mx
-                      << " l0=" << (vals.empty() ? 0.f : vals[0]) << "\n";
-          }
           if (_final_logit_softcapping != 0.f) {
             // logits = tanh(logits / cap) * cap  — squashes logits to (-cap, cap)
             const auto dtype = outputs->dtype();

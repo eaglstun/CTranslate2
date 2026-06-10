@@ -506,15 +506,24 @@ inline float ct2_erf(float x) {
   return s * y;
 }
 
+// Metal's tanh(x) computes (exp(2x)-1)/(exp(2x)+1); for large |x| exp(2x) overflows to Inf
+// and Inf/Inf = NaN, whereas tanh mathematically saturates to +-1. tanh(+-15) already equals
+// +-1.0 in float32, so clamping the argument to [-15,15] is exact for the saturated region and
+// avoids the overflow. This bites GELU-tanh on Gemma2, whose large deep-layer activations make
+// the cubic argument huge (NaN -> <pad> collapse on the GPU; CPU std::tanh saturates correctly).
+inline float ct2_tanh_safe(float x) {
+  return tanh(clamp(x, -15.0f, 15.0f));
+}
+
 inline float ct2_apply_activation(float v, int act) {
   switch (act) {
     case 0: return max(v, 0.0f);
     case 1: { const float u = 0.7978845608028654f * (v + 0.044715f * v * v * v);
-              return 0.5f * v * (1.0f + tanh(u)); }
+              return 0.5f * v * (1.0f + ct2_tanh_safe(u)); }
     case 2: return v / (1.0f + exp(-v));
     case 3: return 0.5f * v * (1.0f + ct2_erf(v * 0.7071067811865475f));
     case 4: return v / (1.0f + exp(-1.702f * v));
-    case 5: return tanh(v);
+    case 5: return ct2_tanh_safe(v);
     case 6: return 1.0f / (1.0f + exp(-v));
     default: return v;
   }

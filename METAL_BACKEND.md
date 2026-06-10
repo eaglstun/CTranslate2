@@ -170,6 +170,13 @@ each routed via the targeted-routing pattern and parity-checked against the CPU 
 since Metal has no `erf`. The kernel library compiles lazily so a kernel bug can't break
 allocation/MPS.
 
+> **War story / gotcha:** the GELU-**tanh** variant once emitted `NaN` on large activations
+> (Gemma2 deep layers) because Metal's `tanh(x)` overflows to `NaN` for big `x`, where CPU
+> `std::tanh` saturates to ±1. Fixed by clamping the `tanh` argument (`ct2_tanh_safe` in
+> `kernels_msl.h`). Full debugging writeup — including the CPU-reference bisection method and
+> the "mid-pipeline CPU reads of MPS output are unreliable" caveat — in
+> [`METAL_GEMMA2_NAN_POSTMORTEM.md`](METAL_GEMMA2_NAN_POSTMORTEM.md).
+
 ### ✅ M10 — fp16 inference end-to-end
 
 `MetalTest.EndToEndTranslationFloat16` loads the model with `ComputeType::FLOAT16` and

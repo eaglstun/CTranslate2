@@ -5,9 +5,6 @@
 #include "dispatch.h"
 
 #ifdef CT2_WITH_METAL
-#  include <cmath>
-#  include <cstdlib>
-#  include <iostream>
 #  include <type_traits>
 #  include "metal/primitives.h"
 #endif
@@ -69,13 +66,6 @@ namespace ctranslate2 {
       output_shape[output_shape.size() - 1] = n;
       c.resize(std::move(output_shape));
 
-      // MPSMatrixMultiplication computes C = alpha*AB + beta*C and evaluates beta*C even when
-      // beta==0, so a stale NaN/Inf in the reused (uninitialized) output buffer poisons the
-      // result via 0*NaN = NaN. Zero C first so beta*C is a clean 0. Diagnostic gate for A/B.
-      static const bool zero_c = std::getenv("CT2_ZERO_GEMM_C") != nullptr;
-      if (zero_c && beta == 0.f)
-        c.zero();
-
       metal::gemm(trans_a, trans_b, m, n, k, alpha,
                   a.data<T>(), lda, b.data<T>(), ldb, beta, c.data<T>(), ldc);
     }
@@ -121,38 +111,6 @@ namespace ctranslate2 {
       default:
         throw std::invalid_argument("Gemm: unsupported input type " + dtype_name(a.dtype()));
       }
-
-#ifdef CT2_WITH_METAL
-      // Debug: env-gated probe of the raw GEMM output BEFORE bias/activation, to attribute a
-      // NaN/Inf to the matmul itself vs the activation. Prints only when bad. to(CPU) flushes.
-      static const bool probe_gemm = std::getenv("CT2_PROBE_GEMM") != nullptr;
-      if (probe_gemm && c.device() == Device::METAL && c.dtype() == DataType::FLOAT32) {
-        metal::synchronize();  // the GEMM commits async; wait before reading its output
-        const float* d = c.data<float>();  // unified memory: directly CPU-addressable
-        const dim_t sz = c.size();
-        size_t n_inf = 0, n_nan = 0;
-        double maxabs = 0;
-        for (dim_t i = 0; i < sz; ++i) {
-          const float x = d[i];
-          if (std::isinf(x)) ++n_inf;
-          else if (std::isnan(x)) ++n_nan;
-          else maxabs = std::max(maxabs, double(std::abs(x)));
-        }
-        // Also inspect the INPUT a (produced by a prior, already-completed op) to tell apart
-        // "synchronize didn't wait for THIS gemm" from "the matmul genuinely emitted NaN".
-        size_t a_nan = 0;
-        if (a.dtype() == DataType::FLOAT32) {
-          const float* ad = a.data<float>();
-          for (dim_t i = 0; i < a.size(); ++i) if (std::isnan(ad[i])) ++a_nan;
-        }
-        if (n_inf || n_nan)
-          std::cerr << "[GEMMPROBE] raw GEMM out: n=" << sz << " n_inf=" << n_inf
-                    << " n_nan=" << n_nan << " finite_maxabs=" << maxabs
-                    << " n_cols=" << c.dim(-1) << " act=" << (_activation_type ? int(*_activation_type) : -1)
-                    << " | input_a_size=" << a.size() << " input_a_nan=" << a_nan
-                    << " c[0..2]=" << d[0] << "," << d[1] << "," << d[2] << "\n";
-      }
-#endif
 
       apply_bias_and_activation(c, bias, _activation_type, residual);
     }
