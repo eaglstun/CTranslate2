@@ -2,6 +2,7 @@
 #include "metal/device.h"
 
 #include <cstdint>
+#include <cstdlib>
 
 namespace ctranslate2 {
   namespace metal {
@@ -599,7 +600,7 @@ namespace ctranslate2 {
       // Small-m fast path (decode runs every Dense at m = batch): one SIMD-group per
       // output element instead of a mostly-empty 64x64 tile. Dense layout only, and the
       // kernel reads char4, so k and both operand offsets/strides must be 4-byte aligned;
-      // anything else takes the general tiled kernel below (correct, just slower).
+      // anything else takes the MPP or tiled path below (correct, just slower at m <= 8).
       if (!transpose_a && transpose_b && m <= 8
           && k % 4 == 0 && lda % 4 == 0 && ldb % 4 == 0
           && a_buffer.offset % 4 == 0 && b_buffer.offset % 4 == 0) {
@@ -633,6 +634,47 @@ namespace ctranslate2 {
         [encoder endEncoding];
         commit_command_buffer(command_buffer);
         return;
+      }
+
+      // Prefill / large-m fast path: Metal-4 MPP matmul2d (int8 x int8 -> int32),
+      // measured int32-exact and ~4.8x faster than the tiled kernel at 2048^3 on M4 Max
+      // (matches MPS fp16 throughput; see METAL_BENCHMARKS.md). Dense layout and
+      // alpha == 1 only; anything else (other transposes, integral alpha != 1, k == 0)
+      // takes the general tiled kernel below. get_pipeline_mpp returns nil on
+      // pre-macOS-26 OSes or unsupported GPUs. CT2_NO_MPP_GEMM forces the tiled kernel
+      // (bisection lever, same spirit as CT2_NO_MPS_ACT).
+      static const bool mpp_disabled = std::getenv("CT2_NO_MPP_GEMM") != nullptr;
+      if (!mpp_disabled && !transpose_a && transpose_b && alpha == 1 && k > 0) {
+        if (id<MTLComputePipelineState> pso = get_pipeline_mpp("ct2_mpp_gemm_s8_nt")) {
+          id<MTLCommandBuffer> command_buffer = new_command_buffer();
+          id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+          [encoder setComputePipelineState:pso];
+          [encoder setBuffer:a_buffer.buffer offset:a_buffer.offset atIndex:0];
+          [encoder setBuffer:b_buffer.buffer offset:b_buffer.offset atIndex:1];
+          [encoder setBuffer:c_buffer.buffer offset:c_buffer.offset atIndex:2];
+          const uint32_t m_u = static_cast<uint32_t>(m);
+          const uint32_t n_u = static_cast<uint32_t>(n);
+          const uint32_t k_u = static_cast<uint32_t>(k);
+          const uint32_t lda_u = static_cast<uint32_t>(lda);
+          const uint32_t ldb_u = static_cast<uint32_t>(ldb);
+          const uint32_t ldc_u = static_cast<uint32_t>(ldc);
+          [encoder setBytes:&m_u length:sizeof(m_u) atIndex:3];
+          [encoder setBytes:&n_u length:sizeof(n_u) atIndex:4];
+          [encoder setBytes:&k_u length:sizeof(k_u) atIndex:5];
+          [encoder setBytes:&lda_u length:sizeof(lda_u) atIndex:6];
+          [encoder setBytes:&ldb_u length:sizeof(ldb_u) atIndex:7];
+          [encoder setBytes:&ldc_u length:sizeof(ldc_u) atIndex:8];
+
+          // Tile/scope shape must match CT2_MPP_GEMM_S8_{TM,TN,SG} in kernels_mpp_msl.h.
+          const MTLSize grid = MTLSizeMake((static_cast<NSUInteger>(n) + 63) / 64,
+                                           (static_cast<NSUInteger>(m) + 15) / 16,
+                                           1);
+          const MTLSize group = MTLSizeMake(pso.threadExecutionWidth * 2, 1, 1);
+          [encoder dispatchThreadgroups:grid threadsPerThreadgroup:group];
+          [encoder endEncoding];
+          commit_command_buffer(command_buffer);
+          return;
+        }
       }
 
       id<MTLComputePipelineState> pso = get_pipeline("ct2_gemm_s8");

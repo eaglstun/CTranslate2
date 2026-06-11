@@ -26,6 +26,11 @@ namespace ctranslate2 {
     // function of the given name from the embedded shader library.
     id<MTLComputePipelineState> get_pipeline(const char* function_name);
 
+    // Same, from the Metal-4 MPP library (kernels_mpp_msl.h, MSL 4.0). Returns nil —
+    // never throws — when the OS, GPU, or toolchain cannot compile it; callers must
+    // fall back to the classic kernels.
+    id<MTLComputePipelineState> get_pipeline_mpp(const char* function_name);
+
     // A Metal buffer together with a byte offset into it.
     struct BufferRange {
       id<MTLBuffer> buffer;

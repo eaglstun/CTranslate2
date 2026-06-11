@@ -1,6 +1,7 @@
 #include "metal/utils.h"
 #include "metal/device.h"
 #include "metal/kernels/kernels_msl.h"
+#include "metal/kernels/kernels_mpp_msl.h"
 
 #import <Foundation/Foundation.h>
 
@@ -55,6 +56,56 @@ namespace ctranslate2 {
           return pso;
         }
 
+        // Pipeline from the Metal-4 MPP library (kernels_mpp_msl.h). Returns nil — never
+        // throws — when MSL 4.0 is unavailable (pre-macOS-26 OS, or the GPU/toolchain
+        // rejects the source); callers fall back to the classic kernels. Failure is
+        // remembered so the compile is attempted at most once per process.
+        id<MTLComputePipelineState> pipeline_mpp(const std::string& name) {
+          std::lock_guard<std::mutex> lock(_mutex);
+          auto it = _mpp_pipelines.find(name);
+          if (it != _mpp_pipelines.end())
+            return it->second;
+          if (_mpp_unavailable)
+            return nil;
+
+          if (!_mpp_library) {
+            bool os_ok = false;
+            if (@available(macOS 26.0, *))
+              os_ok = true;
+            if (os_ok) {
+              MTLCompileOptions* options = [[MTLCompileOptions alloc] init];
+              // MTLLanguageVersion4_0 spelled numerically so this file still compiles
+              // against pre-macOS-26 SDKs; the @available check gates it at runtime.
+              options.languageVersion = (MTLLanguageVersion)((4 << 16) + 0);
+              NSError* error = nil;
+              NSString* source = [NSString stringWithUTF8String:get_mpp_kernels_source()];
+              _mpp_library = [_device newLibraryWithSource:source options:options error:&error];
+              [options release];
+            }
+            if (!_mpp_library) {
+              _mpp_unavailable = true;
+              return nil;
+            }
+          }
+
+          id<MTLFunction> function =
+            [_mpp_library newFunctionWithName:[NSString stringWithUTF8String:name.c_str()]];
+          if (!function) {
+            _mpp_unavailable = true;
+            return nil;
+          }
+          NSError* error = nil;
+          id<MTLComputePipelineState> pso =
+            [_device newComputePipelineStateWithFunction:function error:&error];
+          [function release];
+          if (!pso) {
+            _mpp_unavailable = true;
+            return nil;
+          }
+          _mpp_pipelines.emplace(name, pso);
+          return pso;
+        }
+
       private:
         MetalContext() {
           _device = MTLCreateSystemDefaultDevice();
@@ -88,8 +139,11 @@ namespace ctranslate2 {
         id<MTLDevice> _device = nil;
         id<MTLCommandQueue> _queue = nil;
         id<MTLLibrary> _library = nil;
+        id<MTLLibrary> _mpp_library = nil;
+        bool _mpp_unavailable = false;
         std::mutex _mutex;
         std::unordered_map<std::string, id<MTLComputePipelineState>> _pipelines;
+        std::unordered_map<std::string, id<MTLComputePipelineState>> _mpp_pipelines;
       };
 
     }
@@ -180,6 +234,10 @@ namespace ctranslate2 {
 
     id<MTLComputePipelineState> get_pipeline(const char* function_name) {
       return MetalContext::instance().pipeline(function_name);
+    }
+
+    id<MTLComputePipelineState> get_pipeline_mpp(const char* function_name) {
+      return MetalContext::instance().pipeline_mpp(function_name);
     }
 
   }

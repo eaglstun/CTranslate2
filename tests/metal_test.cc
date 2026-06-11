@@ -474,10 +474,14 @@ TEST_F(MetalTest, Int8GemmDeepAccumulatorMatchesHostReference) {
   // layout) against a host int32 triple loop. The native int8 kernels accumulate in
   // int32 throughout, so this is bit-exact by construction — including the all-saturated
   // adversarial inputs the retired Phase-1 fp32 shim could not represent above 2^24.
-  // m = 3 routes to the SIMD-group GEMV kernel, m = 16 to the threadgroup-tiled one;
-  // both must hold the same exactness bar.
-  for (const dim_t m : {dim_t(3), dim_t(16)}) {
-    const dim_t n = 5, k = 2048;
+  // Routing coverage: m = 3 / alpha = 1 takes the SIMD-group GEMV kernel; m = 16 /
+  // alpha = 1 takes the Metal-4 MPP matmul2d path where available (pre-macOS-26 it
+  // falls back to the tiled kernel — same contract either way); m = 16 / alpha = 2
+  // pins the threadgroup-tiled kernel, which only MPP-ineligible calls reach now.
+  // All three must hold the same exactness bar.
+  struct Case { dim_t m; int32_t alpha; };
+  for (const Case tc : {Case{3, 1}, Case{16, 1}, Case{16, 2}}) {
+    const dim_t m = tc.m, n = 5, k = 2048;
     std::mt19937 rng(42);
     std::uniform_int_distribution<int> dist(-127, 127);
 
@@ -491,13 +495,13 @@ TEST_F(MetalTest, Int8GemmDeepAccumulatorMatchesHostReference) {
         int32_t acc = 0;
         for (dim_t kk = 0; kk < k; ++kk)
           acc += static_cast<int32_t>(a_vec[i * k + kk]) * static_cast<int32_t>(b_vec[j * k + kk]);
-        expected_vec[i * n + j] = acc;
+        expected_vec[i * n + j] = tc.alpha * acc;
       }
 
     StorageView a({m, k}, a_vec, Device::METAL);
     StorageView b({n, k}, b_vec, Device::METAL);
     StorageView c(DataType::INT32, Device::METAL);
-    ops::Gemm(/*alpha=*/1, /*beta=*/0, /*trans_a=*/false, /*trans_b=*/true)(a, b, c);
+    ops::Gemm(tc.alpha, /*beta=*/0, /*trans_a=*/false, /*trans_b=*/true)(a, b, c);
 
     expect_storage_eq(c.to(Device::CPU), StorageView({m, n}, expected_vec));
   }
