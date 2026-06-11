@@ -229,6 +229,54 @@ the real one was an op that had quietly never been on the GPU at all.
 Benchmark: `MetalTest.DISABLED_BenchmarkLLM`, model path via `CT2_LLM_MODEL`; add
 `CT2_LLM_PROFILE=1` (needs `-DENABLE_PROFILING=ON`) for the per-op breakdown.
 
+## int8: native int8×int8→int32 GEMM (Phase 2 kernels)
+
+Measured 2026-06-11, M4 Max, Release build. Kernel-level: 30 iters/cell (8 for the
+2048³ cell), flush per iter, `DISABLED_BenchmarkGemmInt8` (Dense layout, `trans_b`).
+GFLOPS counts the same `2·m·n·k` madds for every dtype so the columns compare directly.
+
+| m, n, k (kernel)         | Metal int8     | Metal fp16  | Metal fp32 |
+| ------------------------ | -------------- | ----------- | ---------- |
+| 2048, 2048, 2048 (tiled) | 7.28 ms        | **1.48 ms** | 1.72 ms    |
+| 256, 4864, 896 (tiled)   | 1.15 ms        | **0.36 ms** | 0.38 ms    |
+| 1, 4864, 896 (GEMV)      | **0.157 ms**   | 0.172 ms    | 0.176 ms   |
+| 1, 151936, 896 (GEMV)    | **0.49 ms** 🔥 | 0.84 ms     | 1.35 ms    |
+
+Two kernels behind one entry point (`metal::gemm_s8`):
+
+- **m ≤ 8 (decode): SIMD-group GEMV** — one SIMD-group per output element, lane-strided
+  `char4` k-loop, `simd_sum` fold. This regime is **memory-bound**, and int8 moves half
+  the bytes of fp16 — so int8 **beats** the MPS float GEMM, 1.7× on the per-token
+  lm_head GEMM (n=151936). This is where the quantization win actually lives.
+- **m > 8 (prefill): threadgroup-tiled** — 64×64 C-tile, 32-deep k chunks, 4×4 int4
+  register micro-tile. **ALU-bound at ~2.4 T-MAC/s** vs a ~3.7 ceiling: an int32 MAC is
+  two ALU ops on a GPU with **no integer matrix units** (`simdgroup_matrix` is
+  half/bfloat/float only — MSL spec 2.4), while MPS fp16 rides dedicated FMA pipelines
+  to ~5.9 T-FMA/s. Large-m int8 GEMM is therefore structurally ~3–5× slower than MPS
+  fp16 **at the kernel level**; do not expect a tiling tweak to close that — the honest
+  future lever is the exactness-preserving `simdgroup_float8x8` staging trick (int8→float
+  tiles are exact; per-1024-deep-chunk float accumulation stays < 2^24) if prefill ever
+  matters enough.
+
+**End-to-end (Qwen2.5-0.5B-int8, `device="metal"`, 3 runs each, warm; spread shown):**
+
+| metric                       | int8 (native)  | fp16             | int8 Phase 1 (shim)        |
+| ---------------------------- | -------------- | ---------------- | -------------------------- |
+| 3-prompt × 24-token e2e      | 1.22–1.27 s    | **0.99 s**       | ~2.5× slower than fp16     |
+| prefill bs8 × 176-tok prompt | 41–44 ms       | 34–50 ms (noisy) | —                          |
+| decode bs1, ms/token         | 28.8–30.2      | **25.2–25.7**    | —                          |
+| **peak RSS**                 | **1453 MB** 🔥 | 2494 MB          | no win (per-call widening) |
+
+**Read:** the Phase-1 shim's ~2.5× e2e penalty is gone — int8 now lands within ~1.26×
+of fp16 e2e (decode within ~15%, the gap being the structural extra quantize +
+dequant-epilogue launches per Dense on an API-floor-bound loop, and the prefill-side
+tiled-kernel ALU bound above). The headline: **peak RSS drops 42%** (weights are
+genuinely int8-resident now — the entire point of the phase), with **92/100
+teacher-forced next-token agreement** vs the fp16 reference (5 prompts × 20 steps) —
+identical to Phase 1, as expected from a bit-exact GEMM swap. Accumulation is exact
+int32 at any depth: the suite includes an all-saturated k=2048 case (accumulator
+3.3e7 > 2^24) that the retired fp32 shim could not represent.
+
 ## Caveats
 
 - Tiny model + tiny ops is the worst case; a real LLM (large hidden size, big GEMMs) sits

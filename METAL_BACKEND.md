@@ -242,6 +242,36 @@ timing; the commit now happens inside the lock (10/10 clean full-suite runs).
   MKL-less build, unrelated to Metal.
 - CPU-only build: no new warnings introduced.
 
+### ✅ M12 — int8 Phase 2: native int8×int8→int32 GEMM, weights int8-resident (2026-06-11)
+
+The Phase-1 fp32 GEMM shim is **replaced by native MSL kernels** (`ct2_gemm_s8` /
+`ct2_gemv_s8` behind one `metal::gemm_s8` entry point), so quantized weights stay
+**int8-resident on the GPU** — no per-call widening — and accumulation is **bit-exact
+int32 at any depth** (the suite now includes an all-saturated k=2048 case whose
+accumulator, 3.3e7, exceeds fp32's 2^24 integer-exact range: impossible for the shim).
+MPS has no integer GEMM and `simdgroup_matrix` has no int8 element type (MSL spec 2.4 —
+half/bfloat/float only), so hand-tiled is the only native path:
+
+- **m ≤ 8 (decode), Dense layout:** SIMD-group GEMV — one SIMD-group per output element,
+  lane-strided `char4` k-loop, `simd_sum` fold. Memory-bound regime, int8 moves half the
+  bytes: **beats MPS fp16** (per-token lm_head GEMM 0.49 vs 0.84 ms — 1.7×).
+- **m > 8 (prefill):** threadgroup-tiled 64×64 C-tile, 32-deep k chunks, 4×4 int4
+  micro-tile. ALU-bound at ~2.4 T-MAC/s (~3.7 ceiling: int MAC = 2 ALU ops, no integer
+  matrix units) — structurally ~3–5× slower than MPS fp16 at the kernel level.
+
+Routing (`src/ops/gemm.cc` INT8 branch) additionally guards an **integral alpha** —
+a float alpha cannot be applied exactly to an int32 accumulator. The shim casts
+(`s8_to_float` / `float_to_s32` and their kernels) are removed.
+
+Measured on Qwen2.5-0.5B-int8 (M4 Max, 2026-06-11, 3 runs each, warm; full tables in
+`METAL_BENCHMARKS.md`): **92/100 teacher-forced agreement** vs fp16 (5 prompts × 20
+steps — identical to Phase 1, as a bit-exact GEMM swap should be), e2e 3-prompt × 24-token
+**1.22–1.27 s vs fp16 0.99 s** (the shim's ~2.5× penalty is now ~1.26×), decode bs1
+28.8–30.2 vs 25.2–25.7 ms/token, and **peak RSS 1453 vs 2494 MB (−42%)** — the
+resident-memory win that was the point of the phase. New tests: saturated-accumulator
+exactness, all-four-transpose-layouts vs a host triple loop, deep-k oracle now covering
+both kernels (m=3 GEMV / m=16 tiled), `DISABLED_BenchmarkGemmInt8`.
+
 ## What runs where today
 
 | Operation                                                                    | Metal execution                                                                                               |
@@ -259,7 +289,7 @@ timing; the commit now happens inside the lock (10/10 clean full-suite runs).
 | Concat / Split / Slide (all dtypes)                                          | **GPU** — strided-copy kernel                                                                                 |
 | Quantize int8 (fp32/fp16 in; signed path)                                    | **GPU** — custom kernel (u8-shift variant falls through to CPU reference)                                     |
 | Dequantize int8, simple + GEMM-output forms (fp32/fp16 out)                  | **GPU** — custom kernels (GEMM-output form: the Dense `!trans_a && trans_b` layout, all activations)          |
-| GEMM int8×int8→int32                                                         | **GPU (shim)** — fp32-cast operands through MPS float GEMM; native int8 kernel is Phase 2                     |
+| GEMM int8×int8→int32                                                         | **GPU (native)** — hand-tiled MSL kernels, exact int32 accumulation; SIMD-group GEMV at m ≤ 8, tiled at m > 8 |
 | Everything else (sampling, general-axis LayerNorm/BiasAdd, conv, int Mul, …) | CPU reference over unified memory (correct, float32 only)                                                     |
 | fp16 for ungraduated ops                                                     | Not yet — CPU reference is float32-only, so a full fp16 model needs those ops graduated to half kernels first |
 | bf16 compute                                                                 | Not yet                                                                                                       |
