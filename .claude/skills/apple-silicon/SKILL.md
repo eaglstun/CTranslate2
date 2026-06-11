@@ -364,6 +364,53 @@ are easy to get wrong from memory.**
   encoder, and the flags: performance, accumulator exactness, GPU-family floor all
   unstated. _Read alongside mpsndarray.md before any int8-GEMM rework._
 
+### Copies, layouts & version index
+
+- **[references/gemm-layouts-and-transpose-conventions.md](references/gemm-layouts-and-transpose-conventions.md)**
+  — THE row/column-major Rosetta stone: CT2 is row-major and `ld*` = stored row length;
+  MPS maps directly (stored dims → descriptor, flags → kernel object — do NOT replicate
+  the cuBLAS swap); cuBLAS swaps A↔B for its column-major world (`Cᵀ=Bᵀ·Aᵀ`); Dense
+  always passes `trans_a=false, trans_b=true` with `[out,in]` weights; int8 kernels
+  resolve flags at tile load. _Read whenever a transpose flag or leading dimension is in
+  play._
+
+- **[references/blit-command-encoder.md](references/blit-command-encoder.md)**
+  — `MTLBlitCommandEncoder` for buffer work: `copy(from:to:)` (macOS multiple-of-4
+  offset/size rule), `fill` (byte-pattern only), `synchronize(resource:)` = managed-only,
+  dead on this Shared backend. With the verified copy inventory: contiguous copies are
+  CPU `std::copy` via `contents`, strided/gather ride `ct2_strided_copy_bytes`/
+  `ct2_gather_bytes` — a blit is the GPU-timeline answer for big contiguous device copies
+  that today force a sync. _Read before adding any copy path._
+
+- **[references/concurrent-dispatch-and-encoder-semantics.md](references/concurrent-dispatch-and-encoder-semantics.md)**
+  — Serial (the default — in-pass dispatches ordered, no barriers needed) vs `.concurrent`
+  encoders (`memoryBarrier(scope:/resources:)` becomes your job), and cross-encoder
+  automatic hazard tracking. Repo reality: one op = one command buffer = one serial
+  encoder = one dispatch, so `.concurrent` has nothing to act on until ops share an
+  encoder — the command-buffer-reuse graveyard's cousin. _Read before any encoder-fusion
+  or barrier idea._
+
+- **[references/metal-os-feature-matrix.md](references/metal-os-feature-matrix.md)**
+  — The version index: feature ↔ MSL version ↔ macOS floor ↔ which reference documents
+  it, from blit (10.11) through `simdgroup_matrix` (MSL 2.3/Apple7), `bfloat` (MSL 3.1),
+  quantized-MPSNDArray (macOS 15) to MTLTensor/MPP (macOS 26). Plus the deployment
+  reality: this repo gates nothing (no `@available` anywhere), implicit floor ≈ M1/macOS
+  11 but only ever proven on the M4 Max. _Read before using anything version-gated._
+
+- **[references/mtlio-command-queue.md](references/mtlio-command-queue.md)**
+  — Metal 3 fast resource loading (`MTLIOCommandQueue`/`MTLIOFileHandle`, file→MTLBuffer
+  loads + decompression, macOS 13+) and the honest verdict: on unified memory its
+  headline win is already free — weights go disk→CPU StorageView→memcpy→Shared buffer,
+  and the staging copy is removable by just reading into `contents`. Interesting only if
+  CT2 ever ships compressed weights. _Read before proposing load-time GPU streaming._
+
+- **[references/binary-archives-and-pso-caching.md](references/binary-archives-and-pso-caching.md)**
+  — `MTLBinaryArchive` (PSO-level binaries, one level below the measured-dead
+  `.metallib`): harvest/serialize/`binaryArchives` API, and why there's nothing left to
+  win — the system shader cache already makes the repo's ~30 PSOs warm (~0.5 ms), and the
+  ~493 ms warmup is MPS-internal pipelines the app has no descriptor handle to archive.
+  _Graveyard — read before re-proposing precompiled shaders._
+
 ## Conventions for this skill
 
 - Each reference cites its Apple source URL at the top and ends with a

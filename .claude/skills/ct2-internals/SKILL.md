@@ -324,6 +324,82 @@ silently un-quantizes), and the Python surface (`get_supported_compute_types`,
   alias-before-quantize ordering, and how the saved scheme becomes `infer_compute_type` at
   load. _Cross-refs compute-type-resolution + weight-loading._
 
+### Layers, features & tooling
+
+- **[references/feed-forward-network-layer.md](references/feed-forward-network-layer.md)**
+  — `FeedForwardNetwork`: standard 2-linear FFN vs GLU (gate = `linear_0` _with_
+  activation, up = `linear_0_noact`, combined by plain `ops::Mul` — weight presence IS
+  the flag, no runtime attribute), the residual fused into `_ff2`'s Dense epilogue only
+  when the FFN owns its norm, and the converter gate/up mapping (llama
+  `mlp.gate_proj/up_proj`, T5 `wi_0/wi_1`). _Activation formulas stay in
+  activation-ops.md; placement in norm-placement._
+
+- **[references/decoder-state-contract.md](references/decoder-state-contract.md)**
+  — The `DecoderState` map contract: per-layer `self_keys_<i>`/`self_values_<i>` (+
+  `memory_keys_/memory_values_<i>` for enc-dec) created **empty** by `initial_state`
+  (emptiness = first-step signal), the model-placed `memory`/`memory_lengths` handoff and
+  the `state.erase("memory")` after step 0, why `memory*` keys are never beam-replicated,
+  and the dim-0-is-batch Gather contract. _Update mechanics live in decoding-loop; growth
+  in attention-and-kv-cache._
+
+- **[references/encoder-models-and-wav2vec2.md](references/encoder-models-and-wav2vec2.md)**
+  — The encoder-only surface: `Encoder` pool → `SequenceEncoderReplica::forward`
+  returning `EncoderForwardOutput{last_hidden_state, optional pooler_output}` (CLS-gather
+  - pooler Dense), the BERT/XLM-R/Roberta loaders behind `TransformerEncoderModelSpec`,
+    and the two audio encoders: `Wav2Vec2` (conv feature extractor + optional CTC
+    `lm_head`) and `Wav2Vec2Bert` (Conformer sandwich + adapters). _Pool machinery is
+    replica-pools._
+
+- **[references/flash-attention-integration.md](references/flash-attention-integration.md)**
+  — `WITH_FLASH_ATTN`: vendored FA2 sm80 kernels (fp16/bf16, hdim 32-256), the
+  `FlashMultiHeadAttention` layer chosen at ctor time (self-attention ONLY; cross-attn
+  stays composed), the structural deltas (heads-last layout, cache time-dim 1 with
+  512-row preallocated chunks, RoPE inside the kernel at decode, `is_causal` instead of a
+  lengths mask), and what's unsupported (ALiBi passed `nullptr`, no attention-weights
+  output, CPU op throws). _CUDA-only — Metal's attention stays op-composed._
+
+- **[references/tensor-parallel.md](references/tensor-parallel.md)**
+  — `WITH_TENSOR_PARALLEL`: one MPI process per rank (`ScopedMPISetter` MPI*Init/NCCL
+  comm), load-time **name-classified** weight sharding (`classify_variable`:
+  column-parallel QKV/FFN-in; row-parallel output projections — NO spec markers), the
+  per-sublayer `ops::ReduceAll(SUM)` allreduce points, and the don't-break list (rename a
+  spec weight → silent missharding). \_CUDA-only — throws off-CUDA.*
+
+- **[references/transformers-converter-loaders.md](references/transformers-converter-loaders.md)**
+  — Inside the HF converter (`converters/transformers.py`): the `@register_loader`
+  registry keyed by HF _config class name_ (42 singleton loaders), the `ModelLoader` hook
+  order (`get_model_spec` → `set_config` → vocab), the loader-exists ⇔ arch-supported
+  version coupling (the stale-install Qwen2 trap), and `Qwen2Loader` walked end-to-end
+  (GQA normalize, RoPE params, QKV fuse). _Read before adding/extending an HF loader._
+
+- **[references/cli-clients-and-perf-gating.md](references/cli-clients-and-perf-gating.md)**
+  — `ct2-translator` (the only CLI; `cli/translator.cc`): the full flag surface
+  (--compute*type overrides have no Metal case; --device accepts "metal" despite the help
+  text), the streaming loop (`TextLineReader` → `consume_batches` 16× read-ahead, ordered
+  futures drain), and the worked --log_throughput gating recipe (fixed input, ≥3 runs).
+  \_Flag mechanics live in profiling-infrastructure.md; this is the operator card.*
+
+- **[references/python-high-level-extensions.md](references/python-high-level-extensions.md)**
+  — `extensions.py`, the complete "is it C++ or Python?" card: the seven monkey-patched
+  methods (`generate_tokens`, `async_generate_tokens`, `*_iterable`), the
+  callback→queue.Queue→generator bridge (forced greedy + asynchronous, daemon
+  exception-drain thread), and `_process_iterable`'s 16× prefetch mirroring the C++ file
+  loop. _Read before touching token streaming or batch iterables._
+
+- **[references/model-reader-abstraction.md](references/model-reader-abstraction.md)**
+  — `ModelReader`: filename→istream contract (`get_file` nullptr-on-miss /
+  `get_required_file` throws), `ModelFileReader` vs `ModelMemoryReader` (zero-copy
+  imemstream — the embed-in-app path, Python `files=` arg), and the exact request
+  sequence: model.bin (only required file) → config.json → `initialize()` vocab/vmap
+  pulls. _Short card; contents of those files are model-binary-format.md._
+
+- **[references/downstream-validation-harness.md](references/downstream-validation-harness.md)**
+  — The OTHER oracle: `scripts/validate-downstream.sh` + `tests/downstream/` — build →
+  `cmake --install` to a pinned prefix → wheel via `CTRANSLATE2_ROOT` → uv-pip
+  force-reinstall (+rpath fix) into 4 consumer venvs (whisperX/faster-whisper/Qwen/NLLB)
+  → diff vs fp16-on-Metal goldens (WER/agreement/char-sim, quant-error tolerances).
+  _The loose end-to-end gate — the 2026-06-11 int8 run (4/4) and the conv-guard catch._
+
 ## Conventions for this skill
 
 - Each reference cites the source files it was built from (top of file) with real
