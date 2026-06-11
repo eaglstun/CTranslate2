@@ -293,6 +293,77 @@ are easy to get wrong from memory.**
   prototype). Whisper's 2-conv encode stem is the consumer. _Read when scoping the conv
   graduation._
 
+### Objective-C++ runtime, debugging & profiling
+
+- **[references/autoreleasepool-in-long-loops.md](references/autoreleasepool-in-long-loops.md)**
+  — THE memory lesson: autoreleased Metal/MPS temporaries (+0 command buffers, encoders,
+  MPS descriptors) never drain on C++ worker threads with no run loop — the Whisper fp16
+  730s run climbed to 9.07 GB wired and SIGKILLed; fix = the per-op thread-local pool in
+  `new_command_buffer()`/`commit_command_buffer()` (commit `868d12d3`, RSS → 2.06 GB flat).
+  Includes the diagnostic signature (RSS climbs, heap flat). _Read before adding any Metal
+  code path that bypasses the new→commit pair._
+
+- **[references/objcpp-interop-for-mm-files.md](references/objcpp-interop-for-mm-files.md)**
+  — Objective-C++ survival card: this backend is **MRC, not ARC** (no `-fobjc-arc` in
+  CMake), the split-header discipline (`utils.h`/`primitives.h` C++-safe vs `.mm`-only
+  `device.h` — no `#ifdef __OBJC__` anywhere), the three ownership patterns the repo uses
+  to hold ObjC objects from C++, bridge-cast semantics, nil-messaging-returns-zero, and
+  the NSError\*\* convention. _Read before editing any `.mm` file._
+
+- **[references/occupancy-and-threadgroup-memory.md](references/occupancy-and-threadgroup-memory.md)**
+  — The occupancy levers: PSO `maxTotalThreadsPerThreadgroup` (register-pressure-dependent
+  — the first check when a 256-thread kernel underperforms), `threadExecutionWidth`, static
+  vs encoder-set threadgroup memory, and the 32 KB budget (measured on the M4 Max via
+  `maxThreadgroupMemoryLength`). With the arithmetic for the real kernels: `ct2_gemm_s8`
+  uses 4096 B, the 256-thread reductions 1–2 KB, the GEMV zero. _Read when sizing a tile
+  or chasing low occupancy._
+
+- **[references/instruments-gpu-profiling.md](references/instruments-gpu-profiling.md)**
+  — The GPU-side complement to `benchmarking-and-profiling.md`: Metal System Trace
+  (CPU-encode vs GPU-execute lanes — would _show_ the overlap the perf model rides on),
+  the GPU Counters instrument (the limiter view that would settle "is `ct2_gemm_s8`
+  ALU-bound?" by measurement), os*signpost interval labeling from C++, and headless
+  `xctrace record` recipes. \_A recipe card — read before the first profiling session.*
+
+- **[references/command-buffer-errors-and-hangs.md](references/command-buffer-errors-and-hangs.md)**
+  — Failure diagnosis: the status lifecycle (notEnqueued→…→completed|error), the real
+  `MTLCommandBufferError` codes (timeout, pageFault, …), `errorOptions =
+.encoderExecutionStatus` for per-encoder blame — and the repo punchline: `flush()`
+  checks NOTHING today, so a GPU fault reads back as silent garbage; carries the 5-line
+  status check and the 4-step garbage-output triage order. _Read when output is wrong and
+  you don't yet know which kind of wrong._
+
+### Hardware & future surfaces
+
+- **[references/apple-gpu-architecture-for-compute.md](references/apple-gpu-architecture-for-compute.md)**
+  — The calibrate-your-mental-model card, every claim provenance-labeled: TBDR is
+  render-lore (compute sees ALU + unified memory), 32-wide SIMD, M4 Max 546 GB/s marketing
+  vs ~280 GB/s measured sustained, NO int8 matrix hardware (vs CUDA dp4a/tensor cores),
+  and fp16≈1.55× fp32 GEMM measured (hardware ratio unpublished). _Read before reasoning
+  about "what the GPU can do."_
+
+- **[references/fp16-numerics-on-gpu.md](references/fp16-numerics-on-gpu.md)**
+  — Half-precision survival card: 65504/6.1e-5 limits, THE Gemma2 tanh-overflow→NaN→`<pad>`
+  case and its `ct2_tanh_safe` clamp, the store-half/compute-float rule (verified across
+  every `_half` kernel), literal suffixes + the bfloat promotion asymmetry, and
+  ties-to-even store rounding. _Read before writing any fp16 kernel._
+
+- **[references/indirect-command-buffers.md](references/indirect-command-buffers.md)**
+  — ICBs for compute: descriptor (`.concurrentDispatch`, inherit\*), the
+  MTLIndirectComputeCommand surface (NO `setBytes` — scalars must move to buffers),
+  `executeCommandsInBuffer`, plus the simpler `dispatchThreadgroups(indirectBuffer:)`
+  primitive. Honest verdict: the API-level "encode once, replay per token" answer that
+  likely loses like command-buffer reuse did (overlap destruction) — measure first.
+  _Read before proposing decode-loop dispatch batching._
+
+- **[references/metal4-tensors-and-mpp.md](references/metal4-tensors-and-mpp.md)**
+  — The Metal 4 (macOS 26) ML surface and THE find: MSL §7 MPP `matmul2d` supports
+  **char×char→int at base Metal 4** — a documented int8 matmul path that could challenge
+  the hand-tiled `ct2_gemm_s8`'s ALU-bound large-m regime. MTLTensor (int8 dtype,
+  buffer-wrapping), shader-allocated `tensor_inline` views over raw pointers, the MTL4 ML
+  encoder, and the flags: performance, accumulator exactness, GPU-family floor all
+  unstated. _Read alongside mpsndarray.md before any int8-GEMM rework._
+
 ## Conventions for this skill
 
 - Each reference cites its Apple source URL at the top and ends with a

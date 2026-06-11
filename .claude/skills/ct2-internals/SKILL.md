@@ -217,6 +217,113 @@ silently un-quantizes), and the Python surface (`get_supported_compute_types`,
   interleave/base, scaling None/Linear/Su/Llama3 — "longrope"→Su). _RoPE apply mechanics
   stay in attention-and-kv-cache.md._
 
+### Models
+
+- **[references/transformer-model-wiring.md](references/transformer-model-wiring.md)**
+  — From spec config to constructed layer graph: the `as_sequence_to_sequence`/
+  `as_sequence_generator` factories, the encoder/decoder ctors resolving everything from
+  scoped variables (`build_embeddings_scale` — flag _or_ value; `build_position_encoder`
+  skipped when attention has RoPE/ALiBi), final norm, **tied embeddings** (converter alias
+  dedup → `register_variable_alias`; zero tying logic in C++), and the spec-attribute →
+  `get_attribute_with_default` table. _Read before wiring or tracing model assembly._
+
+- **[references/whisper-model-internals.md](references/whisper-model-internals.md)**
+  — The Whisper surface: encode/generate/detect*language/align on `WhisperReplica`, the
+  2×Conv1D+GELU stem, prompt structure + the `forward_prompt` prefill/decode split,
+  no_speech via `GetNoSpeechProbs`, and align's LayerNorm→MedianFilter→Mean→CPU-DTW
+  pipeline with config.json alignment heads. \_ApplyTimestampRules mechanics stay in
+  logits-processing.md.*
+
+- **[references/generator-and-language-model.md](references/generator-and-language-model.md)**
+  — Decoder-only runtime: `Generator : ReplicaPool<SequenceGeneratorReplica>` (async-only
+  C++ surface; `generate_tokens` is a Python extension over the step callback), the two
+  prefill paths in `run_generation` (cached **static_prompt** Tile-copied per batch vs
+  common-prefix forward), and scoring = `score_sequences` teacher-forced forward +
+  LogSoftMax + Gather. _Qwen downstream driver = canonical consumer._
+
+- **[references/translator-and-seq2seq.md](references/translator-and-seq2seq.md)**
+  — The seq2seq practical card: `translate_batch` → `EncoderDecoderReplica::run_translation`,
+  encode→decode handoff via `state["memory"]`, `make_target_ids` prefix vs scoring modes,
+  the full TranslationOptions→DecodingOptions enforcement table (incl. `use_vmap`
+  output-layer restriction), and when `TranslationResult.attention` is populated. _NLLB
+  downstream driver = the enc-dec proof._
+
+### Infrastructure, tests & bindings
+
+- **[references/replica-pools-and-async-api.md](references/replica-pools-and-async-api.md)**
+  — The header-only `ReplicaPool<Replica>` template behind Translator/Generator/Encoder/
+  Whisper: Job/JobQueue/Worker mechanics, `BatchJob`'s promise-per-result +
+  exception*ptr-fans-out contract, `ModelLoader` (replicas on one device **share** the
+  const Model; cross-device copies), and the streaming `callback` option (greedy-only).
+  \_Read for pool lifecycle; thread counts and rebatch live in their own refs.*
+
+- **[references/python-bindings-architecture.md](references/python-bindings-architecture.md)**
+  — `python/cpp/*.cc`: `ReplicaPoolHelper` (inter→num*replicas_per_device, intra→pool
+  config), the three GIL release points (`py::call_guard`, `AsyncResult::result()`,
+  ctor/dtor), StorageView via `__array_interface__`/`__cuda_array_interface__` (NOT
+  DLPack; Python Device enum has no metal), and the CTRANSLATE2_ROOT /
+  rebuild-lib-then-wheel linkage rule. \_Read before touching bindings or wheel builds.*
+
+- **[references/vocabulary-and-tokenization-boundary.md](references/vocabulary-and-tokenization-boundary.md)**
+  — `Vocabulary` (token↔id, unk auto-appended, EOS-preserving truncation) and the
+  tokens-in/tokens-out boundary (CT2 never tokenizes); `VocabularyMap`/`vmap.txt`
+  target-vocab restriction → `Decoder::update_output_layer` physically shrinks the output
+  projection via `select_weights`. _Read for vocab plumbing or the vmap feature._
+
+- **[references/profiling-infrastructure.md](references/profiling-infrastructure.md)**
+  — `ENABLE_PROFILING`/`PROFILE()` RAII scoped timers: cross-thread by-name aggregation,
+  parent self-time subtraction, **stream sync at every scope boundary** (distorts async
+  backends), the %self/%total/%cum dump format, and `--log_throughput` = best-hypothesis
+  tokens / wall time. `init_profiling` THROWS on a non-profiling build. _Read before
+  perf-gating a change._
+
+- **[references/logging-and-env-config.md](references/logging-and-env-config.md)**
+  — spdlog wiring (`CT2_VERBOSE` −3…3, default 0=Warning) and the complete grepped
+  env-var table (CT2*FORCE_CPU_ISA, CT2_USE_MKL, CT2_PACKED_GEMM, CT2_CUDA*\* ×5,
+  OMP*NUM_THREADS). The operational debugging card. \_Read before reaching for an env knob
+  — several folklore vars don't exist (and `CT2_NO_MPS_ACT` was removed with the Gemma2
+  fix).*
+
+- **[references/ops-test-suite-structure.md](references/ops-test-suite-structure.md)**
+  — The C++ test suite: one gtest binary (data dir = argv[1]), `OpDeviceTest`/
+  `OpDeviceFPTest` value-parameterized over `Device`/`FloatType{device,dtype,error}`,
+  instantiations gated by compile-time `#ifdef` (CPU fp32 1e-5; CUDA fp16 1e-2; METAL
+  fp32-only + `GTEST_SKIP()` fixtures), `expect_storage_eq` (to-CPU copy + abs-eps only),
+  and the 5-step recipe for an op test that covers all devices free. _The oracle — read
+  before adding/judging tests._
+
+- **[references/cuda-backend-structure.md](references/cuda-backend-structure.md)**
+  — The CUDA backend as the reference GPU backend: shared infra in `src/cuda/` (per-op
+  kernels are `src/ops/*_gpu.cu`, NOT `src/cuda/`), thread*local stream + cuBLAS/cuDNN
+  handle per host thread, the `cublasGemmEx` dtype table (int8 = `CUDA_R_8I`→`CUDA_R_32I`,
+  compensation param ignored), and how CUDA is a real `DEVICE_CASE` (no "CUDA_CASE" macro
+  exists). The three properties int8-Metal mirrored, cited both sides. \_Read before
+  structuring any new backend work.*
+
+### Weights & projections
+
+- **[references/embeddings-and-output-projection.md](references/embeddings-and-output-projection.md)**
+  — The bookends: `Embeddings` = Gather (+ gathered-scale Dequantize when the table is
+  int8 — it CAN be; spec+load+runtime all agree), the √d scale applied by encoder/decoder
+  Mul not the layer, `Dense` as lm*head (`decoder/projection`, trans_b means [vocab,depth]
+  = embedding layout so tying needs no transpose), and vocab restriction via
+  `update_output_layer`. \_Temperature is sampling, not here.*
+
+- **[references/conv1d-op.md](references/conv1d-op.md)**
+  — Conv1D: ctor (stride/padding/dilation/groups + fused activation), CPU =
+  im2col-transposed+GEMM by default vs DNNL direct, CUDA = cuDNN, and the dtype matrix:
+  exactly ONE backend runs int8 conv — CPU-without-DNNL; the model.cc load guard forces
+  conv weights float on CUDA/Metal/DNNL. Users: Whisper stem, wav2vec2(-BERT) only.
+  _Bridge: Metal's fp16 upcast island + mps-convolution-options.md for graduation._
+
+- **[references/converter-quantization-and-fusion.md](references/converter-quantization-and-fusion.md)**
+  — What converters do to weights beyond layout: `_quantize` (eligibility = sibling
+  `{name}_scale` attr exists — embeddings/conv ARE quantizable, norms/biases never; int8
+  per-row 127/amax), AWQ bypasses `_quantize` via `set_linear` qweight/scales/qzeros,
+  `fuse_linear` QKV concat (gate+up is NOT fused — separate `linear_0`/`linear_0_noact`),
+  alias-before-quantize ordering, and how the saved scheme becomes `infer_compute_type` at
+  load. _Cross-refs compute-type-resolution + weight-loading._
+
 ## Conventions for this skill
 
 - Each reference cites the source files it was built from (top of file) with real
