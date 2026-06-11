@@ -80,16 +80,29 @@ mode::multiply|multiply_accumulate)`; `K = dynamic_length_v<int>` is the default
 int8×int8 with an int32 destination, CT2's exact contract — is base-Metal-4. The int4
 weight path (`char/half/bfloat × int4b_format`) is OS 26.4+.
 
-## What the docs do NOT say — flag before betting on this
+## What the docs did NOT say — ANSWERED BY MEASUREMENT 2026-06-11 (M4 Max)
 
-- **Performance.** Nothing states whether `matmul2d` char×char maps to anything faster
-  than the ALU path the hand-tiled kernel already saturates (Apple GPUs have no
-  documented int8 matrix units — `simdgroup-matrix-functions.md`). "Tuned for Apple
-  silicon" is the entire claim. The spec's own §6.8 note steers new matmul work toward
-  Tensors+MPP, which _suggests_ this is the blessed path, but only a benchmark answers it.
-- **Accumulator semantics.** C's element type is `int`, implying int32 accumulation, but
-  no exactness statement is made (CT2's contract is bit-exact int32 — re-validate, don't
-  assume). `relaxed_precision` is documented for float only.
+The flagged unknowns below were all resolved by the Task-6 experiment
+(`experiments/mpp_matmul2d_proto.mm` / `mpp_matmul2d_tune.mm`; integrated as
+`ct2_mpp_gemm_s8_nt` in `src/metal/kernels/kernels_mpp_msl.h`; numbers in
+`METAL_BENCHMARKS.md`):
+
+- **Performance: YES, dramatically.** char×char→int `matmul2d` ties MPS fp16 GEMM
+  (2048³: 1.51 ms ≈ fp16's 1.49; ~11.4 T-eff-FLOPS) — 4.8× over the hand-tiled ALU
+  kernel. The win REQUIRES tuning: **2 cooperating SIMD-groups** (Apple's 4-SG header
+  example is 2–5× slower on every shape), 16×64 tiles, and the interior/edge
+  static-extent `slice<Extents...>` split.
+- **Accumulator: int32-bit-exact**, verified vs a host triple loop at k=2048 over the
+  full int8 range plus saturated inputs. `mode::multiply` overwrites C (no read).
+- **Runtime compile: works** via `newLibraryWithSource` with
+  `options.languageVersion = MTLLanguageVersion4_0` and
+  `#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>` — no Metal-4
+  pipeline/encoder machinery needed; classic compute encoder + `setBuffer` suffice
+  (inline tensors wrap the raw pointers in-shader).
+- **Gotchas:** MPP's dispatch matches element types EXACTLY — `int8_t`/`int32_t`,
+  non-const (`char` or `const int8_t` → "Unsupported type" static_assert). The
+  stdlib spells the header comment's `static_slice` as `slice<Extents...>`.
+  `relaxed_precision` remains float-only.
 - **Hardware floor.** DocC stamps say OS 26.0; which `MTLGPUFamily` supports MPP is
   delegated to the Feature Set Tables (not fetched — PDF, not DocC).
 - Whether `matmul2d` is callable from a _classic_ (pre-MTL4) compute pipeline compiled at

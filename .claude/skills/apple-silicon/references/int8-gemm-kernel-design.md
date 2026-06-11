@@ -120,12 +120,16 @@ current, the prose is not.
 
 **The tiled kernel is ALU-bound at ~2.4 T-MAC/s vs a ~3.7 ceiling** (int MAC = 2 ALU
 ops, no integer matrix units), while MPS fp16 rides dedicated FMA pipelines to
-~5.9 T-FMA/s. Large-m int8 is therefore **structurally ~3–5× slower than MPS fp16 at
-the kernel level — do not expect a tiling tweak to close that.** The honest future
-lever (unimplemented) is the exactness-preserving `simdgroup_float8x8` staging trick:
-int8→float tiles are exact, and per-1024-deep-chunk float accumulation stays < 2²⁴.
-E2e the package still wins where it matters: **peak RSS 1453 vs 2494 MB (−42%)**, e2e
-within ~1.26× of fp16 on Qwen2.5-0.5B (vs the shim's ~2.5×).
+~5.9 T-FMA/s. Large-m int8 is therefore structurally ~3–5× slower than MPS fp16
+_for a hand-written ALU kernel_. **SUPERSEDED 2026-06-11 for m>8 on macOS 26+:**
+the Metal-4 MPP `matmul2d` path (`metal4-tensors-and-mpp.md`, `ct2_mpp_gemm_s8_nt`
+in `kernels_mpp_msl.h`) is int32-bit-exact and **ties MPS fp16** (2048³: 1.51 vs
+1.49 ms, ~11.4 T-eff-FLOPS) — the tiled kernel is now the fallback (pre-26 OSes,
+non-NT layouts, integral alpha ≠ 1). The `simdgroup_float8x8` staging trick
+(int8→float tiles exact, per-1024-chunk accumulation < 2²⁴) is therefore moot —
+kept here only in case the MPP path ever has to be abandoned.
+E2e the package wins where it matters: **peak RSS 1453 vs 2494 MB (−42%)**, e2e
+prefill within ~17% of fp16 on Qwen2.5-0.5B post-MPP (was ~1.26×; shim was ~2.5×).
 
 ### Relevance to the CT2 Metal backend
 

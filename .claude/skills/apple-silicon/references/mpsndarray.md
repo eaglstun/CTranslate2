@@ -95,6 +95,12 @@ Documented, verified on DocC 2026-06-11:
   must establish. Exactness differs too: CT2's contract is exact int32 accumulation
   (`int8-gemm-kernel-design.md`); MPS documents nothing about its accumulator, so parity
   must be re-validated, not assumed.
+- **2026-06-11 verdict: deliberately not benchmarked.** Task 6 measured the other
+  candidate first — Metal-4 MPP `matmul2d` (`metal4-tensors-and-mpp.md`) — and it ties
+  MPS fp16 GEMM while staying int32-bit-exact, leaving no headroom for this float-output
+  API to win and nothing it could add but pipeline restructuring plus an unresolved
+  exactness question. Revisit only if the MPP path must be abandoned or a macOS 15–25
+  deployment target ever matters (MPSNDArray quantized matmul is macOS 15+, MPP is 26+).
 - Constraints: `initWithBuffer:` (zero-copy over CT2's MTLBuffers) and the quantized
   kernel are both macOS 15+ → needs an availability gate plus the existing kernel as
   fallback. Per the project's measure-first rule, the experiment is: same shapes as the
