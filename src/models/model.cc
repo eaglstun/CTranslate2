@@ -209,8 +209,9 @@ namespace ctranslate2 {
             if (is_conv) {
               kernel_size = variable.dim(2);
               variable.reshape({variable.dim(0), variable.dim(1) * variable.dim(2)});
-              // For CUDA and DNNL backend, quantized convolution is not supported. Hence, convert to float_dtype.
+              // For CUDA, Metal, and DNNL backend, quantized convolution is not supported. Hence, convert to float_dtype.
               if (device == Device::CUDA
+                || device == Device::METAL
 #ifdef CT2_WITH_DNNL
                 || true
 #endif

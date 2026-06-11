@@ -1,2 +1,4 @@
-{"consumer": "whisperx", "pass": false, "error": "driver failed"}
-{"consumer": "faster_whisper", "pass": false, "error": "driver failed"}
+{"consumer": "whisperx", "metric": "wer", "value": 0.0, "tolerance": 0.1, "golden_compute_type": "float16", "candidate_compute_type": "int8", "pass": true}
+{"consumer": "faster_whisper", "metric": "wer", "value": 0.0706, "tolerance": 0.1, "golden_compute_type": "float16", "candidate_compute_type": "int8", "pass": true}
+{"consumer": "qwen2.5", "metric": "agreement", "value": 0.9, "tolerance": 0.9, "golden_compute_type": "float16", "candidate_compute_type": "int8", "pass": true}
+{"consumer": "nllb", "metric": "char_similarity", "value": 1.0, "tolerance": 0.9, "golden_compute_type": "float16", "candidate_compute_type": "int8", "pass": true}

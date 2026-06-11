@@ -272,6 +272,32 @@ resident-memory win that was the point of the phase. New tests: saturated-accumu
 exactness, all-four-transpose-layouts vs a host triple loop, deep-k oracle now covering
 both kernels (m=3 GEMV / m=16 tiled), `DISABLED_BenchmarkGemmInt8`.
 
+### ✅ M13 — downstream validation harness, int8 green in all four consumers (2026-06-11)
+
+`scripts/validate-downstream.sh` + `tests/downstream/` (config, drivers, goldens,
+results): builds the lib from this worktree → `cmake --install` to a pinned prefix →
+rebuilds the wheel (`CTRANSLATE2_ROOT`) → force-reinstalls into each consumer venv →
+runs each consumer's canonical job → diffs against an **fp16-on-Metal golden** from the
+same build, with quant-error tolerances. This is the loose end-to-end oracle from
+`INT8_METAL_PLAN.md`; the C++ op suite remains the bit-tight one.
+
+Measured 2026-06-11 (M4 Max, single full run; details in
+`tests/downstream/results/RESULTS.md`) — **4/4 pass**:
+
+| consumer                 | metric                   | int8 value | tolerance |
+| ------------------------ | ------------------------ | ---------- | --------- |
+| whisperX (small, 30s)    | WER vs fp16              | 0.000      | ≤ 0.10    |
+| faster-whisper (small)   | WER vs fp16              | 0.071      | ≤ 0.10    |
+| Qwen2.5-0.5B-int8        | teacher-forced agreement | 0.900      | ≥ 0.90    |
+| NLLB-600M-int8 (eng→fra) | char similarity vs fp16  | 1.000      | ≥ 0.90    |
+
+The harness immediately caught a real bug: with int8 now advertised on Metal, model
+loading quantized **conv** weights too, and Whisper crashed (`Conversion from int8 to
+float32 is not yet implemented`) — Metal has no quantized convolution (Conv1D runs via
+the CPU reference). Fix: `src/models/model.cc` keeps conv weights in `float_dtype` on
+`Device::METAL`, the same guard CUDA/DNNL already use. Post-fix suite:
+`*METAL*` 73 passed / 2 skipped / 0 failed, `*Metal*` 22/22.
+
 ## What runs where today
 
 | Operation                                                                    | Metal execution                                                                                               |
