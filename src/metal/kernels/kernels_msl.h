@@ -609,6 +609,154 @@ kernel void ct2_mul_half(device const half* a [[buffer(0)]],
   ct2_mul_impl<half>(a, b, c, b_is_scalar, scalar, gid);
 }
 
+// ---- INT8 quantization ----
+// CT2's int8 scheme is symmetric per-row dynamic quantization (no zero-point):
+// scale = 127 / amax(row), y = round_or_truncate(x * scale). One threadgroup per row,
+// same fixed power-of-two tree reduction as the norms. Divisions use precise::divide:
+// the CPU reference divides with IEEE semantics, and the Quantize op tests compare the
+// scales near-exactly — fast-math division is not correctly rounded.
+constant uint CT2_QUANT_TG = 256;
+
+template <typename T>
+inline void ct2_quantize_s8_impl(device const T* input, device char* output,
+                                 device float* scales,
+                                 uint depth, uint round_before_cast,
+                                 uint row, uint tid, threadgroup float* scratch) {
+  device const T* x = input + (ulong)row * (ulong)depth;
+  device char* y = output + (ulong)row * (ulong)depth;
+
+  float local_amax = 0.0f;
+  for (uint j = tid; j < depth; j += CT2_QUANT_TG)
+    local_amax = max(local_amax, fabs((float)x[j]));
+  scratch[tid] = local_amax;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint s = CT2_QUANT_TG / 2u; s > 0u; s >>= 1) {
+    if (tid < s)
+      scratch[tid] = max(scratch[tid], scratch[tid + s]);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+
+  const float amax = scratch[0];
+  const float scale = (amax != 0.0f) ? precise::divide(127.0f, amax) : 1.0f;
+  if (tid == 0u)
+    scales[row] = scale;
+
+  // rint = round half to even, matching the CPU's nearbyintf / vrndnq_f32; the
+  // legacy (round_before_cast=false) path truncates toward zero like a C cast.
+  for (uint j = tid; j < depth; j += CT2_QUANT_TG) {
+    const float v = (float)x[j] * scale;
+    y[j] = (char)(round_before_cast != 0u ? rint(v) : v);
+  }
+}
+
+kernel void ct2_quantize_s8_float(device const float* input [[buffer(0)]],
+                                  device char* output        [[buffer(1)]],
+                                  device float* scales       [[buffer(2)]],
+                                  constant uint& depth        [[buffer(3)]],
+                                  constant uint& round_before_cast [[buffer(4)]],
+                                  uint row [[threadgroup_position_in_grid]],
+                                  uint tid [[thread_position_in_threadgroup]]) {
+  threadgroup float scratch[CT2_QUANT_TG];
+  ct2_quantize_s8_impl<float>(input, output, scales, depth, round_before_cast, row, tid, scratch);
+}
+
+kernel void ct2_quantize_s8_half(device const half* input [[buffer(0)]],
+                                 device char* output       [[buffer(1)]],
+                                 device float* scales      [[buffer(2)]],
+                                 constant uint& depth       [[buffer(3)]],
+                                 constant uint& round_before_cast [[buffer(4)]],
+                                 uint row [[threadgroup_position_in_grid]],
+                                 uint tid [[thread_position_in_threadgroup]]) {
+  threadgroup float scratch[CT2_QUANT_TG];
+  ct2_quantize_s8_impl<half>(input, output, scales, depth, round_before_cast, row, tid, scratch);
+}
+
+// ---- INT8 dequantization (simple form) ----  y = (float)x * (1 / scale[row]).
+// The reciprocal-then-multiply spelling matches the CPU kernel exactly (it precomputes
+// r_scale = 1/scale per row); one thread per element.
+template <typename T>
+inline void ct2_dequantize_s8_impl(device const char* input, device const float* scales,
+                                   device T* output, uint depth, uint gid) {
+  const uint row = gid / depth;
+  const float r_scale = precise::divide(1.0f, scales[row]);
+  output[gid] = (T)((float)input[gid] * r_scale);
+}
+
+kernel void ct2_dequantize_s8_float(device const char* input   [[buffer(0)]],
+                                    device const float* scales [[buffer(1)]],
+                                    device float* output       [[buffer(2)]],
+                                    constant uint& depth        [[buffer(3)]],
+                                    uint gid [[thread_position_in_grid]]) {
+  ct2_dequantize_s8_impl<float>(input, scales, output, depth, gid);
+}
+
+kernel void ct2_dequantize_s8_half(device const char* input   [[buffer(0)]],
+                                   device const float* scales [[buffer(1)]],
+                                   device half* output        [[buffer(2)]],
+                                   constant uint& depth        [[buffer(3)]],
+                                   uint gid [[thread_position_in_grid]]) {
+  ct2_dequantize_s8_impl<half>(input, scales, output, depth, gid);
+}
+
+// ---- INT8 GEMM-output dequantization ----  the Dense epilogue for quantized GEMM:
+// y[i][j] = act(((float)c[i][j] * (1/a_scale[i])) / b_scale[j] + bias[j]).
+// a_scale is the dynamic per-row activation scale, b_scale the static per-output-channel
+// weight scale (the !trans_a && trans_b layout Dense always uses). Operation order and
+// the reciprocal/divide split mirror the CPU kernel. One thread per element.
+template <typename T>
+inline void ct2_dequant_gemm_out_impl(device const int* c, device const float* a_scale,
+                                      device const float* b_scale, device const T* bias,
+                                      device T* y, uint depth, uint has_bias, int act,
+                                      uint gid) {
+  const uint row = gid / depth;
+  const uint col = gid - row * depth;
+  float v = (float)c[gid] * precise::divide(1.0f, a_scale[row]);
+  v = precise::divide(v, b_scale[col]);
+  if (has_bias != 0u)
+    v += (float)bias[col];
+  y[gid] = (T)ct2_apply_activation(v, act);
+}
+
+kernel void ct2_dequant_gemm_out_float(device const int* c        [[buffer(0)]],
+                                       device const float* a_scale [[buffer(1)]],
+                                       device const float* b_scale [[buffer(2)]],
+                                       device const float* bias    [[buffer(3)]],
+                                       device float* y             [[buffer(4)]],
+                                       constant uint& depth         [[buffer(5)]],
+                                       constant uint& has_bias      [[buffer(6)]],
+                                       constant int& act            [[buffer(7)]],
+                                       uint gid [[thread_position_in_grid]]) {
+  ct2_dequant_gemm_out_impl<float>(c, a_scale, b_scale, bias, y, depth, has_bias, act, gid);
+}
+
+kernel void ct2_dequant_gemm_out_half(device const int* c        [[buffer(0)]],
+                                      device const float* a_scale [[buffer(1)]],
+                                      device const float* b_scale [[buffer(2)]],
+                                      device const half* bias     [[buffer(3)]],
+                                      device half* y              [[buffer(4)]],
+                                      constant uint& depth         [[buffer(5)]],
+                                      constant uint& has_bias      [[buffer(6)]],
+                                      constant int& act            [[buffer(7)]],
+                                      uint gid [[thread_position_in_grid]]) {
+  ct2_dequant_gemm_out_impl<half>(c, a_scale, b_scale, bias, y, depth, has_bias, act, gid);
+}
+
+// ---- INT8 GEMM shim casts (Phase 1) ----  int8 operands widen to fp32 for the MPS
+// float GEMM; the float product (an exact integer for |v| < 2^24) casts back to the
+// int32 accumulator the int8 GEMM contract expects. rint guards against any non-exact
+// representation at the extreme end.
+kernel void ct2_s8_to_float(device const char* x [[buffer(0)]],
+                            device float* y       [[buffer(1)]],
+                            uint gid [[thread_position_in_grid]]) {
+  y[gid] = (float)x[gid];
+}
+
+kernel void ct2_float_to_s32(device const float* x [[buffer(0)]],
+                             device int* y          [[buffer(1)]],
+                             uint gid [[thread_position_in_grid]]) {
+  y[gid] = (int)rint(x[gid]);
+}
+
 // ---- Strided copy ----  type-agnostic byte copy underlying Concat/Split/Slide:
 // dst[i*dst_step + d] = src[i*src_step + d] for i in [0,iter), d in [0,copy_size) (bytes).
 kernel void ct2_strided_copy_bytes(device const uchar* src   [[buffer(0)]],

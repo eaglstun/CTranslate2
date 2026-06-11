@@ -95,6 +95,37 @@ namespace ctranslate2 {
     void mul(const float16_t* a, const float16_t* b, float16_t* c, dim_t size,
              bool b_is_scalar, float scalar);
 
+    // Per-row symmetric int8 quantization over the last dimension, matching the CPU
+    // quantize_s8 kernel: scale[row] = amax != 0 ? 127/amax : 1, output = round-to-even
+    // (round_before_cast) or truncate-toward-zero of input * scale[row]. The u8-shift
+    // variant is CPU-only and is not provided here. Scales are always fp32.
+    void quantize_s8(const float* input, int8_t* output, float* scales,
+                     dim_t batch_size, dim_t depth, bool round_before_cast);
+    void quantize_s8(const float16_t* input, int8_t* output, float* scales,
+                     dim_t batch_size, dim_t depth, bool round_before_cast);
+
+    // Simple int8 dequantization: output = input * (1 / scales[row]), per-row scales.
+    void dequantize_s8(const int8_t* input, const float* scales, float* output,
+                       dim_t batch_size, dim_t depth);
+    void dequantize_s8(const int8_t* input, const float* scales, float16_t* output,
+                       dim_t batch_size, dim_t depth);
+
+    // Quantized-GEMM output dequantization (the Dense epilogue, !trans_a && trans_b):
+    // y[i][j] = act((c[i][j] / a_scale[i]) / b_scale[j] + bias[j]) over a [batch, depth]
+    // int32 accumulator. `activation` matches the ActivationType enum; pass a negative
+    // value for none; bias may be null.
+    void dequantize_gemm_output_s8(const int32_t* c, const float* a_scale, const float* b_scale,
+                                   const float* bias, float* y,
+                                   dim_t batch_size, dim_t depth, int activation);
+    void dequantize_gemm_output_s8(const int32_t* c, const float* a_scale, const float* b_scale,
+                                   const float16_t* bias, float16_t* y,
+                                   dim_t batch_size, dim_t depth, int activation);
+
+    // Phase-1 int8 GEMM shim casts: widen int8 to fp32 for the MPS float GEMM and cast
+    // the float product back to the int32 accumulator (exact for |v| < 2^24).
+    void s8_to_float(const int8_t* x, float* y, dim_t size);
+    void float_to_s32(const float* x, int32_t* y, dim_t size);
+
     // Type-agnostic strided copy underlying Concat/Split/Slide: for i in [0, iter_size) and
     // d in [0, copy_size_bytes), dst[i*dst_step_bytes + d] = src[i*src_step_bytes + d]. All
     // sizes/strides are in BYTES. Pointers must be Metal-allocated.

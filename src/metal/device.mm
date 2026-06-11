@@ -133,9 +133,15 @@ namespace ctranslate2 {
     }
 
     void commit_command_buffer(id<MTLCommandBuffer> command_buffer) {
-      [command_buffer commit];
       {
+        // The commit MUST happen inside the lock: flush()'s "waiting on the last-committed
+        // buffer implies all prior work is done" only holds if the queue's commit order
+        // matches the order of g_last_committed updates. With the commit outside the lock,
+        // two worker threads (e.g. Conv1D's grouped parallel_for) can commit in one order
+        // and record in the other, leaving flush() waiting on a buffer that is not last in
+        // the queue — the CPU then reads rows whose GPU write has not completed.
         std::lock_guard<std::mutex> lock(g_commit_mutex);
+        [command_buffer commit];
         [command_buffer retain];
         [g_last_committed release];
         g_last_committed = command_buffer;

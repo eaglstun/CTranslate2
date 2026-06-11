@@ -151,6 +151,13 @@ namespace ctranslate2 {
 #endif
     case Device::CPU:
       return cpu::has_gemm_backend(ComputeType::INT8);
+#ifdef CT2_WITH_METAL
+    case Device::METAL:
+      // Quantize/Dequantize run as native Metal kernels; the int8 GEMM currently rides
+      // the fp32 MPS GEMM through a cast shim (correct, not yet memory-optimal). Note
+      // AUTO deliberately does NOT pick int8 on Metal (see resolve_compute_type).
+      return true;
+#endif
     default:
       return false;
     }
@@ -273,6 +280,12 @@ namespace ctranslate2 {
     }
 
     case ComputeType::AUTO: {
+      if (device == Device::METAL) {
+        // Preserve the pre-int8 behavior: int8 on Metal is currently correctness-first
+        // (the GEMM is a cast shim with no memory or speed win), so "auto" must not
+        // start quantizing float models. Explicitly requested int8 types still resolve.
+        return ComputeType::FLOAT32;
+      }
       if (device == Device::CUDA) {
         if (support_int8 && support_float16)
           return ComputeType::INT8_FLOAT16;

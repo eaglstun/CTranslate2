@@ -2,6 +2,10 @@
 
 #include "dispatch.h"
 
+#ifdef CT2_WITH_METAL
+#  include "metal/primitives.h"
+#endif
+
 namespace ctranslate2 {
   namespace ops {
 
@@ -31,6 +35,22 @@ namespace ctranslate2 {
         if (scale.size() != batch_size)
           throw std::invalid_argument("INT8 dequantization expects per-batch scales");
 
+#ifdef CT2_WITH_METAL
+        // GPU dequantization; also covers fp16 outputs (int8 embeddings in an
+        // int8_float16 model), which the generic dispatch would reject without CUDA.
+        if (output.device() == Device::METAL
+            && (output.dtype() == DataType::FLOAT32 || output.dtype() == DataType::FLOAT16)) {
+          const dim_t depth = input.dim(-1);
+          if (output.dtype() == DataType::FLOAT32)
+            metal::dequantize_s8(input.data<int8_t>(), scale.data<float>(),
+                                 output.data<float>(), batch_size, depth);
+          else
+            metal::dequantize_s8(input.data<int8_t>(), scale.data<float>(),
+                                 output.data<float16_t>(), batch_size, depth);
+          break;
+        }
+#endif
+
         DEVICE_AND_FLOAT_DISPATCH("Dequantize", output.device(), output.dtype(),
                                   (dequantize<D, int8_t, T>(input, scale, output)));
 
@@ -52,6 +72,33 @@ namespace ctranslate2 {
                                 const StorageView* bias) const {
       PROFILE("DequantizeGemmOutput");
       y.resize_as(c);
+
+#ifdef CT2_WITH_METAL
+      // The Dense epilogue layout: per-row activation scales, per-output-channel weight
+      // scales (!trans_a && trans_b). Other scale layouts fall through to the CPU
+      // reference. Also covers fp16 outputs (int8_float16 models).
+      if (y.device() == Device::METAL
+          && (y.dtype() == DataType::FLOAT32 || y.dtype() == DataType::FLOAT16)
+          && !transpose_a && transpose_b
+          && !a_scale.is_scalar() && !b_scale.is_scalar()) {
+        const dim_t depth = c.dim(-1);
+        const dim_t batch_size = c.size() / depth;
+        if (a_scale.size() == batch_size && b_scale.size() == depth) {
+          const int activation = _activation_type ? static_cast<int>(*_activation_type) : -1;
+          if (y.dtype() == DataType::FLOAT32)
+            metal::dequantize_gemm_output_s8(c.data<int32_t>(),
+                                             a_scale.data<float>(), b_scale.data<float>(),
+                                             bias ? bias->data<float>() : nullptr,
+                                             y.data<float>(), batch_size, depth, activation);
+          else
+            metal::dequantize_gemm_output_s8(c.data<int32_t>(),
+                                             a_scale.data<float>(), b_scale.data<float>(),
+                                             bias ? bias->data<float16_t>() : nullptr,
+                                             y.data<float16_t>(), batch_size, depth, activation);
+          return;
+        }
+      }
+#endif
 
       DEVICE_AND_FLOAT_DISPATCH(
         "DequantizeGemmOutput", y.device(), y.dtype(),

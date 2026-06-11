@@ -439,6 +439,174 @@ namespace ctranslate2 {
       binary_elementwise_impl("ct2_add_half", a, b, c, size, b_is_scalar, scalar);
     }
 
+    // Must match CT2_QUANT_TG in kernels_msl.h.
+    static constexpr NSUInteger kQuantizeThreadgroup = 256;
+
+    namespace {
+      void quantize_s8_impl(const char* pipeline_name,
+                            const void* input, int8_t* output, float* scales,
+                            dim_t batch_size, dim_t depth, bool round_before_cast) {
+        if (batch_size == 0 || depth == 0)
+          return;
+
+        const BufferRange in_buffer = buffer_and_offset(input);
+        const BufferRange out_buffer = buffer_and_offset(output);
+        const BufferRange scales_buffer = buffer_and_offset(scales);
+
+        id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
+        id<MTLCommandBuffer> command_buffer = new_command_buffer();
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        [encoder setComputePipelineState:pso];
+        [encoder setBuffer:in_buffer.buffer offset:in_buffer.offset atIndex:0];
+        [encoder setBuffer:out_buffer.buffer offset:out_buffer.offset atIndex:1];
+        [encoder setBuffer:scales_buffer.buffer offset:scales_buffer.offset atIndex:2];
+        const uint32_t depth_u = static_cast<uint32_t>(depth);
+        const uint32_t round_u = round_before_cast ? 1u : 0u;
+        [encoder setBytes:&depth_u length:sizeof(depth_u) atIndex:3];
+        [encoder setBytes:&round_u length:sizeof(round_u) atIndex:4];
+
+        // One threadgroup per row; the kernel's tree reduction assumes CT2_QUANT_TG threads.
+        const MTLSize grid = MTLSizeMake(static_cast<NSUInteger>(batch_size), 1, 1);
+        const MTLSize group = MTLSizeMake(kQuantizeThreadgroup, 1, 1);
+        [encoder dispatchThreadgroups:grid threadsPerThreadgroup:group];
+        [encoder endEncoding];
+        commit_command_buffer(command_buffer);
+      }
+
+      void dequantize_s8_impl(const char* pipeline_name,
+                              const int8_t* input, const float* scales, void* output,
+                              dim_t batch_size, dim_t depth) {
+        const dim_t total = batch_size * depth;
+        if (total == 0)
+          return;
+
+        const BufferRange in_buffer = buffer_and_offset(input);
+        const BufferRange scales_buffer = buffer_and_offset(scales);
+        const BufferRange out_buffer = buffer_and_offset(output);
+
+        id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
+        id<MTLCommandBuffer> command_buffer = new_command_buffer();
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        [encoder setComputePipelineState:pso];
+        [encoder setBuffer:in_buffer.buffer offset:in_buffer.offset atIndex:0];
+        [encoder setBuffer:scales_buffer.buffer offset:scales_buffer.offset atIndex:1];
+        [encoder setBuffer:out_buffer.buffer offset:out_buffer.offset atIndex:2];
+        const uint32_t depth_u = static_cast<uint32_t>(depth);
+        [encoder setBytes:&depth_u length:sizeof(depth_u) atIndex:3];
+
+        NSUInteger tg = pso.maxTotalThreadsPerThreadgroup;
+        if (tg > (NSUInteger)total) tg = total;
+        [encoder dispatchThreads:MTLSizeMake(total, 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+        [encoder endEncoding];
+        commit_command_buffer(command_buffer);
+      }
+
+      void dequantize_gemm_output_s8_impl(const char* pipeline_name,
+                                          const int32_t* c, const float* a_scale,
+                                          const float* b_scale, const void* bias, void* y,
+                                          dim_t batch_size, dim_t depth, int activation) {
+        const dim_t total = batch_size * depth;
+        if (total == 0)
+          return;
+
+        const BufferRange c_buffer = buffer_and_offset(c);
+        const BufferRange a_scale_buffer = buffer_and_offset(a_scale);
+        const BufferRange b_scale_buffer = buffer_and_offset(b_scale);
+        const BufferRange y_buffer = buffer_and_offset(y);
+        const uint32_t has_bias = bias ? 1u : 0u;
+        // Index 3 must always be bound; reuse c as a never-read dummy when there is no bias.
+        const BufferRange bias_buffer = bias ? buffer_and_offset(bias) : c_buffer;
+
+        id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
+        id<MTLCommandBuffer> command_buffer = new_command_buffer();
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        [encoder setComputePipelineState:pso];
+        [encoder setBuffer:c_buffer.buffer offset:c_buffer.offset atIndex:0];
+        [encoder setBuffer:a_scale_buffer.buffer offset:a_scale_buffer.offset atIndex:1];
+        [encoder setBuffer:b_scale_buffer.buffer offset:b_scale_buffer.offset atIndex:2];
+        [encoder setBuffer:bias_buffer.buffer offset:bias_buffer.offset atIndex:3];
+        [encoder setBuffer:y_buffer.buffer offset:y_buffer.offset atIndex:4];
+        const uint32_t depth_u = static_cast<uint32_t>(depth);
+        const int32_t act = activation;
+        [encoder setBytes:&depth_u length:sizeof(depth_u) atIndex:5];
+        [encoder setBytes:&has_bias length:sizeof(has_bias) atIndex:6];
+        [encoder setBytes:&act length:sizeof(act) atIndex:7];
+
+        NSUInteger tg = pso.maxTotalThreadsPerThreadgroup;
+        if (tg > (NSUInteger)total) tg = total;
+        [encoder dispatchThreads:MTLSizeMake(total, 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+        [encoder endEncoding];
+        commit_command_buffer(command_buffer);
+      }
+
+      void cast_impl(const char* pipeline_name, const void* x, void* y, dim_t size) {
+        if (size == 0)
+          return;
+        const BufferRange x_buffer = buffer_and_offset(x);
+        const BufferRange y_buffer = buffer_and_offset(y);
+
+        id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
+        id<MTLCommandBuffer> command_buffer = new_command_buffer();
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        [encoder setComputePipelineState:pso];
+        [encoder setBuffer:x_buffer.buffer offset:x_buffer.offset atIndex:0];
+        [encoder setBuffer:y_buffer.buffer offset:y_buffer.offset atIndex:1];
+
+        NSUInteger tg = pso.maxTotalThreadsPerThreadgroup;
+        if (tg > (NSUInteger)size) tg = size;
+        [encoder dispatchThreads:MTLSizeMake(size, 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+        [encoder endEncoding];
+        commit_command_buffer(command_buffer);
+      }
+    }
+
+    void quantize_s8(const float* input, int8_t* output, float* scales,
+                     dim_t batch_size, dim_t depth, bool round_before_cast) {
+      quantize_s8_impl("ct2_quantize_s8_float", input, output, scales,
+                       batch_size, depth, round_before_cast);
+    }
+
+    void quantize_s8(const float16_t* input, int8_t* output, float* scales,
+                     dim_t batch_size, dim_t depth, bool round_before_cast) {
+      quantize_s8_impl("ct2_quantize_s8_half", input, output, scales,
+                       batch_size, depth, round_before_cast);
+    }
+
+    void dequantize_s8(const int8_t* input, const float* scales, float* output,
+                       dim_t batch_size, dim_t depth) {
+      dequantize_s8_impl("ct2_dequantize_s8_float", input, scales, output, batch_size, depth);
+    }
+
+    void dequantize_s8(const int8_t* input, const float* scales, float16_t* output,
+                       dim_t batch_size, dim_t depth) {
+      dequantize_s8_impl("ct2_dequantize_s8_half", input, scales, output, batch_size, depth);
+    }
+
+    void dequantize_gemm_output_s8(const int32_t* c, const float* a_scale, const float* b_scale,
+                                   const float* bias, float* y,
+                                   dim_t batch_size, dim_t depth, int activation) {
+      dequantize_gemm_output_s8_impl("ct2_dequant_gemm_out_float", c, a_scale, b_scale,
+                                     bias, y, batch_size, depth, activation);
+    }
+
+    void dequantize_gemm_output_s8(const int32_t* c, const float* a_scale, const float* b_scale,
+                                   const float16_t* bias, float16_t* y,
+                                   dim_t batch_size, dim_t depth, int activation) {
+      dequantize_gemm_output_s8_impl("ct2_dequant_gemm_out_half", c, a_scale, b_scale,
+                                     bias, y, batch_size, depth, activation);
+    }
+
+    void s8_to_float(const int8_t* x, float* y, dim_t size) {
+      cast_impl("ct2_s8_to_float", x, y, size);
+    }
+
+    void float_to_s32(const float* x, int32_t* y, dim_t size) {
+      cast_impl("ct2_float_to_s32", x, y, size);
+    }
+
     void strided_copy(const void* src, void* dst,
                       dim_t copy_size_bytes, dim_t src_step_bytes, dim_t dst_step_bytes,
                       dim_t iter_size) {

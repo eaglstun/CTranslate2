@@ -2,6 +2,10 @@
 
 #include "dispatch.h"
 
+#ifdef CT2_WITH_METAL
+#  include "metal/primitives.h"
+#endif
+
 namespace ctranslate2 {
   namespace ops {
 
@@ -36,6 +40,24 @@ namespace ctranslate2 {
         const dim_t depth = input.dim(-1);
         const dim_t batch_size = input.size() / depth;
         scale.resize({batch_size});
+
+#ifdef CT2_WITH_METAL
+        // Per-row signed int8 quantization on the GPU; also covers fp16 inputs, which the
+        // generic float dispatch below would reject in a non-CUDA build. The u8-shift
+        // variant is a CPU GEMM-backend (u8s8s32) concern and falls through to the CPU
+        // reference over unified memory.
+        if (input.device() == Device::METAL
+            && !_shift_to_uint8
+            && (input.dtype() == DataType::FLOAT32 || input.dtype() == DataType::FLOAT16)) {
+          if (input.dtype() == DataType::FLOAT32)
+            metal::quantize_s8(input.data<float>(), output.data<int8_t>(), scale.data<float>(),
+                               batch_size, depth, _round_before_cast);
+          else
+            metal::quantize_s8(input.data<float16_t>(), output.data<int8_t>(), scale.data<float>(),
+                               batch_size, depth, _round_before_cast);
+          break;
+        }
+#endif
 
         DEVICE_AND_FLOAT_DISPATCH("Quantize", input.device(), input.dtype(),
                                   (quantize<D, T, int8_t>(input, output, scale)));
