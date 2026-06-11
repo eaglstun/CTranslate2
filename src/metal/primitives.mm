@@ -596,6 +596,45 @@ namespace ctranslate2 {
       const BufferRange b_buffer = buffer_and_offset(b);
       const BufferRange c_buffer = buffer_and_offset(c);
 
+      // Small-m fast path (decode runs every Dense at m = batch): one SIMD-group per
+      // output element instead of a mostly-empty 64x64 tile. Dense layout only, and the
+      // kernel reads char4, so k and both operand offsets/strides must be 4-byte aligned;
+      // anything else takes the general tiled kernel below (correct, just slower).
+      if (!transpose_a && transpose_b && m <= 8
+          && k % 4 == 0 && lda % 4 == 0 && ldb % 4 == 0
+          && a_buffer.offset % 4 == 0 && b_buffer.offset % 4 == 0) {
+        id<MTLComputePipelineState> pso = get_pipeline("ct2_gemv_s8");
+        id<MTLCommandBuffer> command_buffer = new_command_buffer();
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        [encoder setComputePipelineState:pso];
+        [encoder setBuffer:a_buffer.buffer offset:a_buffer.offset atIndex:0];
+        [encoder setBuffer:b_buffer.buffer offset:b_buffer.offset atIndex:1];
+        [encoder setBuffer:c_buffer.buffer offset:c_buffer.offset atIndex:2];
+        const uint32_t n_u = static_cast<uint32_t>(n);
+        const uint32_t k_u = static_cast<uint32_t>(k);
+        const uint32_t lda_u = static_cast<uint32_t>(lda);
+        const uint32_t ldb_u = static_cast<uint32_t>(ldb);
+        const uint32_t ldc_u = static_cast<uint32_t>(ldc);
+        const int32_t alpha_i = alpha;
+        [encoder setBytes:&n_u length:sizeof(n_u) atIndex:3];
+        [encoder setBytes:&k_u length:sizeof(k_u) atIndex:4];
+        [encoder setBytes:&lda_u length:sizeof(lda_u) atIndex:5];
+        [encoder setBytes:&ldb_u length:sizeof(ldb_u) atIndex:6];
+        [encoder setBytes:&ldc_u length:sizeof(ldc_u) atIndex:7];
+        [encoder setBytes:&alpha_i length:sizeof(alpha_i) atIndex:8];
+
+        // 8 SIMD-groups per threadgroup, each producing one output element; the kernel's
+        // j = tg.x * 8 + simd_group mapping assumes exactly this shape.
+        const NSUInteger simd_width = pso.threadExecutionWidth;
+        const MTLSize grid = MTLSizeMake((static_cast<NSUInteger>(n) + 7) / 8,
+                                         static_cast<NSUInteger>(m), 1);
+        const MTLSize group = MTLSizeMake(simd_width * 8, 1, 1);
+        [encoder dispatchThreadgroups:grid threadsPerThreadgroup:group];
+        [encoder endEncoding];
+        commit_command_buffer(command_buffer);
+        return;
+      }
+
       id<MTLComputePipelineState> pso = get_pipeline("ct2_gemm_s8");
       id<MTLCommandBuffer> command_buffer = new_command_buffer();
       id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];

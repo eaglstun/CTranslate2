@@ -471,32 +471,36 @@ TEST_F(MetalTest, Int8DequantizeGemmOutputMatchesCPU) {
 
 TEST_F(MetalTest, Int8GemmDeepAccumulatorMatchesHostReference) {
   // Validate the int32 contract at a realistic LLM depth (k=2048, Dense's trans_b
-  // layout) against a host int32 triple loop. The native int8 kernel accumulates in
+  // layout) against a host int32 triple loop. The native int8 kernels accumulate in
   // int32 throughout, so this is bit-exact by construction — including the all-saturated
   // adversarial inputs the retired Phase-1 fp32 shim could not represent above 2^24.
-  const dim_t m = 3, n = 5, k = 2048;
-  std::mt19937 rng(42);
-  std::uniform_int_distribution<int> dist(-127, 127);
+  // m = 3 routes to the SIMD-group GEMV kernel, m = 16 to the threadgroup-tiled one;
+  // both must hold the same exactness bar.
+  for (const dim_t m : {dim_t(3), dim_t(16)}) {
+    const dim_t n = 5, k = 2048;
+    std::mt19937 rng(42);
+    std::uniform_int_distribution<int> dist(-127, 127);
 
-  std::vector<int8_t> a_vec(m * k), b_vec(n * k);
-  for (auto& v : a_vec) v = static_cast<int8_t>(dist(rng));
-  for (auto& v : b_vec) v = static_cast<int8_t>(dist(rng));
+    std::vector<int8_t> a_vec(m * k), b_vec(n * k);
+    for (auto& v : a_vec) v = static_cast<int8_t>(dist(rng));
+    for (auto& v : b_vec) v = static_cast<int8_t>(dist(rng));
 
-  std::vector<int32_t> expected_vec(m * n, 0);
-  for (dim_t i = 0; i < m; ++i)
-    for (dim_t j = 0; j < n; ++j) {
-      int32_t acc = 0;
-      for (dim_t kk = 0; kk < k; ++kk)
-        acc += static_cast<int32_t>(a_vec[i * k + kk]) * static_cast<int32_t>(b_vec[j * k + kk]);
-      expected_vec[i * n + j] = acc;
-    }
+    std::vector<int32_t> expected_vec(m * n, 0);
+    for (dim_t i = 0; i < m; ++i)
+      for (dim_t j = 0; j < n; ++j) {
+        int32_t acc = 0;
+        for (dim_t kk = 0; kk < k; ++kk)
+          acc += static_cast<int32_t>(a_vec[i * k + kk]) * static_cast<int32_t>(b_vec[j * k + kk]);
+        expected_vec[i * n + j] = acc;
+      }
 
-  StorageView a({m, k}, a_vec, Device::METAL);
-  StorageView b({n, k}, b_vec, Device::METAL);
-  StorageView c(DataType::INT32, Device::METAL);
-  ops::Gemm(/*alpha=*/1, /*beta=*/0, /*trans_a=*/false, /*trans_b=*/true)(a, b, c);
+    StorageView a({m, k}, a_vec, Device::METAL);
+    StorageView b({n, k}, b_vec, Device::METAL);
+    StorageView c(DataType::INT32, Device::METAL);
+    ops::Gemm(/*alpha=*/1, /*beta=*/0, /*trans_a=*/false, /*trans_b=*/true)(a, b, c);
 
-  expect_storage_eq(c.to(Device::CPU), StorageView({m, n}, expected_vec));
+    expect_storage_eq(c.to(Device::CPU), StorageView({m, n}, expected_vec));
+  }
 }
 
 TEST_F(MetalTest, Int8GemmSaturatedAccumulatorExact) {

@@ -778,7 +778,7 @@ kernel void ct2_gemm_s8(device const char* a [[buffer(0)]],
   const uint col0 = tg.x * CT2_GEMM_S8_BN;
   const uint lin = tid.y * 16u + tid.x;  // 0..255
 
-  int acc[4][4] = {{0}};
+  int4 acc[4] = {int4(0), int4(0), int4(0), int4(0)};  // acc[r][s]: micro-tile row r, col s
 
   for (uint k0 = 0; k0 < k; k0 += CT2_GEMM_S8_BK) {
     for (uint t = lin; t < CT2_GEMM_S8_BM * CT2_GEMM_S8_BK; t += 256u) {
@@ -803,16 +803,15 @@ kernel void ct2_gemm_s8(device const char* a [[buffer(0)]],
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
+    // The depth-major tiles make both operand reads contiguous char4s (tid.{x,y}*4 is
+    // 4-aligned and the tile rows are 64-byte aligned), 4 MACs per int4 op.
     for (uint kk = 0; kk < CT2_GEMM_S8_BK; ++kk) {
-      int av[4];
-      int bv[4];
-      for (uint r = 0; r < 4u; ++r)
-        av[r] = (int)As[kk][tid.y * 4u + r];
-      for (uint s = 0; s < 4u; ++s)
-        bv[s] = (int)Bs[kk][tid.x * 4u + s];
-      for (uint r = 0; r < 4u; ++r)
-        for (uint s = 0; s < 4u; ++s)
-          acc[r][s] += av[r] * bv[s];
+      const int4 av = int4(*(const threadgroup char4*)(&As[kk][tid.y * 4u]));
+      const int4 bv = int4(*(const threadgroup char4*)(&Bs[kk][tid.x * 4u]));
+      acc[0] += av.x * bv;
+      acc[1] += av.y * bv;
+      acc[2] += av.z * bv;
+      acc[3] += av.w * bv;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
@@ -827,6 +826,46 @@ kernel void ct2_gemm_s8(device const char* a [[buffer(0)]],
         c[(ulong)gi * ldc + gj] = alpha * acc[r][s];
     }
   }
+}
+
+// ---- INT8 GEMV ----  the small-m fast path (autoregressive decode runs every Dense at
+// m = batch). The tiled kernel wastes 63/64 of its A-tile there; this one assigns one
+// SIMD-group per output element instead: lanes stride the k axis in char4 steps and a
+// single simd_sum folds the int32 partials. Dense layout only (!trans_a && trans_b, so
+// both the A row and the B row are k-contiguous); the host routes here only when k and
+// the operand alignments allow the char4 reinterpretation. This regime is memory-bound,
+// and int8 moves half the bytes of fp16 — it beats the float GEMM rather than losing.
+kernel void ct2_gemv_s8(device const char* a [[buffer(0)]],
+                        device const char* b [[buffer(1)]],
+                        device int* c         [[buffer(2)]],
+                        constant uint& n      [[buffer(3)]],
+                        constant uint& k      [[buffer(4)]],
+                        constant uint& lda    [[buffer(5)]],
+                        constant uint& ldb    [[buffer(6)]],
+                        constant uint& ldc    [[buffer(7)]],
+                        constant int& alpha   [[buffer(8)]],
+                        uint2 tg  [[threadgroup_position_in_grid]],
+                        uint simd_size [[threads_per_simdgroup]],
+                        uint simd_lane [[thread_index_in_simdgroup]],
+                        uint simd_group [[simdgroup_index_in_threadgroup]]) {
+  const uint i = tg.y;
+  const uint j = tg.x * 8u + simd_group;  // 8 SIMD-groups per threadgroup (see host)
+  if (j >= n)
+    return;  // uniform per SIMD-group, so the simd_sum below stays in uniform control flow
+
+  device const char4* a4 = (device const char4*)(a + (ulong)i * lda);
+  device const char4* b4 = (device const char4*)(b + (ulong)j * ldb);
+  const uint kvec = k / 4u;
+
+  int acc = 0;
+  for (uint v = simd_lane; v < kvec; v += simd_size) {
+    const int4 av = int4(a4[v]);
+    const int4 bv = int4(b4[v]);
+    acc += av.x * bv.x + av.y * bv.y + av.z * bv.z + av.w * bv.w;
+  }
+  acc = simd_sum(acc);
+  if (simd_lane == 0u)
+    c[(ulong)i * ldc + j] = alpha * acc;
 }
 
 // ---- Strided copy ----  type-agnostic byte copy underlying Concat/Split/Slide:
