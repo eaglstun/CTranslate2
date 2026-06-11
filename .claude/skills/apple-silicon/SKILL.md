@@ -183,6 +183,116 @@ are easy to get wrong from memory.**
   `math_mode(safe)`; the Gemma2 NaN hunt worked because the checks ran host-side.
   _Lookup card; read when writing NaN tripwires or branchless vector guards._
 
+### Metal API surface
+
+- **[references/mtlbuffer-api.md](references/mtlbuffer-api.md)**
+  — The MTLBuffer/MTLDevice allocation lookup card: the three `makeBuffer` variants
+  (length = zero-filled — the only one the allocator uses; bytes = copy; bytesNoCopy =
+  page-aligned single-VM-region wrap), `.contents` nil-only-for-private,
+  `setPurgeableState`, and `label` as the free debugging win the backend doesn't use.
+  _Read when touching `allocator.mm` or wondering what alignment Metal guarantees (none —
+  the int8 GEMV checks offsets explicitly)._
+
+- **[references/resource-storage-modes-and-options.md](references/resource-storage-modes-and-options.md)**
+  — The `MTLResourceOptions` bitmask lookup card: storage modes (+ the Managed one-liner),
+  `defaultCache` vs `writeCombined` (write-combined = bug here, CPU-ref ops READ buffers),
+  tracked vs untracked hazard modes, and the three `makeBuffer` variants incl. `bytesNoCopy`
+  (page-aligned, whole pages — NOT used; weights go allocate-then-memcpy).
+  _Read when creating a buffer with anything but the one combination `allocator.mm` uses._
+
+- **[references/mtlheap.md](references/mtlheap.md)**
+  — `MTLHeap`/`MTLHeapDescriptor`: one pool, suballocated buffers (automatic vs placement),
+  sizing via `heapBufferSizeAndAlign`/`maxAvailableSize`, `makeAliasable()` ping-pong reuse,
+  and the trap: heaps are **untracked by default** → fence discipline. NOT used today — the
+  backend allocates individual Shared buffers (`allocator.mm`); this is the evaluated answer
+  if allocator churn ever shows on a profile. _Read before reaching for a buffer pool._
+
+- **[references/mtlevent-and-mtlfence.md](references/mtlevent-and-mtlfence.md)**
+  — The three explicit sync primitives: `MTLFence` (between passes in a queue, untracked
+  resources), `MTLEvent` (cross-command-buffer GPU↔GPU, monotonic signal/wait values),
+  `MTLSharedEvent` (CPU↔GPU: `signaledValue`, listeners). The backend's single-queue +
+  tracked-buffers model needs NONE of them; concrete triggers: a second queue, an untracked
+  heap, or finer-than-flush() CPU waits. _Read before adding a queue or untracked resource._
+
+- **[references/mtlgpufamily-and-feature-availability.md](references/mtlgpufamily-and-feature-availability.md)**
+  — `MTLGPUFamily` + `supportsFamily(_:)`: M1=apple7, M2=apple8, M3/M4=apple9 (from the
+  DocC case abstracts), `metal3`/`metal4` umbrellas, `maxBufferLength`. The backend checks
+  NOTHING at init (`device.mm` assumes the M4 Max); lists the asserts a hardening pass
+  would add. _Read before using a per-family feature or porting off the dev box._
+
+- **[references/argument-buffers.md](references/argument-buffers.md)**
+  — Argument buffers: resource handles in a buffer (tier1 needs `MTLArgumentEncoder`; tier2
+  = write `gpuAddress` directly, the Metal 3 bindless path) + the `useResource`/`useHeap`
+  residency rule. The backend binds ≤6 buffers per dispatch — no problem to solve; trigger is
+  a decode-dispatch-batching redesign (see dispatch-overlap-and-perf-model.md's encode floor).
+  _Read only if batching tiny decode ops via ICBs ever gets attempted._
+
+- **[references/pipeline-and-library-compilation.md](references/pipeline-and-library-compilation.md)**
+  — Runtime MSL → library → pipeline: `newLibraryWithSource` (no include path),
+  `MTLCompileOptions.mathMode` (fast/relaxed/safe — **relaxed is the Apple-silicon
+  default**, numerics in math-functions ref), function constants as cheap
+  dead-code-eliminated variants vs `#if`, PSO properties, the ~493 ms first-MPS-GEMM
+  warmup, and the measured-dead `.metallib` receipt. _Read before touching `device.mm`
+  compilation or proposing precompiled shaders._
+
+- **[references/gpu-counters-and-timestamps.md](references/gpu-counters-and-timestamps.md)**
+  — GPU-side timing in three tiers: `gpuStartTime`/`gpuEndTime` (free whole-buffer timing,
+  valid only after completion — the zero-effort upgrade to the CPU-side `time_ms()`
+  harness), `sampleTimestamps()` GPU↔CPU clock correlation, and counter sample buffers
+  (`MTLCommonCounterSet.timestamp`, `resolveCounterRange`) as the per-kernel scalpel.
+  _Read before adding GPU-side measurement to the benchmark harness._
+
+- **[references/gpu-capture-and-shader-validation.md](references/gpu-capture-and-shader-validation.md)**
+  — The misplaced-pointer toolkit: programmatic `.gputrace` capture (`MTL_CAPTURE_ENABLED=1`
+  - `MTLCaptureManager`), Shader Validation (`MTL_SHADER_VALIDATION=1` — OOB
+    device/threadgroup detection, perf cost) and `MTL_DEBUG_LAYER`, with a recipe for
+    `ctranslate2_test`. Honest note: it would NOT have caught the Gemma2 tanh-NaN —
+    validation is for memory bugs, tripwires for numeric ones. _Read when a kernel
+    scribbles, hangs, or reads garbage._
+
+- **[references/memory-footprint-and-residency.md](references/memory-footprint-and-residency.md)**
+  — Measuring/bounding GPU memory on unified memory: `recommendedMaxWorkingSetSize` (the
+  model-fits preflight), `currentAllocatedSize`, `allocatedSize` vs `length`, purgeable
+  state as the cache lever. Carries the int8 headline (Qwen RSS 1453 vs 2494 MB, −42%)
+  and the Whisper wired-vs-heap caveat. _Read when chasing footprint or before claiming a
+  memory win._
+
+### MPS beyond GEMM
+
+- **[references/mps-matrix-vector-multiplication.md](references/mps-matrix-vector-multiplication.md)**
+  — `MPSMatrixVectorMultiplication`: `y = α·op(A)·x + β·y`, init/encode split (cacheable
+  like `cached_gemm`), `MPSVector`/`MPSVectorDescriptor` incl. strided batches, and the
+  dtype truth: no integer GEMV documented anywhere — the **untried** MPS-native option for
+  fp16 decode m=1 GEMMs (which today ride the matrix kernel). _Read before A/B-ing the
+  decode GEMV path._
+
+- **[references/mps-softmax-and-topk.md](references/mps-softmax-and-topk.md)**
+  — `MPSMatrixSoftMax`/`LogSoftMax` (row-wise, fp32/fp16 only, NO masking — why CT2's
+  lengths-masked custom kernel won) and `MPSMatrixFindTopK`: **k ≤ 16 or UB**, UInt32
+  index matrix, batching. The GPU-sampling candidate — logits are already GPU-resident
+  post-lm*head while TopK runs CPU-side. \_Read when graduating sampling ops.*
+
+- **[references/mpsndarray.md](references/mpsndarray.md)**
+  — `MPSNDArray`/`MPSNDArrayMatrixMultiplication` (modern n-D API, native batch broadcast)
+  and THE load-bearing find: **macOS 15+ ships `MPSNDArrayQuantizedMatrixMultiplication`**
+  — affine/LUT quantization descriptors, int8/int4 dtypes, `initWithBuffer:` zero-copy —
+  so "MPS is float-only" is now MPSMatrix-family-only. Benchmark candidate vs
+  `ct2_gemm_s8`. _Read before any int8-GEMM rework._
+
+- **[references/mpsgraph-for-inference.md](references/mpsgraph-for-inference.md)**
+  — MPSGraph in one card: placeholders→ops→`MPSGraphTensorData(MTLBuffer:…)`, compile to a
+  cached `MPSGraphExecutable` that can `encode(to:)` an existing command buffer.
+  Quantization surface verified: `quantize`/`dequantize` (macOS 13.1+, i8/u8, per-axis
+  scaleTensor, LUT) but **no quantized matmul op** — dequant→float-matmul is the Phase-1
+  shim by another name. _Read before wrapping any op in MPSGraph._
+
+- **[references/mps-convolution-options.md](references/mps-convolution-options.md)**
+  — Graduating `Conv1D` off the CPU (today: CPU-ref + fp16→fp32 upcast; conv weights stay
+  float on Metal): MPSCNNConvolution (MPSImage repacking — poor fit) vs MPSGraph
+  `convolution2D` (buffer-native, H=1 trick) vs a custom MSL kernel (recommended first
+  prototype). Whisper's 2-conv encode stem is the consumer. _Read when scoping the conv
+  graduation._
+
 ## Conventions for this skill
 
 - Each reference cites its Apple source URL at the top and ends with a

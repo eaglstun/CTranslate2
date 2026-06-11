@@ -102,6 +102,121 @@ silently un-quantizes), and the Python surface (`get_supported_compute_types`,
   revision, the backward-compat guarantee (STABLE SURFACE), alias dedup, config.json vs
   vocabulary files (shared*vocabulary collapse). \_Read before touching serialization.*
 
+### Runtime core
+
+- **[references/allocators-and-caching.md](references/allocators-and-caching.md)**
+  — The `Allocator` abstraction behind `get_allocator(device)`: the pointer-based contract,
+  the 64-byte-aligned CPU allocator (MKL variant), the two CUDA allocators (cub
+  CachingDeviceAllocator — bin 4/3/12, 200MB cap, `CT2_CUDA_CACHING_ALLOCATOR_CONFIG` —
+  vs `cudaMallocAsync`, chosen by `CT2_CUDA_ALLOCATOR`), and who owns the pointer
+  (StorageView). _Read before touching allocation or memory-churn perf._
+
+- **[references/devices-and-device-management.md](references/devices-and-device-management.md)**
+  — `Device` enum, `str_to_device` ("auto" resolution order), per-backend
+  get/set*device_index (CUDA = thread-global `cudaSetDevice`), `ScopedDeviceSetter`,
+  `synchronize_device` vs `synchronize_stream` semantics, and how `device:index` reaches
+  each replica via `ReplicaWorker::initialize`. \_Read for device plumbing or sync semantics.*
+
+- **[references/primitives-layer.md](references/primitives-layer.md)**
+  — The `primitives<Device>` struct: family-by-family survey of the BLAS-like interface
+  (fill/copy, reductions, elementwise+broadcast, transpose, activations, gemm),
+  explicit-instantiation-per-device (why a new Device case is expensive),
+  `cross_device_primitives` copy, and the CPU two-level split (primitives = orchestration,
+  kernels.cc = ISA inner loops). _Read when deciding where new array math belongs._
+
+- **[references/cpu-isa-dispatch-and-kernels.md](references/cpu-isa-dispatch-and-kernels.md)**
+  — Runtime ISA selection: `CT2_FORCE_CPU_ISA` (AVX512 is env-only, never auto), the
+  CMake trick that copies kernels.cc per ISA with different flags (`-DUSE_NEON` on arm64),
+  `TARGET_ISA` stamping + `CPU_ISA_DISPATCH`, the `Vec<T,ISA>` widths (NEON 4 / AVX 8 /
+  AVX512 16), and the separate GEMM-backend priority (MKL→DNNL→Accelerate→OpenBLAS→Ruy).
+  _Read before touching CPU kernels or vec headers._
+
+- **[references/parallelism-and-thread-config.md](references/parallelism-and-thread-config.md)**
+  — inter*threads (replica ThreadPool, queue backpressure 4×workers) vs intra_threads
+  (`cpu::parallel_for`, GRAIN_SIZE 32768, no-nesting rule); the OpenMP-vs-BS::thread_pool
+  runtimes (`OPENMP_RUNTIME=NONE` → BS pool, this machine's Metal builds), and
+  `set_num_threads` plumbing (default min(4, hw); set per worker thread in
+  `ReplicaWorker::initialize`). \_Read for any thread-count or CPU-perf question.*
+
+### Op families
+
+- **[references/activation-ops.md](references/activation-ops.md)**
+  — `ActivationType` (enum order is FIXED — serialized + reused as kernel selectors),
+  `get_activation_op` (one `GELU` op carries all three approximations), the exact formulas
+  (erf vs tanh vs sigmoid GELU, from `src/cpu/kernels.cc` functors), and the three
+  application sites (Gemm epilogue `apply_bias_and_activation`, dequantize gemm-output,
+  FFN's `_ff1` pointer) that make fusion possible. Plus the converter mapping (gelu:
+  BERT/Whisper; gelu*pytorch_tanh: Gemma2/3; silu: llama-family). \_Read before touching
+  activations or their fusion path.*
+
+- **[references/softmax-and-masking.md](references/softmax-and-masking.md)**
+  — SoftMax/LogSoftMax: always last-dim, the int32 _lengths_ mask (one valid-length per
+  row, padding written as exact 0 — not exp(-inf); built by `prepare_length_mask`),
+  in-place forms, max-subtract CPU kernel, and where the 1/√d scale lives: folded into the
+  QK^T **MatMul alpha** (`queries_scale`), never a SoftMax param. _Read for attention
+  masking or softmax numerics._
+
+- **[references/norm-ops.md](references/norm-ops.md)**
+  — LayerNorm (axis ctor param, eps default 1e-5, gamma+beta, the outer/axis/inner general
+  kernel) vs RMSNorm (gamma-only, last-axis only, eps default 1e-6). Epsilon sits
+  **inside the sqrt** in both. Beta-presence selects the op at load; Gemma's (1+gamma) is
+  the runtime `layer_norm_use_residual` flag — NOT baked into stored weights. _Read for
+  norm numerics/parity; placement is norm-placement-in-transformers.md._
+
+- **[references/shape-manipulation-ops.md](references/shape-manipulation-ops.md)**
+  — The decode-loop data movers: Concat (KV-cache append), Split (QKV un-fuse; `no_copy`
+  axis-0 views), Transpose (perm copy, rank 2-4 only), Tile (GQA `replicate_heads`), Slide
+  (sliding-window cache trim), Gather (axis+batch*dims; embedding lookup + beam reorder,
+  with the strictly-increasing in-place fast path), Squeeze/Unsqueeze (pure metadata).
+  \_Read for the decode-step plumbing.*
+
+- **[references/elementwise-and-bias-ops.md](references/elementwise-and-bias-ops.md)**
+  — Add/Sub/Mul/Min/Max: broadcasting is **scalar-b or same-size flat, nothing else** (no
+  shape checks in the elementwise branch — caller's contract), aliasing-safe in-place.
+  `BiasAdd` is the separate axis-broadcast op carrying bias+residual+activation for
+  fusion; `apply_bias_and_activation` is the glue from every GEMM/dequantize epilogue.
+  _Read before touching elementwise or the bias path._
+
+### Decode machinery
+
+- **[references/decoding-loop-and-beam-search.md](references/decoding-loop-and-beam-search.md)**
+  — The token-generation driver in `src/decoding.cc`: `decode()` →
+  `GreedySearch`/`BeamSearch::search`, the per-step sequence (forward →
+  DisableTokens/processors → LogSoftMax-if-needed → sampler → append), beam bookkeeping
+  (`unflatten_ids`, gather-based cache reorder, length/coverage penalties), **batch
+  shrinking** as hypotheses finish, and hard-prefix vs `BiasedDecoder` modes. _Read before
+  touching the decode driver; the per-op perf consequence is `apple-silicon`._
+
+- **[references/sampling-and-topk.md](references/sampling-and-topk.md)**
+  — `Sampler`/`BestSampler`/`RandomSampler` (`src/sampling.cc`): the filter pipeline order
+  (top-k → temperature Mul → `ops::TopPMask` → Multinomial/GumbelMax → gather-back), the
+  TopK op contract (axis -1 only, values+indices `{batch,k}`), and the RNG story
+  (`get_random_generator` thread*local mt19937; CPU≠CUDA streams). \_Sampling runs CPU-side
+  on Metal over unified memory.*
+
+- **[references/logits-processing.md](references/logits-processing.md)**
+  — The `LogitsProcessor` machinery (`decoding_utils.{h,cc}`): the `DisableTokens`
+  collector (CPU direct-write vs device `indexed_fill`), the five built-ins
+  (RepetitionPenalty, NoRepeatNgram, SuppressTokens/Begin/Sequences), the fixed ordering
+  in `make_logits_processors`, and Whisper's `ApplyTimestampRules` (the one processor
+  doing real tensor math per step). _min_length is NOT a processor — it's
+  `apply_min_length` in decoding.cc._
+
+- **[references/batching-and-length-sorting.md](references/batching-and-length-sorting.md)**
+  — `rebatch_input` (longest-first sort, the two documented reasons), `BatchType`
+  tokens-vs-examples fill, the promise-indexed-by-`example_index` order restoration in
+  `ReplicaPool::post_examples`, and the `Padder` gather-based padding removal
+  (`allow_padding_removal`: never for fp16 off-CPU). _Read before touching batching, the
+  replica pool plumbing, or padded shapes._
+
+- **[references/position-encodings.md](references/position-encodings.md)**
+  — The position-encoding family: additive `PositionEncoder` (Sinusoidal — positions start
+  at 1 — vs learned `PositionEmbedding`), ALiBi (slope construction, `ops::AlibiAdd` after
+  the score GEMM), T5 `relative_attention_bias` (bucketed, cached across layers) vs
+  Shaw-style relative keys/values, and the full RoPE option table (`rotary_dim`/
+  interleave/base, scaling None/Linear/Su/Llama3 — "longrope"→Su). _RoPE apply mechanics
+  stay in attention-and-kv-cache.md._
+
 ## Conventions for this skill
 
 - Each reference cites the source files it was built from (top of file) with real
