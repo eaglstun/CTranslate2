@@ -89,6 +89,100 @@ are easy to get wrong from memory.**
   from GPU execution — how the 0.042→0.031 ms floor was found. "Profile, don't guess," with
   the worked `Add`-regression tale. _Read before measuring a change or claiming a speedup._
 
+### int8 path (project-proven, 2026-06)
+
+- **[references/int8-gemm-kernel-design.md](references/int8-gemm-kernel-design.md)**
+  — The hand-tiled int8×int8→int32 GEMM (`ct2_gemm_s8`): why hand-tiled is the only native
+  path (MPS is float-only, `simdgroup_matrix` has no int8), the 64×64 tile / 32-deep k chunks
+  / 4×4 `int4` micro-tile, transposes resolved at tile-load, the beta==0 + integral-alpha
+  exactness contract, the Phase-1 shim graveyard, and the ALU-bound ~3–5×-slower-than-fp16
+  reality vs the −42% RSS win. _Read before touching `gemm_s8` or expecting a tiling tweak to
+  beat MPS fp16 at large m._
+
+- **[references/int8-gemv-simdgroup-decode.md](references/int8-gemv-simdgroup-decode.md)**
+  — The small-m SIMD-group GEMV (`ct2_gemv_s8`): one SIMD-group per output element,
+  lane-strided `char4` k-loop + `simd_sum`, the exact routing condition (Dense layout, m≤8,
+  4-byte-aligned k/lds/offsets), the 8-SIMD-groups-per-threadgroup host coupling, and the
+  bandwidth-bound arithmetic of why int8 **beats** fp16 MPS at decode (lm*head 0.49 vs
+  0.84 ms). \_Read when touching decode-path GEMMs or anything that could silently break the
+  alignment preconditions.*
+
+- **[references/quantize-dequantize-kernels.md](references/quantize-dequantize-kernels.md)**
+  — The three kernels around the int8 GEMM: `ct2_quantize_s8_*` (one 256-thread threadgroup
+  per row, amax tree reduce, `precise::divide` + `rint` for bit-parity with the CPU),
+  `ct2_dequantize_s8_*` (reciprocal-then-multiply, spelled like the CPU kernel), and the
+  `ct2_dequant_gemm_out_*` epilogue (int32 → /(a*scale·b_scale) + bias + all 7 activations,
+  dummy-bias buffer binding). \_Read when touching quantization parity, scales, or fusing the
+  Dense epilogue.*
+
+### MSL spec — language & stdlib
+
+- **[references/simdgroup-matrix-functions.md](references/simdgroup-matrix-functions.md)**
+  — SIMD-group 8×8 matrix (WMMA-style) matmul: `simdgroup_load/store`,
+  `simdgroup_multiply[_accumulate]`, and THE type table (§2.4): **half/bfloat/float only —
+  no integer element types**, the spec ground truth for why `ct2_gemm_s8` is hand-tiled.
+  Metal 2.3+/Apple7+; Metal 4 steers toward Tensors + MPP instead. _Read if a future
+  fp16 GEMM moves off MPS or fused attention is attempted (closes the old §6.8 TODO)._
+
+- **[references/conversion-and-packing-functions.md](references/conversion-and-packing-functions.md)**
+  — Conversions & reinterpretation: float→int casts round **toward zero** with **no
+  saturation** (why `rint` precedes the `(char)` cast in `ct2_quantize_s8`), `as_type<T>`
+  bit reinterpretation vs the pointer-cast `char4` loads the int8 GEMM actually uses,
+  NaN→0, §6.15 norm-pack functions (wrong tool for raw int8), Metal 4.1 packed-numeric
+  templates (the future int4 path). _Read when writing any quantize/dequantize or packed-
+  load code._
+
+- **[references/integer-functions.md](references/integer-functions.md)**
+  — §6.4 integer builtins lookup table (`abs/absdiff`, `addsat/subsat/madsat`,
+  `mulhi/madhi`, `mul24/mad24`, `clz/ctz/popcount`, `extract_bits`…) with an honest
+  inventory: the int8 GEMM/GEMV need **none of them** — plain int32 `*`/`+=` is exact for
+  char×char at transformer depths; `clamp` and `mulhi` are the ones to reach for if the
+  quantization scheme ever changes. _Read when an integer kernel tempts you toward a
+  builtin._
+
+- **[references/atomic-functions.md](references/atomic-functions.md)**
+  — §6.16 atomics: `atomic_int/uint/bool/ulong/float` only (no char/short/half — int8
+  partials must widen), **relaxed is the only memory order for atomic ops** pre-Metal-4.1,
+  fetch*add/max/min table, `atomic_thread_fence` + thread scopes, and why the current
+  kernels are deliberately atomics-free (each threadgroup owns its output tile) — int32
+  split-k via `fetch_add` would stay bit-exact, float wouldn't. \_Read before adding any
+  cross-threadgroup accumulation.*
+
+- **[references/threadgroup-and-simdgroup-synchronization.md](references/threadgroup-and-simdgroup-synchronization.md)**
+  — `threadgroup_barrier`/`simdgroup_barrier` and the `mem_flags` variants (what each
+  orders; `mem_none` = execution-only), the all-threads-must-reach-it divergence rule
+  (per-iteration in loops), and when SIMD-group functions need no barrier at all. Maps to
+  the int8 GEMM's load→barrier→MAC→barrier loop and the uniform-early-exit guards.
+  _Read when adding a barrier, a row guard, or any threadgroup-memory phase._
+
+- **[references/msl-address-spaces.md](references/msl-address-spaces.md)**
+  — device / constant / threadgroup / thread: access rules, the no-address-space-cast rule,
+  program-scope-must-be-constant (+ core-constant-expression init), and why kernel args are
+  `device T*` for arrays vs `constant T&` for setBytes scalars. Covers the int8 GEMM's
+  threadgroup tiles and the in-space `char4` reinterpretation trick.
+  _Read when declaring kernel signatures or staging tiles in `kernels_msl.h`._
+
+- **[references/msl-data-types-and-alignment.md](references/msl-data-types-and-alignment.md)**
+  — Scalar/vector size & alignment tables from §2 (no `double`; `bfloat` = Metal 3.1+),
+  the vec3-pads-to-vec4 trap (`sizeof(float3)` = 16), `packed_` types for byte-tight
+  host-shared layouts, and why `simdgroup_matrix` has no int8 element type. Maps to the
+  int8 kernels' `char4`/`int4` widening and the half-storage/float-accumulate pattern.
+  _Read before sharing a struct with the host or reinterpreting buffer element types._
+
+- **[references/common-functions.md](references/common-functions.md)**
+  — §6.3 Table 6.1 (`clamp`/`mix`/`saturate`/`sign`/`step`/`smoothstep`): float/half ONLY
+  (integer clamp lives in §6.4), and fast-vs-precise exists just for clamp/saturate (NaN
+  handling). Home of the Gemma2 fix's `clamp(x,-15,15)` in `ct2_tanh_safe` — and the note
+  that quantize deliberately does NOT clamp to ±127. _Lookup card; read when a kernel
+  leans on clamp/saturate semantics near NaNs._
+
+- **[references/relational-and-select-functions.md](references/relational-and-select-functions.md)**
+  — §6.5 Table 6.3 (`isnan`/`isinf`/`isfinite`, `select` — true picks the SECOND arg,
+  `all`/`any`, `signbit`) plus the fast-math caveat: under the default build the compiler
+  may assume no-NaN and fold `isnan` to false, so in-kernel tripwires need
+  `math_mode(safe)`; the Gemma2 NaN hunt worked because the checks ran host-side.
+  _Lookup card; read when writing NaN tripwires or branchless vector guards._
+
 ## Conventions for this skill
 
 - Each reference cites its Apple source URL at the top and ends with a
@@ -120,18 +214,14 @@ are easy to get wrong from memory.**
 Carve these into `references/*.md` when a task needs them (CT2-relevance, in priority order).
 Don't pre-build speculatively — pull on demand, same discipline as the rest of the backend.
 
-- **§6.8 SIMD-Group Matrix Functions** (`simdgroup_matrix`, load/store/`multiply`) — the
-  tensor-core-style WMMA matmul primitives. The reference to write if GEMM ever moves off
-  MPS or a fused-attention kernel is attempted. Highest future value.
-- **§6.16 Atomic Functions** (+ §6.16.1 memory order, §6.16.3 fences) — needed for any kernel
-  that accumulates across threadgroups (e.g. a reduction writing partials, as in the
-  spec's own reduce example).
+- ~~**§6.8 SIMD-Group Matrix Functions**~~ — DONE: see `references/simdgroup-matrix-functions.md`
+  (and the proven no-int8 fact that decided the int8 GEMM design).
+- ~~**§6.16 Atomic Functions**~~ — DONE: see `references/atomic-functions.md`.
 - ~~**§6.6 Math Functions**~~ — DONE: see `references/math-functions-and-numeric-parity.md`
   (math builtins, no-`erf`, fast-vs-precise ULP tables, the fast-math parity trap).
-- **§6.10.1 / §4.4.1** Threadgroup & SIMD-group **synchronization** (barriers, `mem_flags`,
-  the SIMD-group model) — partially covered in storage-and-synchronization.md; promote to
-  its own reference if barrier semantics get hairy.
-- **§6.3 Common Functions** (`clamp`, `mix`, `saturate`, `sign`…) — low priority, mostly
-  obvious, but cheap to add if a kernel leans on them.
+- ~~**§6.10.1 / §4.4.1** Threadgroup & SIMD-group **synchronization**~~ — DONE: see
+  `references/threadgroup-and-simdgroup-synchronization.md`.
+- ~~**§6.3 Common Functions**~~ — DONE: see `references/common-functions.md` (with §6.5
+  relational/select in `references/relational-and-select-functions.md`).
 - NOT worth mining for CT2: textures (§6.13), imageblocks (§6.14), graphics/fragment
   (§6.11), geometric (§6.9) — no render passes in this backend.

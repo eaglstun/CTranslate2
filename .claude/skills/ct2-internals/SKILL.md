@@ -60,6 +60,48 @@ MPS, the op-graduation procedure). When a task is "how does CT2 do X" → here; 
   the "add a new architecture" checklist. _Read when adding model support or tracing how
   weights load._
 
+### Quantization & model loading (int8 project, 2026-06)
+
+- **[references/quantization-scheme-and-ops.md](references/quantization-scheme-and-ops.md)**
+  — CT2's int8 scheme: symmetric per-row `scale = 127/amax`, no zero-point (the `_qzero`/AWQ
+  path is a different scheme, scoped out); dynamic activation scales vs static
+  `{scope}/weight_scale`; the Quantize ctor options (`int16_scale_type`, `shift_to_uint8`,
+  `round_before_cast`) and the TWO Dequantize overloads — the gemm-output form owns
+  scales+bias+activation over the int32 accumulator. _Read before touching anything quantized._
+
+- **[references/gemm-op-and-dtype-dispatch.md](references/gemm-op-and-dtype-dispatch.md)**
+  — `ops::Gemm` end-to-end: the dtype switch (int8 → `compute<D, int8_t, int32_t>`), the
+  unconditional `apply_bias_and_activation` epilogue, `compute` → `primitives<D>::gemm`
+  (MKL/DNNL/Ruy on CPU, cublasGemmEx on CUDA), the integer alpha/beta contract
+  (convention from Dense, NOT an assert — backends truncate/emulate/guard differently),
+  and the MKL u8-shift compensation story. _Read before touching any matmul path._
+
+- **[references/dense-layer-and-quantized-linear.md](references/dense-layer-and-quantized-linear.md)**
+  — `Dense::operator()` orchestration: `_quantized_gemm` (a weight-dtype bit) selects
+  quantize→gemm→dequantize vs plain GEMM vs AWQ; member state resolved from model
+  variables (`weight_scale`, `weight_zero`, `weight_compensation`); bias+activation ride
+  Dequantize when quantized, Gemm when not. Device-agnostic by construction — the int8-Metal
+  project shipped with zero diff to this file. _Read before touching any linear layer._
+
+- **[references/compute-type-resolution.md](references/compute-type-resolution.md)**
+  — How requested compute*type ("auto"/"int8"/"int8_float16"…) becomes effective per-weight
+  dtypes: the saved/requested/effective triple, the `mayiuse*\*`capability queries, the`resolve*compute_type` fallback table (what AUTO picks per device; plain "int8" never
+silently un-quantizes), and the Python surface (`get_supported_compute_types`,
+`Generator(compute_type=...)`). \_Read before touching types.cc resolution or capability flags.*
+
+- **[references/weight-loading-and-conversion.md](references/weight-loading-and-conversion.md)**
+  — The model-load weight pipeline in `src/models/model.cc`: binary read → `register_variable`
+  index → `set_compute_type`/`ensure_dtype` quantize/dequantize/cast with `{name}_scale`
+  pairing → device move + synchronize. Centerpiece: the **conv-weight float guard**
+  (CUDA/Metal/DNNL have no quantized conv) and the int8-Whisper load crash it prevents
+  (commit 351b1990). _Read before changing load-time conversion or capability flags._
+
+- **[references/model-binary-format.md](references/model-binary-format.md)**
+  — The serialized model directory, documented from BOTH ends (`model_spec.py::_serialize`
+  writer ↔ `Model::load` reader): model.bin record layout, binary version 6 vs per-spec
+  revision, the backward-compat guarantee (STABLE SURFACE), alias dedup, config.json vs
+  vocabulary files (shared*vocabulary collapse). \_Read before touching serialization.*
+
 ## Conventions for this skill
 
 - Each reference cites the source files it was built from (top of file) with real
