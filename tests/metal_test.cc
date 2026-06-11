@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <random>
 #include <sstream>
 #include <vector>
 
@@ -359,6 +360,143 @@ TEST_F(MetalTest, RotaryMatchesCPU) {
   rotary(in_m.to(DataType::FLOAT16), sin_m.to(DataType::FLOAT16), cos_m.to(DataType::FLOAT16),
          y16, true);
   expect_storage_eq(y16.to_float32(), ref, 2e-2);
+}
+
+// ---------------------------------------------------------------------------
+// INT8 (Phase 1): quantize / dequantize run as native Metal kernels; the int8 GEMM is
+// the fp32-cast shim over the MPS float GEMM. Parity oracle is the CPU int8 reference.
+// (QuantizeINT8 / QuantizeINT8ZeroRow / GemmInt8 in ops_test.cc already run on METAL;
+// these cover what the op suite does not: the dequantize forms, fp16, and GEMM depth.)
+// ---------------------------------------------------------------------------
+
+TEST_F(MetalTest, Int8DequantizeMatchesCPU) {
+  const std::vector<int8_t> q_vec = {-127, -38, 64, 25, 30, 127, -18, 0};
+  const std::vector<float> scale_vec = {12.7f, 6.047619f};
+
+  StorageView ref;
+  ops::Dequantize()(StorageView({2, 4}, q_vec), StorageView({2}, scale_vec), ref);
+
+  StorageView q_m({2, 4}, q_vec, Device::METAL);
+  StorageView scale_m({2}, scale_vec, Device::METAL);
+
+  // float32 output uses the same reciprocal-then-multiply arithmetic as the CPU kernel.
+  StorageView y32(DataType::FLOAT32, Device::METAL);
+  ops::Dequantize()(q_m, scale_m, y32);
+  expect_storage_eq(y32.to(Device::CPU), ref);
+
+  // float16 output (int8 embeddings in an int8_float16 model) within half tolerance.
+  StorageView y16(DataType::FLOAT16, Device::METAL);
+  ops::Dequantize()(q_m, scale_m, y16);
+  EXPECT_EQ(y16.dtype(), DataType::FLOAT16);
+  expect_storage_eq(y16.to_float32().to(Device::CPU), ref, 2e-2);
+}
+
+TEST_F(MetalTest, Int8QuantizeFloat16MatchesFloat32) {
+  // fp16 inputs have no CPU reference (the CPU Quantize is float32-only); quantize the
+  // same fp16-representable values in fp32 on the CPU and expect identical int8 codes
+  // and scales — the kernel reduces and rescales in float either way.
+  const std::vector<float> in_vec = {-10, -3, 5, 2, 5, 21, -3, 0};
+  const ops::Quantize quantize_op(ops::Quantize::ScaleType::GLOBAL,
+                                  /*shift_to_uint8=*/false,
+                                  /*round_before_cast=*/true);
+
+  StorageView ref_q(DataType::INT8);
+  StorageView ref_scale;
+  quantize_op(StorageView({2, 4}, in_vec), ref_q, ref_scale);
+
+  StorageView in16 = StorageView({2, 4}, in_vec, Device::METAL).to(DataType::FLOAT16);
+  StorageView q(DataType::INT8, Device::METAL);
+  StorageView scale(DataType::FLOAT32, Device::METAL);
+  quantize_op(in16, q, scale);
+
+  expect_storage_eq(q.to(Device::CPU), ref_q);
+  expect_storage_eq(scale.to(Device::CPU), ref_scale);
+}
+
+TEST_F(MetalTest, Int8DequantizeGemmOutputMatchesCPU) {
+  // The Dense epilogue: int32 accumulator / (a_scale[row] * b_scale[col]) + bias,
+  // through every activation variant. GELU rides the hand-rolled ct2_erf and the
+  // transcendentals are fast-math, so parity is tight-tolerance, not bit-exact.
+  const std::vector<int32_t> c_vec = {-1205, 2249, -1269, -4226,
+                                      -3697, 1272, 2436, -1676,
+                                      -5560, -1767, -668, 6};
+  const std::vector<float> a_scale_vec = {12.7f, 6.05f, 25.4f};
+  const std::vector<float> b_scale_vec = {110.f, 95.5f, 130.2f, 80.75f};
+  const std::vector<float> bias_vec = {0.6f, -0.4f, 0.1f, -1.2f};
+
+  const StorageView c_cpu({3, 4}, c_vec);
+  const StorageView a_scale_cpu({3}, a_scale_vec);
+  const StorageView b_scale_cpu({4}, b_scale_vec);
+  const StorageView bias_cpu({4}, bias_vec);
+
+  const StorageView c_m({3, 4}, c_vec, Device::METAL);
+  const StorageView a_scale_m({3}, a_scale_vec, Device::METAL);
+  const StorageView b_scale_m({4}, b_scale_vec, Device::METAL);
+  const StorageView bias_m({4}, bias_vec, Device::METAL);
+
+  static const ops::ActivationType kReLU = ops::ActivationType::ReLU;
+  static const ops::ActivationType kGELUTanh = ops::ActivationType::GELUTanh;
+  static const ops::ActivationType kSwish = ops::ActivationType::Swish;
+  static const ops::ActivationType kGELU = ops::ActivationType::GELU;
+  static const ops::ActivationType kGELUSigmoid = ops::ActivationType::GELUSigmoid;
+  static const ops::ActivationType kTanh = ops::ActivationType::Tanh;
+  static const ops::ActivationType kSigmoid = ops::ActivationType::Sigmoid;
+
+  const std::vector<const ops::ActivationType*> activations = {
+    nullptr, &kReLU, &kGELUTanh, &kSwish, &kGELU, &kGELUSigmoid, &kTanh, &kSigmoid};
+
+  for (const ops::ActivationType* act : activations) {
+    const ops::Dequantize dequantize_op(act);
+    for (const bool with_bias : {true, false}) {
+      StorageView ref;
+      dequantize_op(c_cpu, a_scale_cpu, b_scale_cpu,
+                    /*transpose_a=*/false, /*transpose_b=*/true,
+                    ref, with_bias ? &bias_cpu : nullptr);
+
+      StorageView y32(DataType::FLOAT32, Device::METAL);
+      dequantize_op(c_m, a_scale_m, b_scale_m, false, true,
+                    y32, with_bias ? &bias_m : nullptr);
+      expect_storage_eq(y32.to(Device::CPU), ref, 1e-4);
+
+      StorageView bias16 = bias_m.to(DataType::FLOAT16);
+      StorageView y16(DataType::FLOAT16, Device::METAL);
+      dequantize_op(c_m, a_scale_m, b_scale_m, false, true,
+                    y16, with_bias ? &bias16 : nullptr);
+      EXPECT_EQ(y16.dtype(), DataType::FLOAT16);
+      expect_storage_eq(y16.to_float32().to(Device::CPU), ref, 2e-2);
+    }
+  }
+}
+
+TEST_F(MetalTest, Int8GemmDeepAccumulatorMatchesHostReference) {
+  // The Phase-1 GEMM shim accumulates in fp32, which is integer-exact only below 2^24.
+  // Validate the int32 contract at a realistic LLM depth (k=2048, Dense's trans_b
+  // layout) against a host int32 triple loop; mixed-sign int8 keeps |accum| ~1e5-1e6,
+  // comfortably exact. (All-saturated adversarial inputs at k > ~1000 would not be —
+  // that limit goes away with the Phase-2 native int8 kernel.)
+  const dim_t m = 3, n = 5, k = 2048;
+  std::mt19937 rng(42);
+  std::uniform_int_distribution<int> dist(-127, 127);
+
+  std::vector<int8_t> a_vec(m * k), b_vec(n * k);
+  for (auto& v : a_vec) v = static_cast<int8_t>(dist(rng));
+  for (auto& v : b_vec) v = static_cast<int8_t>(dist(rng));
+
+  std::vector<int32_t> expected_vec(m * n, 0);
+  for (dim_t i = 0; i < m; ++i)
+    for (dim_t j = 0; j < n; ++j) {
+      int32_t acc = 0;
+      for (dim_t kk = 0; kk < k; ++kk)
+        acc += static_cast<int32_t>(a_vec[i * k + kk]) * static_cast<int32_t>(b_vec[j * k + kk]);
+      expected_vec[i * n + j] = acc;
+    }
+
+  StorageView a({m, k}, a_vec, Device::METAL);
+  StorageView b({n, k}, b_vec, Device::METAL);
+  StorageView c(DataType::INT32, Device::METAL);
+  ops::Gemm(/*alpha=*/1, /*beta=*/0, /*trans_a=*/false, /*trans_b=*/true)(a, b, c);
+
+  expect_storage_eq(c.to(Device::CPU), StorageView({m, n}, expected_vec));
 }
 
 // ---------------------------------------------------------------------------
