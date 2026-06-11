@@ -258,6 +258,8 @@ half/bfloat/float only), so hand-tiled is the only native path:
 - **m > 8 (prefill):** threadgroup-tiled 64×64 C-tile, 32-deep k chunks, 4×4 int4
   micro-tile. ALU-bound at ~2.4 T-MAC/s (~3.7 ceiling: int MAC = 2 ALU ops, no integer
   matrix units) — structurally ~3–5× slower than MPS fp16 at the kernel level.
+  **Superseded on macOS 26+ by M14's MPP path** (ties fp16); the tiled kernel remains
+  the fallback (older OSes, non-NT layouts, integral `alpha != 1`).
 
 Routing (`src/ops/gemm.cc` INT8 branch) additionally guards an **integral alpha** —
 a float alpha cannot be applied exactly to an int32 accumulator. The shim casts
@@ -298,27 +300,63 @@ the CPU reference). Fix: `src/models/model.cc` keeps conv weights in `float_dtyp
 `Device::METAL`, the same guard CUDA/DNNL already use. Post-fix suite:
 `*METAL*` 73 passed / 2 skipped / 0 failed, `*Metal*` 22/22.
 
+### ✅ M14 — int8 prefill at fp16 speed: Metal-4 MPP `matmul2d` (2026-06-11)
+
+Closes the one honest weakness M12 left: large-m int8 prefill. The m>8 / Dense-layout /
+`alpha == 1` case of `metal::gemm_s8` now routes to a Metal Performance Primitives
+`mpp::tensor_ops::matmul2d` kernel (`ct2_mpp_gemm_s8_nt` in
+`src/metal/kernels/kernels_mpp_msl.h`) — int8_t×int8_t→int32_t is a base-Metal-4
+supported combination (the SDK header's type table; the macOS-26 successor to the
+"MPS is float-only / `simdgroup_matrix` has no int8" wall the hand-tiled kernel was
+built against). Measured **int32-bit-exact** vs the host triple loop (k=2048, full int8
+range, edge shapes), so this is a pure speed swap — the deep-accumulator oracle holds
+unchanged, and Qwen int8 output tokens are byte-identical with the path on or off.
+
+Numbers (M4 Max, macOS 26.4.1, 2026-06-11, best-of-3; full tables and tuning notes in
+`METAL_BENCHMARKS.md`): 2048³ **7.19 → 1.51 ms** (ties MPS fp16's 1.49); Qwen Dense
+prefill shapes 1.14 → 0.33 and 1.70 → 0.37 ms (fp16: 0.34 / 0.37); Qwen2.5-0.5B e2e
+prefill (batch 8 × 128) **555 → 350 ms** (fp16 300). Decode GEMV is untouched and still
+beats fp16.
+
+Engineering shape (the part a future reader needs):
+
+- **Separate MSL 4.0 library.** MPP needs `languageVersion 4.0` (macOS 26+), so
+  `kernels_mpp_msl.h` compiles as a second `newLibraryWithSource` library in `device.mm`
+  behind `@available(macOS 26, *)`; any compile/pipeline failure is cached and
+  `get_pipeline_mpp` returns nil — callers fall back to the classic kernels, so older
+  OSes and GPUs are unaffected. The main library stays at the default language version.
+- **In-shader `tensor_inline` views** wrap the existing raw buffer args (pointer +
+  extents + strides, dim 0 fastest) — no host-side MTLTensor objects, no new binding
+  model, same `setBuffer` encoding as every other kernel.
+- **Tuning that mattered:** 16×64 tile on **2** cooperating SIMD-groups (Apple's 4-SG
+  header example is 2–5× slower on every shape measured) and the interior/edge
+  `slice<Extents...>` static-extent split. Element types must be exactly
+  `int8_t`/`int32_t` (non-const) or MPP's dispatch static_asserts.
+- `CT2_NO_MPP_GEMM=1` forces the tiled fallback (bisection lever, like `CT2_NO_MPS_ACT`).
+- Test coverage: the deep-k oracle now pins all three routes — m=3 GEMV, m=16 MPP,
+  m=16/alpha=2 tiled (alpha≠1 is MPP-ineligible, keeping fallback coverage).
+
 ## What runs where today
 
-| Operation                                                                    | Metal execution                                                                                               |
-| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| GEMM / MatMul (float32 and float16)                                          | **GPU** — MPSMatrixMultiplication                                                                             |
-| SoftMax / LogSoftMax (float32 and float16)                                   | **GPU** — custom kernel                                                                                       |
-| RMSNorm (float32 and float16)                                                | **GPU** — custom kernel                                                                                       |
-| LayerNorm, last axis + affine (float32 and float16)                          | **GPU** — custom kernel                                                                                       |
-| Rotary / RoPE (float32 and float16)                                          | **GPU** — custom kernel                                                                                       |
-| Gather (all dtypes)                                                          | **GPU** — custom kernel                                                                                       |
-| BiasAdd + activation, last axis (float32 and float16)                        | **GPU** — fused custom kernel (ReLU/GELU/GELUTanh/GELUSigmoid/Swish/Tanh/Sigmoid)                             |
-| Standalone activations: ReLU/GELU/Swish/Sigmoid/Tanh (float32 and float16)   | **GPU** — custom kernel                                                                                       |
-| Elementwise Mul (float32 and float16)                                        | **GPU** — custom kernel                                                                                       |
-| Elementwise add (float32 and float16)                                        | **GPU** — custom kernel (the residual connections; fp16 path added after profiling a real LLM)                |
-| Concat / Split / Slide (all dtypes)                                          | **GPU** — strided-copy kernel                                                                                 |
-| Quantize int8 (fp32/fp16 in; signed path)                                    | **GPU** — custom kernel (u8-shift variant falls through to CPU reference)                                     |
-| Dequantize int8, simple + GEMM-output forms (fp32/fp16 out)                  | **GPU** — custom kernels (GEMM-output form: the Dense `!trans_a && trans_b` layout, all activations)          |
-| GEMM int8×int8→int32                                                         | **GPU (native)** — hand-tiled MSL kernels, exact int32 accumulation; SIMD-group GEMV at m ≤ 8, tiled at m > 8 |
-| Everything else (sampling, general-axis LayerNorm/BiasAdd, conv, int Mul, …) | CPU reference over unified memory (correct, float32 only)                                                     |
-| fp16 for ungraduated ops                                                     | Not yet — CPU reference is float32-only, so a full fp16 model needs those ops graduated to half kernels first |
-| bf16 compute                                                                 | Not yet                                                                                                       |
+| Operation                                                                    | Metal execution                                                                                                                             |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| GEMM / MatMul (float32 and float16)                                          | **GPU** — MPSMatrixMultiplication                                                                                                           |
+| SoftMax / LogSoftMax (float32 and float16)                                   | **GPU** — custom kernel                                                                                                                     |
+| RMSNorm (float32 and float16)                                                | **GPU** — custom kernel                                                                                                                     |
+| LayerNorm, last axis + affine (float32 and float16)                          | **GPU** — custom kernel                                                                                                                     |
+| Rotary / RoPE (float32 and float16)                                          | **GPU** — custom kernel                                                                                                                     |
+| Gather (all dtypes)                                                          | **GPU** — custom kernel                                                                                                                     |
+| BiasAdd + activation, last axis (float32 and float16)                        | **GPU** — fused custom kernel (ReLU/GELU/GELUTanh/GELUSigmoid/Swish/Tanh/Sigmoid)                                                           |
+| Standalone activations: ReLU/GELU/Swish/Sigmoid/Tanh (float32 and float16)   | **GPU** — custom kernel                                                                                                                     |
+| Elementwise Mul (float32 and float16)                                        | **GPU** — custom kernel                                                                                                                     |
+| Elementwise add (float32 and float16)                                        | **GPU** — custom kernel (the residual connections; fp16 path added after profiling a real LLM)                                              |
+| Concat / Split / Slide (all dtypes)                                          | **GPU** — strided-copy kernel                                                                                                               |
+| Quantize int8 (fp32/fp16 in; signed path)                                    | **GPU** — custom kernel (u8-shift variant falls through to CPU reference)                                                                   |
+| Dequantize int8, simple + GEMM-output forms (fp32/fp16 out)                  | **GPU** — custom kernels (GEMM-output form: the Dense `!trans_a && trans_b` layout, all activations)                                        |
+| GEMM int8×int8→int32                                                         | **GPU (native)** — exact int32 accumulation; SIMD-group GEMV at m ≤ 8, Metal-4 MPP `matmul2d` at m > 8 (macOS 26+), hand-tiled MSL fallback |
+| Everything else (sampling, general-axis LayerNorm/BiasAdd, conv, int Mul, …) | CPU reference over unified memory (correct, float32 only)                                                                                   |
+| fp16 for ungraduated ops                                                     | Not yet — CPU reference is float32-only, so a full fp16 model needs those ops graduated to half kernels first                               |
+| bf16 compute                                                                 | Not yet                                                                                                                                     |
 
 ## What's left
 

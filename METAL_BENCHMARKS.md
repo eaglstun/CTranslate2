@@ -253,10 +253,70 @@ Two kernels behind one entry point (`metal::gemm_s8`):
   two ALU ops on a GPU with **no integer matrix units** (`simdgroup_matrix` is
   half/bfloat/float only — MSL spec 2.4), while MPS fp16 rides dedicated FMA pipelines
   to ~5.9 T-FMA/s. Large-m int8 GEMM is therefore structurally ~3–5× slower than MPS
-  fp16 **at the kernel level**; do not expect a tiling tweak to close that — the honest
-  future lever is the exactness-preserving `simdgroup_float8x8` staging trick (int8→float
-  tiles are exact; per-1024-deep-chunk float accumulation stays < 2^24) if prefill ever
-  matters enough.
+  fp16 **at the kernel level** _for a hand-written ALU kernel_ — that diagnosis stands,
+  but the conclusion ("no path closes it") was superseded 2026-06-11 by the Metal-4 MPP
+  path below, which routes around the ALU bound entirely. The tiled kernel remains the
+  fallback for pre-macOS-26 OSes, other transpose layouts, and integral `alpha != 1`.
+
+### int8 prefill via Metal-4 MPP `matmul2d` (Task 6 — closes the prefill gap)
+
+Measured 2026-06-11, M4 Max (macOS 26.4.1), Release build, best-of-3 benchmark runs
+(`DISABLED_BenchmarkGemmInt8`, 30 iters/cell, 8 for 2048³, flush per iter). The m>8
+path of `metal::gemm_s8` now routes to `mpp::tensor_ops::matmul2d` (int8×int8→int32,
+base Metal 4, `kernels_mpp_msl.h`) when available; verified **int32-bit-exact** against
+the host triple loop at k=2048 over the full int8 range, so the parity contract is
+unchanged — this is a pure speed swap, not a quality tradeoff.
+
+| m, n, k (kernel)      | int8 MPP (new) | int8 tiled (old) | Metal fp16 |
+| --------------------- | -------------- | ---------------- | ---------- |
+| 2048, 2048, 2048      | **1.51 ms** 🔥 | 7.19 ms          | 1.49 ms    |
+| 256, 4864, 896        | **0.329 ms**   | 1.14 ms          | 0.336 ms   |
+| 256, 896, 4864        | **0.370 ms**   | 1.70 ms          | 0.368 ms   |
+| 1024, 1024, 1024      | 0.32–1.09 ms   | 1.95 ms          | 0.31 ms    |
+| 1, 4864, 896 (GEMV)   | 0.146–0.160 ms | (unchanged path) | 0.17 ms    |
+| 1, 151936, 896 (GEMV) | 0.48–0.62 ms   | (unchanged path) | 0.84 ms    |
+
+**Read:** int8 prefill now **ties MPS fp16** at the kernel level (~11.4 T-effective-FLOPS
+at 2048³, up from 2.4) — a 3.4–4.8× kernel speedup over the hand-tiled path. The "no int8
+matrix units" ceiling applied to hand-written ALU kernels; MPP's opaque implementation
+(compiler-resolved `__tensorops_impl_*` intrinsics) reaches fp16-matrix-pipeline rates
+on int8 operands while remaining int32-exact. Decode GEMV shapes are untouched (still
+routed to the SIMD-group kernel, still beating fp16).
+
+Tuning notes that mattered (sweep in `experiments/mpp_matmul2d_tune.mm`):
+
+- **Execution scope is the whole game: 2 SIMD-groups, not 4.** Apple's header example
+  uses `execution_simdgroups<4>`; every 4-SG and 8-SG config measured 2–5× slower than
+  the same tile at 2 SGs. Winner: 16×64 tile on 2 SIMD-groups (16×128 and 32×64 within
+  a few %). Per-threadgroup tiles ≥128 wide collapsed on deep-k shapes.
+- The interior/edge `slice<Extents...>` split (static extents skip bounds checks) is
+  required for the win; all-dynamic `slice()` at the header-example config left most of
+  the speedup on the table. (The MPP header comment calls it `static_slice`; the
+  shipping stdlib spells it `slice<Extents...>`.)
+- MPP dispatch matches element types **exactly**: `int8_t`/`int32_t`, non-const —
+  `char` or `const int8_t` hit an "Unsupported type" static_assert.
+- `mode::multiply` overwrites C (verified by garbage pre-fill), matching alpha=1/beta=0.
+- Run-to-run spread on this machine exceeds 2× on single runs (the 1024³ row above kept
+  its full observed range); use best-of-3 minimums for kernel comparisons.
+
+**End-to-end** (Qwen2.5-0.5B-int8, batch 8 × 128-token prompt, 1 step, median of 5,
+`experiments/int8_e2e_check.cc`): **555 ms → 350 ms** with MPP on (fp16: 300 ms) —
+int8 e2e prefill goes from 1.85× slower than fp16 to within ~17%, the residual being
+the per-Dense quantize/dequant epilogues, not the GEMM. Output tokens are
+**byte-identical** with and without `CT2_NO_MPP_GEMM=1` (24 greedy steps), as bit
+exactness predicts.
+
+Availability: macOS 26+ (MSL 4.0). Pre-26 OSes, integral `alpha != 1`, k = 0, and
+non-NT layouts fall back to the tiled kernel; `CT2_NO_MPP_GEMM=1` forces the fallback
+(bisection lever, same spirit as `CT2_NO_MPS_ACT`).
+
+The other two Task-6 candidates were not benchmarked, deliberately: MPP already ties
+MPS fp16 GEMM — the fastest matmul measured on this machine — so there is no headroom
+left for `MPSNDArrayQuantizedMatrixMultiplication` to win (and it dequantizes to float
+output with undocumented accumulator semantics, which would have meant restructuring
+the gemm+dequant pipeline AND re-litigating exactness), and the `simdgroup_float8x8`
+staging fallback is moot. If MPP ever regresses or a pre-26 OS matters, those notes
+live in the apple-silicon skill (`mpsndarray.md`, `int8-gemm-kernel-design.md`).
 
 **End-to-end (Qwen2.5-0.5B-int8, `device="metal"`, 3 runs each, warm; spread shown):**
 
