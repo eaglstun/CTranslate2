@@ -206,6 +206,33 @@ fp16 gap — `TopK` (the non-CUDA float dispatch rejects fp16) — fixed by call
 already-instantiated `compute<Device::CPU, float16_t, int32_t>` directly (TopK is
 comparison-based and runs on the CPU reference; it is not a hot op).
 
+### ✅ M11 — int8 Phase 1: quantization plumbing + GEMM shim (2026-06-11)
+
+The int8 path runs end-to-end on Metal (per `INT8_METAL_PLAN.md` Phase 1).
+`mayiuse_int8(METAL)` is true and `get_supported_compute_types("metal")` reports
+`int8` / `int8_float32` / `int8_float16`. New native kernels: `ct2_quantize_s8_*`
+(per-row amax tree reduce; `precise::divide` for the scale, `rint` for round-to-even —
+bit-exact against the CPU reference in the op suite), `ct2_dequantize_s8_*`, and
+`ct2_dequant_gemm_out_*` (int32 → `/(a_scale·b_scale)` + bias + every ActivationType),
+all fp32+fp16. The **int8 GEMM is a Phase-1 shim**: int8 operands widen to fp32 and ride
+the cached MPS float GEMM, product cast back to int32 (integer-exact below 2^24 —
+verified at k=2048 against a host int32 reference; fp16 was NOT usable here, real
+accumulators overflow it). `ComputeType::AUTO` is pinned to FLOAT32 on Metal so auto
+users don't land on the shim. **No resident-memory win yet** — weights widen per call;
+that is Phase 2 (native int8×int8→int32 MSL GEMM, under these same tests).
+
+Measured on Qwen2.5-0.5B-int8 (M4 Max, 2026-06-11, single run): coherent greedy output,
+**92/100 teacher-forced next-token agreement vs the fp16 reference** (5 prompts × 20
+steps), 3-prompt × 24-token generation 6.4s int8 vs 2.6s fp16 — the shim's extra cast
+passes make Phase-1 int8 ~2.5× slower than fp16, as expected.
+
+This milestone also fixed a **pre-existing command-buffer race**: `commit_command_buffer`
+committed outside `g_commit_mutex`, so two worker threads (grouped Conv1D's
+`parallel_for`) could commit in one order and record `g_last_committed` in the other,
+leaving `flush()` waiting on a buffer that wasn't last in the queue. Surfaced as an
+intermittent `METAL/...Conv1DGroup` failure once the new kernels shifted library-compile
+timing; the commit now happens inside the lock (10/10 clean full-suite runs).
+
 ### Verification snapshot
 
 - Full METAL suite: **84 passed, 2 skipped, 0 failed** (skips = Conv1D dilation and
@@ -217,22 +244,25 @@ comparison-based and runs on the CPU reference; it is not a hot op).
 
 ## What runs where today
 
-| Operation                                                                                  | Metal execution                                                                                               |
-| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
-| GEMM / MatMul (float32 and float16)                                                        | **GPU** — MPSMatrixMultiplication                                                                             |
-| SoftMax / LogSoftMax (float32 and float16)                                                 | **GPU** — custom kernel                                                                                       |
-| RMSNorm (float32 and float16)                                                              | **GPU** — custom kernel                                                                                       |
-| LayerNorm, last axis + affine (float32 and float16)                                        | **GPU** — custom kernel                                                                                       |
-| Rotary / RoPE (float32 and float16)                                                        | **GPU** — custom kernel                                                                                       |
-| Gather (all dtypes)                                                                        | **GPU** — custom kernel                                                                                       |
-| BiasAdd + activation, last axis (float32 and float16)                                      | **GPU** — fused custom kernel (ReLU/GELU/GELUTanh/GELUSigmoid/Swish/Tanh/Sigmoid)                             |
-| Standalone activations: ReLU/GELU/Swish/Sigmoid/Tanh (float32 and float16)                 | **GPU** — custom kernel                                                                                       |
-| Elementwise Mul (float32 and float16)                                                      | **GPU** — custom kernel                                                                                       |
-| Elementwise add (float32 and float16)                                                      | **GPU** — custom kernel (the residual connections; fp16 path added after profiling a real LLM)                |
-| Concat / Split / Slide (all dtypes)                                                        | **GPU** — strided-copy kernel                                                                                 |
-| Everything else (sampling, general-axis LayerNorm/BiasAdd, conv, int Mul, quantization, …) | CPU reference over unified memory (correct, float32 only)                                                     |
-| fp16 for ungraduated ops                                                                   | Not yet — CPU reference is float32-only, so a full fp16 model needs those ops graduated to half kernels first |
-| bf16 compute                                                                               | Not yet                                                                                                       |
+| Operation                                                                    | Metal execution                                                                                               |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| GEMM / MatMul (float32 and float16)                                          | **GPU** — MPSMatrixMultiplication                                                                             |
+| SoftMax / LogSoftMax (float32 and float16)                                   | **GPU** — custom kernel                                                                                       |
+| RMSNorm (float32 and float16)                                                | **GPU** — custom kernel                                                                                       |
+| LayerNorm, last axis + affine (float32 and float16)                          | **GPU** — custom kernel                                                                                       |
+| Rotary / RoPE (float32 and float16)                                          | **GPU** — custom kernel                                                                                       |
+| Gather (all dtypes)                                                          | **GPU** — custom kernel                                                                                       |
+| BiasAdd + activation, last axis (float32 and float16)                        | **GPU** — fused custom kernel (ReLU/GELU/GELUTanh/GELUSigmoid/Swish/Tanh/Sigmoid)                             |
+| Standalone activations: ReLU/GELU/Swish/Sigmoid/Tanh (float32 and float16)   | **GPU** — custom kernel                                                                                       |
+| Elementwise Mul (float32 and float16)                                        | **GPU** — custom kernel                                                                                       |
+| Elementwise add (float32 and float16)                                        | **GPU** — custom kernel (the residual connections; fp16 path added after profiling a real LLM)                |
+| Concat / Split / Slide (all dtypes)                                          | **GPU** — strided-copy kernel                                                                                 |
+| Quantize int8 (fp32/fp16 in; signed path)                                    | **GPU** — custom kernel (u8-shift variant falls through to CPU reference)                                     |
+| Dequantize int8, simple + GEMM-output forms (fp32/fp16 out)                  | **GPU** — custom kernels (GEMM-output form: the Dense `!trans_a && trans_b` layout, all activations)          |
+| GEMM int8×int8→int32                                                         | **GPU (shim)** — fp32-cast operands through MPS float GEMM; native int8 kernel is Phase 2                     |
+| Everything else (sampling, general-axis LayerNorm/BiasAdd, conv, int Mul, …) | CPU reference over unified memory (correct, float32 only)                                                     |
+| fp16 for ungraduated ops                                                     | Not yet — CPU reference is float32-only, so a full fp16 model needs those ops graduated to half kernels first |
+| bf16 compute                                                                 | Not yet                                                                                                       |
 
 ## What's left
 
