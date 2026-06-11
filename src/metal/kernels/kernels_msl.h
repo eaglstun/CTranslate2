@@ -741,20 +741,92 @@ kernel void ct2_dequant_gemm_out_half(device const int* c        [[buffer(0)]],
   ct2_dequant_gemm_out_impl<half>(c, a_scale, b_scale, bias, y, depth, has_bias, act, gid);
 }
 
-// ---- INT8 GEMM shim casts (Phase 1) ----  int8 operands widen to fp32 for the MPS
-// float GEMM; the float product (an exact integer for |v| < 2^24) casts back to the
-// int32 accumulator the int8 GEMM contract expects. rint guards against any non-exact
-// representation at the extreme end.
-kernel void ct2_s8_to_float(device const char* x [[buffer(0)]],
-                            device float* y       [[buffer(1)]],
-                            uint gid [[thread_position_in_grid]]) {
-  y[gid] = (float)x[gid];
-}
+// ---- INT8 GEMM (native) ----  C(int32, m*n) = alpha * op(A) * op(B), beta == 0 (the
+// only form CT2's quantized Dense and the int8 Gemm tests use; alpha is integral so the
+// product stays exact). int8 stays int8 end-to-end: operands are staged through
+// threadgroup memory as char and every multiply-accumulate runs in int32 — bit-exact by
+// construction, no float detour. MPS has no integer GEMM and simdgroup_matrix has no
+// int8 element type (MSL spec 2.4: half/bfloat/float only), so this is hand-tiled.
+//
+// Each 16x16 threadgroup computes a 64x64 tile of C, looping over k in 32-deep chunks;
+// each thread accumulates a 4x4 register micro-tile. Both staging tiles are stored
+// depth-major ([kk][i] / [kk][j]) so the inner loop reads both contiguously regardless
+// of the transpose flags, which are resolved once at tile-load time. Out-of-range loads
+// stage 0 (a no-op in the dot product), so only the C store needs an edge guard.
+constant uint CT2_GEMM_S8_BM = 64;
+constant uint CT2_GEMM_S8_BN = 64;
+constant uint CT2_GEMM_S8_BK = 32;
 
-kernel void ct2_float_to_s32(device const float* x [[buffer(0)]],
-                             device int* y          [[buffer(1)]],
-                             uint gid [[thread_position_in_grid]]) {
-  y[gid] = (int)rint(x[gid]);
+kernel void ct2_gemm_s8(device const char* a [[buffer(0)]],
+                        device const char* b [[buffer(1)]],
+                        device int* c         [[buffer(2)]],
+                        constant uint& m      [[buffer(3)]],
+                        constant uint& n      [[buffer(4)]],
+                        constant uint& k      [[buffer(5)]],
+                        constant uint& lda    [[buffer(6)]],
+                        constant uint& ldb    [[buffer(7)]],
+                        constant uint& ldc    [[buffer(8)]],
+                        constant uint& trans_a [[buffer(9)]],
+                        constant uint& trans_b [[buffer(10)]],
+                        constant int& alpha    [[buffer(11)]],
+                        uint2 tg  [[threadgroup_position_in_grid]],
+                        uint2 tid [[thread_position_in_threadgroup]]) {
+  threadgroup char As[CT2_GEMM_S8_BK][CT2_GEMM_S8_BM];  // As[kk][i]: A rows, depth-major
+  threadgroup char Bs[CT2_GEMM_S8_BK][CT2_GEMM_S8_BN];  // Bs[kk][j]: B cols, depth-major
+
+  const uint row0 = tg.y * CT2_GEMM_S8_BM;
+  const uint col0 = tg.x * CT2_GEMM_S8_BN;
+  const uint lin = tid.y * 16u + tid.x;  // 0..255
+
+  int acc[4][4] = {{0}};
+
+  for (uint k0 = 0; k0 < k; k0 += CT2_GEMM_S8_BK) {
+    for (uint t = lin; t < CT2_GEMM_S8_BM * CT2_GEMM_S8_BK; t += 256u) {
+      const uint i = t / CT2_GEMM_S8_BK;
+      const uint kk = t - i * CT2_GEMM_S8_BK;
+      const uint gi = row0 + i;
+      const uint gk = k0 + kk;
+      char v = 0;
+      if (gi < m && gk < k)
+        v = (trans_a != 0u) ? a[(ulong)gk * lda + gi] : a[(ulong)gi * lda + gk];
+      As[kk][i] = v;
+    }
+    for (uint t = lin; t < CT2_GEMM_S8_BK * CT2_GEMM_S8_BN; t += 256u) {
+      const uint kk = t / CT2_GEMM_S8_BN;
+      const uint j = t - kk * CT2_GEMM_S8_BN;
+      const uint gj = col0 + j;
+      const uint gk = k0 + kk;
+      char v = 0;
+      if (gj < n && gk < k)
+        v = (trans_b != 0u) ? b[(ulong)gj * ldb + gk] : b[(ulong)gk * ldb + gj];
+      Bs[kk][j] = v;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint kk = 0; kk < CT2_GEMM_S8_BK; ++kk) {
+      int av[4];
+      int bv[4];
+      for (uint r = 0; r < 4u; ++r)
+        av[r] = (int)As[kk][tid.y * 4u + r];
+      for (uint s = 0; s < 4u; ++s)
+        bv[s] = (int)Bs[kk][tid.x * 4u + s];
+      for (uint r = 0; r < 4u; ++r)
+        for (uint s = 0; s < 4u; ++s)
+          acc[r][s] += av[r] * bv[s];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+
+  for (uint r = 0; r < 4u; ++r) {
+    const uint gi = row0 + tid.y * 4u + r;
+    if (gi >= m)
+      continue;
+    for (uint s = 0; s < 4u; ++s) {
+      const uint gj = col0 + tid.x * 4u + s;
+      if (gj < n)
+        c[(ulong)gi * ldc + gj] = alpha * acc[r][s];
+    }
+  }
 }
 
 // ---- Strided copy ----  type-agnostic byte copy underlying Concat/Split/Slide:

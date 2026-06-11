@@ -70,15 +70,12 @@ namespace ctranslate2 {
                   a.data<T>(), lda, b.data<T>(), ldb, beta, c.data<T>(), ldc);
     }
 
-    // Phase-1 int8 GEMM stand-in: widen the int8 operands to fp32, ride the existing
-    // cached MPS float GEMM, and cast the product back to the int32 accumulator the
-    // int8 GEMM contract expects. fp32 rather than fp16 because real accumulator
-    // magnitudes (~1e5-1e7 at LLM depths) exceed both fp16's max finite value and its
-    // integer-exact range; fp32 is integer-exact up to 2^24, which covers everything
-    // outside adversarial all-saturated inputs at k > ~1000. The weight is widened on
-    // every call, so the int8 resident-memory win only arrives with the real
-    // int8-native GEMM kernel (Phase 2); this path is correctness scaffolding.
-    static void metal_gemm_int8(float alpha, float beta, bool trans_a, bool trans_b,
+    // Native int8 GEMM (Phase 2): int8 operands feed the hand-tiled int8x8->int32 MSL
+    // kernel directly, so quantized weights stay int8-resident on the GPU (no per-call
+    // widening) and accumulation is bit-exact int32 at any depth. The caller guarantees
+    // beta == 0 and an integral alpha (a float alpha cannot be applied exactly to an
+    // int32 accumulator); anything else falls through to the generic dispatch.
+    static void metal_gemm_int8(float alpha, bool trans_a, bool trans_b,
                                 const StorageView& a, const StorageView& b, StorageView& c) {
       const dim_t k = a.dim(trans_a ? -2 : -1);
       const dim_t n = b.dim(trans_b ? -2 : -1);
@@ -92,15 +89,9 @@ namespace ctranslate2 {
       output_shape[output_shape.size() - 1] = n;
       c.resize(std::move(output_shape));
 
-      StorageView a_f32(a.shape(), DataType::FLOAT32, a.device());
-      StorageView b_f32(b.shape(), DataType::FLOAT32, b.device());
-      StorageView c_f32(c.shape(), DataType::FLOAT32, c.device());
-      metal::s8_to_float(a.data<int8_t>(), a_f32.data<float>(), a.size());
-      metal::s8_to_float(b.data<int8_t>(), b_f32.data<float>(), b.size());
-      metal::gemm(trans_a, trans_b, m, n, k, alpha,
-                  a_f32.data<float>(), lda, b_f32.data<float>(), ldb,
-                  beta, c_f32.data<float>(), ldc);
-      metal::float_to_s32(c_f32.data<float>(), c.data<int32_t>(), c.size());
+      metal::gemm_s8(trans_a, trans_b, m, n, k, static_cast<int32_t>(alpha),
+                     a.data<int8_t>(), lda, b.data<int8_t>(), ldb,
+                     c.data<int32_t>(), ldc);
     }
 #endif
 
@@ -115,11 +106,13 @@ namespace ctranslate2 {
       switch (a.dtype()) {
       case DataType::INT8:
 #ifdef CT2_WITH_METAL
-        // The u8-shift compensation and beta != 0 never occur on Metal (the former is
-        // CPU-GEMM-backend-specific, the latter unused by quantized Dense); guard anyway
-        // so an unexpected combination falls through rather than silently dropping terms.
-        if (a.device() == Device::METAL && !a_shift_compensation && _beta == 0) {
-          metal_gemm_int8(_alpha, _beta, _trans_a, _trans_b, a, b, c);
+        // The u8-shift compensation, beta != 0 and a non-integral alpha never occur on
+        // Metal (the first is CPU-GEMM-backend-specific, the others unused by quantized
+        // Dense and unrepresentable in an exact int32 accumulator); guard anyway so an
+        // unexpected combination falls through rather than silently dropping terms.
+        if (a.device() == Device::METAL && !a_shift_compensation && _beta == 0
+            && _alpha == static_cast<float>(static_cast<int32_t>(_alpha))) {
+          metal_gemm_int8(_alpha, _trans_a, _trans_b, a, b, c);
           break;
         }
 #endif

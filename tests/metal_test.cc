@@ -363,8 +363,9 @@ TEST_F(MetalTest, RotaryMatchesCPU) {
 }
 
 // ---------------------------------------------------------------------------
-// INT8 (Phase 1): quantize / dequantize run as native Metal kernels; the int8 GEMM is
-// the fp32-cast shim over the MPS float GEMM. Parity oracle is the CPU int8 reference.
+// INT8: quantize / dequantize / GEMM all run as native Metal kernels; the GEMM is the
+// hand-tiled int8x8->int32 kernel (Phase 2), bit-exact at any depth. Parity oracle is
+// the CPU int8 reference.
 // (QuantizeINT8 / QuantizeINT8ZeroRow / GemmInt8 in ops_test.cc already run on METAL;
 // these cover what the op suite does not: the dequantize forms, fp16, and GEMM depth.)
 // ---------------------------------------------------------------------------
@@ -469,11 +470,10 @@ TEST_F(MetalTest, Int8DequantizeGemmOutputMatchesCPU) {
 }
 
 TEST_F(MetalTest, Int8GemmDeepAccumulatorMatchesHostReference) {
-  // The Phase-1 GEMM shim accumulates in fp32, which is integer-exact only below 2^24.
   // Validate the int32 contract at a realistic LLM depth (k=2048, Dense's trans_b
-  // layout) against a host int32 triple loop; mixed-sign int8 keeps |accum| ~1e5-1e6,
-  // comfortably exact. (All-saturated adversarial inputs at k > ~1000 would not be —
-  // that limit goes away with the Phase-2 native int8 kernel.)
+  // layout) against a host int32 triple loop. The native int8 kernel accumulates in
+  // int32 throughout, so this is bit-exact by construction — including the all-saturated
+  // adversarial inputs the retired Phase-1 fp32 shim could not represent above 2^24.
   const dim_t m = 3, n = 5, k = 2048;
   std::mt19937 rng(42);
   std::uniform_int_distribution<int> dist(-127, 127);
@@ -497,6 +497,63 @@ TEST_F(MetalTest, Int8GemmDeepAccumulatorMatchesHostReference) {
   ops::Gemm(/*alpha=*/1, /*beta=*/0, /*trans_a=*/false, /*trans_b=*/true)(a, b, c);
 
   expect_storage_eq(c.to(Device::CPU), StorageView({m, n}, expected_vec));
+}
+
+TEST_F(MetalTest, Int8GemmSaturatedAccumulatorExact) {
+  // All-saturated operands at k=2048 drive the accumulator to 2048 * 127 * 127 =
+  // 33,032,192 — above fp32's 2^24 integer-exact range, so the retired Phase-1 fp32
+  // shim could not have produced this value. Only a true int32 accumulation passes.
+  const dim_t m = 2, n = 3, k = 2048;
+  StorageView a({m, k}, std::vector<int8_t>(m * k, 127), Device::METAL);
+  StorageView b({n, k}, std::vector<int8_t>(n * k, 127), Device::METAL);
+  StorageView c(DataType::INT32, Device::METAL);
+  ops::Gemm(/*alpha=*/1, /*beta=*/0, /*trans_a=*/false, /*trans_b=*/true)(a, b, c);
+
+  const std::vector<int32_t> expected_vec(m * n, 2048 * 127 * 127);
+  expect_storage_eq(c.to(Device::CPU), StorageView({m, n}, expected_vec));
+}
+
+TEST_F(MetalTest, Int8GemmAllTransposeCombinations) {
+  // The kernel resolves both transpose flags at tile-load time; cover all four layouts
+  // (the op suite only runs notrans/notrans and the Dense path only notrans/trans_b)
+  // against a host int32 triple loop, with edge-size dims that exercise the tile guards.
+  const dim_t m = 5, n = 7, k = 9;
+  std::mt19937 rng(7);
+  std::uniform_int_distribution<int> dist(-127, 127);
+
+  std::vector<int8_t> a_logical(m * k), b_logical(k * n);
+  for (auto& v : a_logical) v = static_cast<int8_t>(dist(rng));
+  for (auto& v : b_logical) v = static_cast<int8_t>(dist(rng));
+
+  std::vector<int32_t> expected_vec(m * n, 0);
+  for (dim_t i = 0; i < m; ++i)
+    for (dim_t j = 0; j < n; ++j) {
+      int32_t acc = 0;
+      for (dim_t kk = 0; kk < k; ++kk)
+        acc += static_cast<int32_t>(a_logical[i * k + kk])
+             * static_cast<int32_t>(b_logical[kk * n + j]);
+      expected_vec[i * n + j] = acc;
+    }
+  const StorageView expected({m, n}, expected_vec);
+
+  for (const bool trans_a : {false, true}) {
+    for (const bool trans_b : {false, true}) {
+      std::vector<int8_t> a_vec(m * k), b_vec(k * n);
+      for (dim_t i = 0; i < m; ++i)
+        for (dim_t kk = 0; kk < k; ++kk)
+          (trans_a ? a_vec[kk * m + i] : a_vec[i * k + kk]) = a_logical[i * k + kk];
+      for (dim_t kk = 0; kk < k; ++kk)
+        for (dim_t j = 0; j < n; ++j)
+          (trans_b ? b_vec[j * k + kk] : b_vec[kk * n + j]) = b_logical[kk * n + j];
+
+      StorageView a(trans_a ? Shape{k, m} : Shape{m, k}, a_vec, Device::METAL);
+      StorageView b(trans_b ? Shape{n, k} : Shape{k, n}, b_vec, Device::METAL);
+      StorageView c(DataType::INT32, Device::METAL);
+      ops::Gemm(/*alpha=*/1, /*beta=*/0, trans_a, trans_b)(a, b, c);
+
+      expect_storage_eq(c.to(Device::CPU), expected);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -536,6 +593,46 @@ TEST_F(MetalTest, DISABLED_BenchmarkGemm) {
     run("CPU   fp32", Device::CPU, DataType::FLOAT32);
     run("METAL fp32", Device::METAL, DataType::FLOAT32);
     run("METAL fp16", Device::METAL, DataType::FLOAT16);
+    std::cout << "\n";
+  }
+}
+
+// Native int8 GEMM (ct2_gemm_s8) vs the MPS float GEMMs, square and Dense-shaped (the
+// !trans_a && trans_b layout the quantized Dense always uses). GFLOPS counts the same
+// 2*m*n*k madds for all dtypes so the columns compare directly.
+TEST_F(MetalTest, DISABLED_BenchmarkGemmInt8) {
+  std::cout << "\n=== int8 GEMM (Dense layout, trans_b), ms/iter and GFLOPS ===\n";
+  struct GemmShape { dim_t m; dim_t n; dim_t k; };
+  for (GemmShape s : {GemmShape{256, 256, 256}, GemmShape{1024, 1024, 1024},
+                      GemmShape{2048, 2048, 2048},
+                      // Qwen2.5-0.5B Dense shapes at prefill (m = batch*seq = 8*32):
+                      GemmShape{256, 4864, 896}, GemmShape{256, 896, 4864},
+                      // and at bs1 decode:
+                      GemmShape{1, 4864, 896}, GemmShape{1, 151936, 896}}) {
+    const int iters = (s.m * s.n * s.k > (dim_t)1 << 29) ? 8 : 30;
+    const double flops = 2.0 * double(s.m) * s.n * s.k;
+
+    {
+      std::vector<int8_t> av(s.m * s.k, 3), bv(s.n * s.k, -5);
+      StorageView a({s.m, s.k}, av, Device::METAL);
+      StorageView b({s.n, s.k}, bv, Device::METAL);
+      StorageView c(DataType::INT32, Device::METAL);
+      const ops::Gemm gemm(1, 0, false, true);
+      const double ms = time_ms(iters, [&] { gemm(a, b, c); synchronize_device(Device::METAL, 0); });
+      std::cout << "  m=" << s.m << " n=" << s.n << " k=" << s.k
+                << "  METAL int8:  " << ms << " ms,  " << flops / (ms * 1e6) << " GFLOPS\n";
+    }
+    for (DataType dt : {DataType::FLOAT16, DataType::FLOAT32}) {
+      const std::vector<float> av(s.m * s.k, 0.01f), bv(s.n * s.k, 0.02f);
+      StorageView a = StorageView({s.m, s.k}, av, Device::METAL).to(dt);
+      StorageView b = StorageView({s.n, s.k}, bv, Device::METAL).to(dt);
+      StorageView c(dt, Device::METAL);
+      const ops::Gemm gemm(1, 0, false, true);
+      const double ms = time_ms(iters, [&] { gemm(a, b, c); synchronize_device(Device::METAL, 0); });
+      std::cout << "  m=" << s.m << " n=" << s.n << " k=" << s.k
+                << "  METAL " << (dt == DataType::FLOAT16 ? "fp16" : "fp32")
+                << ":  " << ms << " ms,  " << flops / (ms * 1e6) << " GFLOPS\n";
+    }
     std::cout << "\n";
   }
 }

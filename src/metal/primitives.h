@@ -121,10 +121,17 @@ namespace ctranslate2 {
                                    const float16_t* bias, float16_t* y,
                                    dim_t batch_size, dim_t depth, int activation);
 
-    // Phase-1 int8 GEMM shim casts: widen int8 to fp32 for the MPS float GEMM and cast
-    // the float product back to the int32 accumulator (exact for |v| < 2^24).
-    void s8_to_float(const int8_t* x, float* y, dim_t size);
-    void float_to_s32(const float* x, int32_t* y, dim_t size);
+    // Native int8 GEMM: C(int32) = alpha * op(A)(int8) * op(B)(int8), beta == 0. Row-major
+    // with leading dimensions lda/ldb/ldc; op() transposes when the corresponding flag is
+    // set. Accumulation is int32 throughout (bit-exact, no float detour); alpha is integral
+    // because a float alpha cannot be applied exactly to an int32 accumulator — non-integral
+    // alphas must not be routed here. Hand-tiled MSL kernel (MPS has no integer GEMM).
+    void gemm_s8(bool transpose_a, bool transpose_b,
+                 dim_t m, dim_t n, dim_t k,
+                 int32_t alpha,
+                 const int8_t* a, dim_t lda,
+                 const int8_t* b, dim_t ldb,
+                 int32_t* c, dim_t ldc);
 
     // Type-agnostic strided copy underlying Concat/Split/Slide: for i in [0, iter_size) and
     // d in [0, copy_size_bytes), dst[i*dst_step_bytes + d] = src[i*src_step_bytes + d]. All

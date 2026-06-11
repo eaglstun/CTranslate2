@@ -541,26 +541,6 @@ namespace ctranslate2 {
         commit_command_buffer(command_buffer);
       }
 
-      void cast_impl(const char* pipeline_name, const void* x, void* y, dim_t size) {
-        if (size == 0)
-          return;
-        const BufferRange x_buffer = buffer_and_offset(x);
-        const BufferRange y_buffer = buffer_and_offset(y);
-
-        id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
-        id<MTLCommandBuffer> command_buffer = new_command_buffer();
-        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
-        [encoder setComputePipelineState:pso];
-        [encoder setBuffer:x_buffer.buffer offset:x_buffer.offset atIndex:0];
-        [encoder setBuffer:y_buffer.buffer offset:y_buffer.offset atIndex:1];
-
-        NSUInteger tg = pso.maxTotalThreadsPerThreadgroup;
-        if (tg > (NSUInteger)size) tg = size;
-        [encoder dispatchThreads:MTLSizeMake(size, 1, 1)
-              threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-        [encoder endEncoding];
-        commit_command_buffer(command_buffer);
-      }
     }
 
     void quantize_s8(const float* input, int8_t* output, float* scales,
@@ -599,12 +579,58 @@ namespace ctranslate2 {
                                      bias, y, batch_size, depth, activation);
     }
 
-    void s8_to_float(const int8_t* x, float* y, dim_t size) {
-      cast_impl("ct2_s8_to_float", x, y, size);
-    }
+    // Tile sizes must match CT2_GEMM_S8_BM/BN in kernels_msl.h (16x16 threads per group).
+    static constexpr NSUInteger kGemmS8TileM = 64;
+    static constexpr NSUInteger kGemmS8TileN = 64;
 
-    void float_to_s32(const float* x, int32_t* y, dim_t size) {
-      cast_impl("ct2_float_to_s32", x, y, size);
+    void gemm_s8(bool transpose_a, bool transpose_b,
+                 dim_t m, dim_t n, dim_t k,
+                 int32_t alpha,
+                 const int8_t* a, dim_t lda,
+                 const int8_t* b, dim_t ldb,
+                 int32_t* c, dim_t ldc) {
+      if (m == 0 || n == 0)
+        return;
+
+      const BufferRange a_buffer = buffer_and_offset(a);
+      const BufferRange b_buffer = buffer_and_offset(b);
+      const BufferRange c_buffer = buffer_and_offset(c);
+
+      id<MTLComputePipelineState> pso = get_pipeline("ct2_gemm_s8");
+      id<MTLCommandBuffer> command_buffer = new_command_buffer();
+      id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+      [encoder setComputePipelineState:pso];
+      [encoder setBuffer:a_buffer.buffer offset:a_buffer.offset atIndex:0];
+      [encoder setBuffer:b_buffer.buffer offset:b_buffer.offset atIndex:1];
+      [encoder setBuffer:c_buffer.buffer offset:c_buffer.offset atIndex:2];
+      const uint32_t m_u = static_cast<uint32_t>(m);
+      const uint32_t n_u = static_cast<uint32_t>(n);
+      const uint32_t k_u = static_cast<uint32_t>(k);
+      const uint32_t lda_u = static_cast<uint32_t>(lda);
+      const uint32_t ldb_u = static_cast<uint32_t>(ldb);
+      const uint32_t ldc_u = static_cast<uint32_t>(ldc);
+      const uint32_t trans_a_u = transpose_a ? 1u : 0u;
+      const uint32_t trans_b_u = transpose_b ? 1u : 0u;
+      const int32_t alpha_i = alpha;
+      [encoder setBytes:&m_u length:sizeof(m_u) atIndex:3];
+      [encoder setBytes:&n_u length:sizeof(n_u) atIndex:4];
+      [encoder setBytes:&k_u length:sizeof(k_u) atIndex:5];
+      [encoder setBytes:&lda_u length:sizeof(lda_u) atIndex:6];
+      [encoder setBytes:&ldb_u length:sizeof(ldb_u) atIndex:7];
+      [encoder setBytes:&ldc_u length:sizeof(ldc_u) atIndex:8];
+      [encoder setBytes:&trans_a_u length:sizeof(trans_a_u) atIndex:9];
+      [encoder setBytes:&trans_b_u length:sizeof(trans_b_u) atIndex:10];
+      [encoder setBytes:&alpha_i length:sizeof(alpha_i) atIndex:11];
+
+      // One 16x16 threadgroup per 64x64 output tile; the kernel zero-pads edge loads, so
+      // the rounded-up grid is safe (only the C store is guarded).
+      const MTLSize grid = MTLSizeMake((static_cast<NSUInteger>(n) + kGemmS8TileN - 1) / kGemmS8TileN,
+                                       (static_cast<NSUInteger>(m) + kGemmS8TileM - 1) / kGemmS8TileM,
+                                       1);
+      const MTLSize group = MTLSizeMake(16, 16, 1);
+      [encoder dispatchThreadgroups:grid threadsPerThreadgroup:group];
+      [encoder endEncoding];
+      commit_command_buffer(command_buffer);
     }
 
     void strided_copy(const void* src, void* dst,
