@@ -1,0 +1,10 @@
+{
+  "consumer": "nllb",
+  "compute_type": "float16",
+  "device": "metal",
+  "model_dir": "/Users/eeaglstun/Documents/AI/ct2-models/nllb-200-distilled-600M-int8",
+  "source": "The quick brown fox jumps over the lazy dog, and the sleepy farmer never even notices the commotion in his field.",
+  "src_lang": "eng_Latn",
+  "tgt_lang": "fra_Latn",
+  "text": "Le renard brun rapide saute sur le chien paresseux, et l'agriculteur endormi ne remarque m\u00eame pas le tumulte de son champ."
+}

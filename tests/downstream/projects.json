@@ -1,0 +1,54 @@
+{
+  "_comment": "Downstream validation config — see scripts/validate-downstream.sh. Goldens are fp16-on-Metal from this branch; candidates run int8 and are compared with a quant-error tolerance. Metric directions: wer = candidate-vs-golden word error rate (pass if <= tolerance); agreement = teacher-forced next-token match rate (pass if >= tolerance); char_similarity = difflib ratio on output text (pass if >= tolerance).",
+  "prefix": "~/.local/ct2-metal-downstream",
+  "wheel_python": "/Users/eeaglstun/Documents/AI/whisperX/.venv/bin/python",
+  "venvs": {
+    "whisperx": "/Users/eeaglstun/Documents/AI/whisperX/.venv",
+    "faster_whisper": "/Users/eeaglstun/Documents/AI/faster-whisper/.venv"
+  },
+  "bootstrap": {
+    "faster_whisper": {
+      "python": "3.10",
+      "editable": "/Users/eeaglstun/Documents/AI/faster-whisper"
+    }
+  },
+  "consumers": [
+    {
+      "name": "whisperx",
+      "venv": "whisperx",
+      "driver": "drivers/whisperx_driver.py",
+      "args": ["--model", "small", "--audio", "/Users/eeaglstun/Documents/AI/whisperX/audio/clip30.wav"],
+      "metric": "wer",
+      "tolerance": 0.10,
+      "golden": "goldens/whisperx.json"
+    },
+    {
+      "name": "faster_whisper",
+      "venv": "faster_whisper",
+      "driver": "drivers/faster_whisper_driver.py",
+      "args": ["--model", "small", "--audio", "/Users/eeaglstun/Documents/AI/whisperX/audio/clip30.wav"],
+      "metric": "wer",
+      "tolerance": 0.10,
+      "golden": "goldens/faster_whisper.json"
+    },
+    {
+      "name": "qwen2.5",
+      "venv": "whisperx",
+      "driver": "drivers/qwen_driver.py",
+      "args": ["--model-dir", "/Users/eeaglstun/Documents/AI/ct2-models/qwen2.5-0.5b-int8"],
+      "metric": "agreement",
+      "tolerance": 0.90,
+      "golden": "goldens/qwen2.5.json",
+      "pass_golden": true
+    },
+    {
+      "name": "nllb",
+      "venv": "whisperx",
+      "driver": "drivers/nllb_driver.py",
+      "args": ["--model-dir", "/Users/eeaglstun/Documents/AI/ct2-models/nllb-200-distilled-600M-int8"],
+      "metric": "char_similarity",
+      "tolerance": 0.90,
+      "golden": "goldens/nllb.json"
+    }
+  ]
+}

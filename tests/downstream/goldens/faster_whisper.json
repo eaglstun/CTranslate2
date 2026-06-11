@@ -1,0 +1,36 @@
+{
+  "consumer": "faster_whisper",
+  "compute_type": "float16",
+  "device": "metal",
+  "model": "small",
+  "audio": "/Users/eeaglstun/Documents/AI/whisperX/audio/clip30.wav",
+  "duration": 30.0,
+  "text": "I know Dr. Sirachman probably explained to you what she initially had diagnosed. I don't know if you guys are in the medical field, but she's got a leak in one of her heart valves, so her mitral valve. It was a pretty severe leak when she last saw her. I think that was in March, I want to say. But she had never had any issues like this, right? She had had some coughing, but no like persistent labored breathing. And so, you know,",
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 4.5600000000000005,
+      "text": "I know Dr. Sirachman probably explained to you what she initially had diagnosed."
+    },
+    {
+      "start": 4.5600000000000005,
+      "end": 9.52,
+      "text": "I don't know if you guys are in the medical field, but she's got a leak in one of her heart valves,"
+    },
+    {
+      "start": 9.52,
+      "end": 16.96,
+      "text": "so her mitral valve. It was a pretty severe leak when she last saw her. I think that was in March,"
+    },
+    {
+      "start": 16.96,
+      "end": 24.240000000000002,
+      "text": "I want to say. But she had never had any issues like this, right? She had had some coughing,"
+    },
+    {
+      "start": 24.240000000000002,
+      "end": 29.6,
+      "text": "but no like persistent labored breathing. And so, you know,"
+    }
+  ]
+}
