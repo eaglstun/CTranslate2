@@ -897,6 +897,339 @@ kernel void ct2_gather_bytes(device const uchar* data    [[buffer(0)]],
   for (uint b = 0; b < copy_size; ++b)
     dst[b] = src[b];
 }
+
+// ---- Sampling ops ----
+
+// "a ranks before b" in the shared (value desc, index asc) total order used by TopK and
+// TopPMask. index -1 marks "no candidate" and ranks after everything.
+inline bool ct2_rank_before(float va, int ia, float vb, int ib) {
+  if (ib < 0) return ia >= 0;
+  if (ia < 0) return false;
+  return va > vb || (va == vb && ia < ib);
+}
+
+// TopK: one threadgroup per row, k extract-max passes over the row. Each pass scans the
+// row for the best element ranking strictly after the previously selected one, then
+// tree-reduces. Values are re-read from the input at the selected index so the output is
+// a bit-copy (half stays half). Tie-break is deterministic (smaller index first); the CPU
+// partial_sort leaves tie order unspecified, so parity on ties is not promised. The
+// host dispatches a power-of-two threadgroup size <= CT2_TOPK_MAX_TG.
+constant uint CT2_TOPK_MAX_TG = 1024;
+
+template <typename T>
+inline void ct2_topk_impl(device const T* x, device T* values, device int* indices,
+                          uint depth, uint k, uint row, uint tid, uint tg,
+                          threadgroup float* red_v, threadgroup int* red_i,
+                          threadgroup float* bound_v, threadgroup int* bound_i) {
+  device const T* x_row = x + (ulong)row * (ulong)depth;
+  device T* v_row = values + (ulong)row * (ulong)k;
+  device int* i_row = indices + (ulong)row * (ulong)k;
+
+  if (tid == 0u) {
+    *bound_v = INFINITY;
+    *bound_i = -1;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  for (uint it = 0; it < k; ++it) {
+    const float bv = *bound_v;
+    const int bi = *bound_i;
+
+    float best_v = 0.0f;
+    int best_i = -1;
+    for (uint j = tid; j < depth; j += tg) {
+      const float v = (float)x_row[j];
+      // Candidate iff it ranks strictly after the current bound (bi < 0 is the initial
+      // bound, before everything).
+      const bool after_bound = bi < 0 || v < bv || (v == bv && (int)j > bi);
+      if (after_bound && ct2_rank_before(v, (int)j, best_v, best_i)) {
+        best_v = v;
+        best_i = (int)j;
+      }
+    }
+    red_v[tid] = best_v;
+    red_i[tid] = best_i;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint s = tg / 2u; s > 0u; s >>= 1) {
+      if (tid < s && ct2_rank_before(red_v[tid + s], red_i[tid + s], red_v[tid], red_i[tid])) {
+        red_v[tid] = red_v[tid + s];
+        red_i[tid] = red_i[tid + s];
+      }
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0u) {
+      const int sel = red_i[0] >= 0 ? red_i[0] : 0;  // k <= depth guarantees a candidate
+      v_row[it] = x_row[sel];
+      i_row[it] = sel;
+      *bound_v = red_v[0];
+      *bound_i = red_i[0];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+}
+
+kernel void ct2_topk_float(device const float* x   [[buffer(0)]],
+                           device float* values     [[buffer(1)]],
+                           device int* indices      [[buffer(2)]],
+                           constant uint& depth      [[buffer(3)]],
+                           constant uint& k          [[buffer(4)]],
+                           uint row [[threadgroup_position_in_grid]],
+                           uint tid [[thread_position_in_threadgroup]],
+                           uint tg  [[threads_per_threadgroup]]) {
+  threadgroup float red_v[CT2_TOPK_MAX_TG];
+  threadgroup int red_i[CT2_TOPK_MAX_TG];
+  threadgroup float bound_v;
+  threadgroup int bound_i;
+  ct2_topk_impl<float>(x, values, indices, depth, k, row, tid, tg,
+                       red_v, red_i, &bound_v, &bound_i);
+}
+
+kernel void ct2_topk_half(device const half* x   [[buffer(0)]],
+                          device half* values     [[buffer(1)]],
+                          device int* indices     [[buffer(2)]],
+                          constant uint& depth     [[buffer(3)]],
+                          constant uint& k         [[buffer(4)]],
+                          uint row [[threadgroup_position_in_grid]],
+                          uint tid [[thread_position_in_threadgroup]],
+                          uint tg  [[threads_per_threadgroup]]) {
+  threadgroup float red_v[CT2_TOPK_MAX_TG];
+  threadgroup int red_i[CT2_TOPK_MAX_TG];
+  threadgroup float bound_v;
+  threadgroup int bound_i;
+  ct2_topk_impl<half>(x, values, indices, depth, k, row, tid, tg,
+                      red_v, red_i, &bound_v, &bound_i);
+}
+
+// Order-preserving float <-> uint mapping (u1 < u2 iff f1 < f2) for sort keys.
+inline uint ct2_float_order_key(float f) {
+  const uint u = as_type<uint>(f);
+  return (u & 0x80000000u) ? ~u : (u | 0x80000000u);
+}
+
+inline float ct2_float_from_order_key(uint key) {
+  const uint u = (key & 0x80000000u) ? (key & 0x7FFFFFFFu) : ~key;
+  return as_type<float>(u);
+}
+
+// TopPMask: one threadgroup per row, whole row sorted in threadgroup memory (depth must
+// be <= CT2_TOPP_MAX_DEPTH; the op falls back to the CPU kernel above that). Mirrors the
+// CPU reference exactly: sort by probability descending, then a single thread accumulates
+// the exclusive prefix sum sequentially in float — same addition order and rounding as
+// the CPU loop — and y[id] = prefix < p ? x[id] : mask. Tie order is (prob desc, index
+// asc), deterministic; the CPU std::sort tie order is unspecified.
+constant uint CT2_TOPP_TG = 256;
+constant uint CT2_TOPP_MAX_DEPTH = 4096;
+
+template <typename T>
+inline void ct2_topp_mask_impl(device const T* x, device const T* probs, device T* y,
+                               float p, float mask, uint depth, uint row, uint tid,
+                               threadgroup uint* keys, threadgroup ushort* ids,
+                               threadgroup uint* kept_count) {
+  device const T* x_row = x + (ulong)row * (ulong)depth;
+  device const T* probs_row = probs + (ulong)row * (ulong)depth;
+  device T* y_row = y + (ulong)row * (ulong)depth;
+
+  // Padded power-of-two size for the bitonic network.
+  uint n = 1;
+  while (n < depth)
+    n <<= 1;
+
+  for (uint i = tid; i < n; i += CT2_TOPP_TG) {
+    if (i < depth) {
+      keys[i] = ct2_float_order_key((float)probs_row[i]);
+      ids[i] = (ushort)i;
+    } else {
+      keys[i] = 0u;          // ranks after every real probability (probs are >= 0)
+      ids[i] = 0xFFFFu;      // and after real elements on a key tie
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  // Bitonic sort, descending by (key, then id ascending).
+  for (uint size = 2; size <= n; size <<= 1) {
+    for (uint stride = size >> 1; stride > 0; stride >>= 1) {
+      for (uint i = tid; i < n; i += CT2_TOPP_TG) {
+        const uint partner = i ^ stride;
+        if (partner > i) {
+          const bool descending = (i & size) == 0u;
+          const uint k1 = keys[i], k2 = keys[partner];
+          const ushort d1 = ids[i], d2 = ids[partner];
+          const bool first_ranks_before = k1 > k2 || (k1 == k2 && d1 < d2);
+          if (first_ranks_before != descending) {
+            keys[i] = k2; keys[partner] = k1;
+            ids[i] = d2; ids[partner] = d1;
+          }
+        }
+      }
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+  }
+
+  // Sequential exclusive prefix walk, same float accumulation order as the CPU loop.
+  if (tid == 0u) {
+    uint kept = depth;
+    float total_p = 0.0f;
+    for (uint r = 0; r < depth; ++r) {
+      if (!(total_p < p)) {
+        kept = r;
+        break;
+      }
+      total_p += ct2_float_from_order_key(keys[r]);
+    }
+    *kept_count = kept;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  const uint kept = *kept_count;
+  for (uint r = tid; r < depth; r += CT2_TOPP_TG) {
+    const uint id = (uint)ids[r];
+    y_row[id] = r < kept ? x_row[id] : (T)mask;
+  }
+}
+
+kernel void ct2_topp_mask_float(device const float* x      [[buffer(0)]],
+                                device const float* probs   [[buffer(1)]],
+                                device float* y             [[buffer(2)]],
+                                constant uint& depth         [[buffer(3)]],
+                                constant float& p            [[buffer(4)]],
+                                constant float& mask         [[buffer(5)]],
+                                uint row [[threadgroup_position_in_grid]],
+                                uint tid [[thread_position_in_threadgroup]]) {
+  threadgroup uint keys[CT2_TOPP_MAX_DEPTH];
+  threadgroup ushort ids[CT2_TOPP_MAX_DEPTH];
+  threadgroup uint kept_count;
+  ct2_topp_mask_impl<float>(x, probs, y, p, mask, depth, row, tid, keys, ids, &kept_count);
+}
+
+kernel void ct2_topp_mask_half(device const half* x      [[buffer(0)]],
+                               device const half* probs   [[buffer(1)]],
+                               device half* y             [[buffer(2)]],
+                               constant uint& depth        [[buffer(3)]],
+                               constant float& p           [[buffer(4)]],
+                               constant float& mask        [[buffer(5)]],
+                               uint row [[threadgroup_position_in_grid]],
+                               uint tid [[thread_position_in_threadgroup]]) {
+  threadgroup uint keys[CT2_TOPP_MAX_DEPTH];
+  threadgroup ushort ids[CT2_TOPP_MAX_DEPTH];
+  threadgroup uint kept_count;
+  ct2_topp_mask_impl<half>(x, probs, y, p, mask, depth, row, tid, keys, ids, &kept_count);
+}
+
+// Multinomial (one sample per row): inverse-CDF sampling. The uniform draw u in (0, 1]
+// comes from the host (the CT2 random generator, so set_random_seed reproducibility
+// holds); the kernel finds the smallest index whose inclusive prefix sum reaches
+// u * sum(probs). Thread t owns the contiguous chunk [t*chunk, (t+1)*chunk); chunk sums
+// are combined by thread 0 so the prefix order is the row order; the min-reduce resolves
+// any rounding ambiguity at chunk boundaries to the earliest crossing.
+constant uint CT2_MULTINOMIAL_TG = 256;
+
+template <typename T>
+inline void ct2_multinomial_impl(device const T* probs, device const float* uniforms,
+                                 device int* output, uint depth, uint row, uint tid,
+                                 threadgroup float* chunk_sum, threadgroup float* chunk_prefix,
+                                 threadgroup float* target, threadgroup int* red_i) {
+  device const T* probs_row = probs + (ulong)row * (ulong)depth;
+
+  const uint chunk = (depth + CT2_MULTINOMIAL_TG - 1u) / CT2_MULTINOMIAL_TG;
+  const uint begin = tid * chunk;
+  const uint end = min(begin + chunk, depth);
+
+  float s = 0.0f;
+  for (uint i = begin; i < end; ++i)
+    s += (float)probs_row[i];
+  chunk_sum[tid] = s;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  if (tid == 0u) {
+    float running = 0.0f;
+    for (uint t = 0; t < CT2_MULTINOMIAL_TG; ++t) {
+      chunk_prefix[t] = running;
+      running += chunk_sum[t];
+    }
+    *target = uniforms[row] * running;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  const float tgt = *target;
+  int candidate = 0x7FFFFFFF;
+  if (begin < end && chunk_prefix[tid] < tgt) {
+    float run = chunk_prefix[tid];
+    for (uint i = begin; i < end; ++i) {
+      run += (float)probs_row[i];
+      if (run >= tgt) {
+        candidate = (int)i;
+        break;
+      }
+    }
+  }
+  red_i[tid] = candidate;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint sred = CT2_MULTINOMIAL_TG / 2u; sred > 0u; sred >>= 1) {
+    if (tid < sred)
+      red_i[tid] = min(red_i[tid], red_i[tid + sred]);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+
+  if (tid == 0u)
+    output[row] = red_i[0] != 0x7FFFFFFF ? red_i[0] : (int)depth - 1;
+}
+
+kernel void ct2_multinomial_float(device const float* probs    [[buffer(0)]],
+                                  device const float* uniforms  [[buffer(1)]],
+                                  device int* output            [[buffer(2)]],
+                                  constant uint& depth           [[buffer(3)]],
+                                  uint row [[threadgroup_position_in_grid]],
+                                  uint tid [[thread_position_in_threadgroup]]) {
+  threadgroup float chunk_sum[CT2_MULTINOMIAL_TG];
+  threadgroup float chunk_prefix[CT2_MULTINOMIAL_TG];
+  threadgroup float target;
+  threadgroup int red_i[CT2_MULTINOMIAL_TG];
+  ct2_multinomial_impl<float>(probs, uniforms, output, depth, row, tid,
+                              chunk_sum, chunk_prefix, &target, red_i);
+}
+
+kernel void ct2_multinomial_half(device const half* probs     [[buffer(0)]],
+                                 device const float* uniforms  [[buffer(1)]],
+                                 device int* output            [[buffer(2)]],
+                                 constant uint& depth           [[buffer(3)]],
+                                 uint row [[threadgroup_position_in_grid]],
+                                 uint tid [[thread_position_in_threadgroup]]) {
+  threadgroup float chunk_sum[CT2_MULTINOMIAL_TG];
+  threadgroup float chunk_prefix[CT2_MULTINOMIAL_TG];
+  threadgroup float target;
+  threadgroup int red_i[CT2_MULTINOMIAL_TG];
+  ct2_multinomial_impl<half>(probs, uniforms, output, depth, row, tid,
+                             chunk_sum, chunk_prefix, &target, red_i);
+}
+
+// Gumbel-max noise: y[i] = x[i] + (-log(u_i)), u_i ~ U(0, 1), matching the CPU and CUDA
+// add_gumbel_noise semantics. The RNG is counter-based (splitmix64 of seed + index) with
+// a per-launch seed drawn from the host CT2 generator: a different stream than the CPU
+// std::mt19937 (bit-parity with the CPU draw order is not meaningful), but deterministic
+// under set_random_seed. u is built from 24 random bits offset by 0.5, so u is in (0, 1)
+// and -log(u) is finite (same finite-tail property as curand_uniform on CUDA).
+inline float ct2_gumbel_noise(ulong seed, uint gid) {
+  ulong z = seed + (ulong)gid * 0x9E3779B97F4A7C15UL;
+  z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9UL;
+  z = (z ^ (z >> 27)) * 0x94D049BB133111EBUL;
+  z = z ^ (z >> 31);
+  const float u = ((float)(uint)(z >> 40) + 0.5f) * 0x1p-24f;
+  return -log(u);
+}
+
+kernel void ct2_gumbel_noise_float(device const float* x [[buffer(0)]],
+                                   device float* y        [[buffer(1)]],
+                                   constant ulong& seed    [[buffer(2)]],
+                                   uint gid [[thread_position_in_grid]]) {
+  y[gid] = x[gid] + ct2_gumbel_noise(seed, gid);
+}
+
+kernel void ct2_gumbel_noise_half(device const half* x [[buffer(0)]],
+                                  device half* y        [[buffer(1)]],
+                                  constant ulong& seed   [[buffer(2)]],
+                                  uint gid [[thread_position_in_grid]]) {
+  y[gid] = (half)((float)x[gid] + ct2_gumbel_noise(seed, gid));
+}
 )MSL";
     }
 
