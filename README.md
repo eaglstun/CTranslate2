@@ -1,7 +1,5 @@
 > ⚠️ **Experimental fork — built with AI.** This fork adds a new Apple Silicon **Metal GPU backend** (FP32, FP16, and a native INT8 path) that upstream CTranslate2 does not have. The Metal code was written with **Claude Opus** and **Claude Fable** (Anthropic). It is research-grade: its output is checked against the CPU version, but it makes no promises about stability or backward compatibility. If you need something for production, use [upstream CTranslate2](https://github.com/OpenNMT/CTranslate2). For the design and current status, see [`METAL_BACKEND.md`](METAL_BACKEND.md).
 
-[![CI](https://github.com/OpenNMT/CTranslate2/workflows/CI/badge.svg)](https://github.com/OpenNMT/CTranslate2/actions?query=workflow%3ACI) [![PyPI version](https://badge.fury.io/py/ctranslate2.svg)](https://badge.fury.io/py/ctranslate2) [![Documentation](https://img.shields.io/badge/docs-latest-blue.svg)](https://opennmt.net/CTranslate2/) [![Gitter](https://badges.gitter.im/OpenNMT/CTranslate2.svg)](https://gitter.im/OpenNMT/CTranslate2?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge) [![Forum](https://img.shields.io/discourse/status?server=https%3A%2F%2Fforum.opennmt.net%2F)](https://forum.opennmt.net/)
-
 # CTranslate2
 
 CTranslate2 is a C++ and Python library for fast inference with Transformer models.
