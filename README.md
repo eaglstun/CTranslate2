@@ -25,17 +25,17 @@ The project is built for production and promises [backward compatibility](https:
 
 ## Key features
 
-- **Fast, lightweight execution on CPU and GPU**<br/>On supported models, it [runs faster and uses fewer resources](#benchmarks) than general-purpose deep learning frameworks. This comes from many optimizations: layer fusion, padding removal, batch reordering, in-place operations, and caching.
-- **Quantization and reduced precision**<br/>Models can store and compute weights at [lower precision](https://opennmt.net/CTranslate2/quantization.html): 16-bit float (FP16), 16-bit brain float (BF16), 16-bit integer (INT16), 8-bit integer (INT8), and 4-bit AWQ (INT4).
-- **Many CPU architectures supported**<br/>It runs on x86-64 and ARM64 (AArch64) processors, and can use several tuned backends: [Intel MKL](https://software.intel.com/content/www/us/en/develop/tools/oneapi/components/onemkl.html), [oneDNN](https://github.com/oneapi-src/oneDNN), [OpenBLAS](https://www.openblas.net/), [Ruy](https://github.com/google/ruy), and [Apple Accelerate](https://developer.apple.com/documentation/accelerate).
-- **Apple Silicon GPU support (experimental)**<br/>An [Apple Metal](https://developer.apple.com/metal/) backend (`-DWITH_METAL=ON`) runs models on Apple Silicon GPUs in FP32, FP16, and INT8. A full encoder-decoder runs end-to-end on the GPU, and its output matches the CPU. INT8 prefill now matches FP16 speed; small-batch decode is still being tuned. See [`METAL_BACKEND.md`](METAL_BACKEND.md) for status and [`METAL_BENCHMARKS.md`](METAL_BENCHMARKS.md) for benchmarks.
-- **Automatic CPU detection**<br/>One binary can hold several backends (like Intel MKL and oneDNN) and instruction sets (like AVX, AVX2). It picks the right one at runtime based on your CPU.
-- **Parallel and async execution**<br/>You can run many batches at once across multiple GPUs or CPU cores.
-- **Dynamic memory usage**<br/>Memory grows and shrinks with the size of each request. Caching allocators on CPU and GPU keep this fast.
-- **Small on disk**<br/>Quantization can make a model 4× smaller on disk, with little loss in accuracy.
-- **Easy to integrate**<br/>It has few dependencies and offers simple [Python](https://opennmt.net/CTranslate2/python/overview.html) and C++ APIs that cover most needs.
-- **Configurable, interactive decoding**<br/>[Advanced decoding features](https://opennmt.net/CTranslate2/decoding.html) let you autocomplete a partial sequence or return alternatives at a chosen spot.
-- **Tensor parallelism for distributed inference**<br/>Very large models can be split across multiple GPUs. See [this guide](docs/parallel.md#model-and-tensor-parallelism) to set it up.
+- **Fast, lightweight execution on CPU and GPU** — On supported models, it [runs faster and uses fewer resources](#benchmarks) than general-purpose deep learning frameworks. This comes from many optimizations: layer fusion, padding removal, batch reordering, in-place operations, and caching.
+- **Quantization and reduced precision** — Models can store and compute weights at [lower precision](https://opennmt.net/CTranslate2/quantization.html): 16-bit float (FP16), 16-bit brain float (BF16), 16-bit integer (INT16), 8-bit integer (INT8), and 4-bit AWQ (INT4).
+- **Many CPU architectures supported** — It runs on x86-64 and ARM64 (AArch64) processors, and can use several tuned backends: [Intel MKL](https://software.intel.com/content/www/us/en/develop/tools/oneapi/components/onemkl.html), [oneDNN](https://github.com/oneapi-src/oneDNN), [OpenBLAS](https://www.openblas.net/), [Ruy](https://github.com/google/ruy), and [Apple Accelerate](https://developer.apple.com/documentation/accelerate).
+- **Apple Silicon GPU support (experimental)** — An [Apple Metal](https://developer.apple.com/metal/) backend (`-DWITH_METAL=ON`) runs models on Apple Silicon GPUs in FP32, FP16, and INT8. A full encoder-decoder runs end-to-end on the GPU, and its output matches the CPU. INT8 prefill now matches FP16 speed; small-batch decode is still being tuned. See [`METAL_BACKEND.md`](METAL_BACKEND.md) for status and [`METAL_BENCHMARKS.md`](METAL_BENCHMARKS.md) for benchmarks.
+- **Automatic CPU detection** — One binary can hold several backends (like Intel MKL and oneDNN) and instruction sets (like AVX, AVX2). It picks the right one at runtime based on your CPU.
+- **Parallel and async execution** — You can run many batches at once across multiple GPUs or CPU cores.
+- **Dynamic memory usage** — Memory grows and shrinks with the size of each request. Caching allocators on CPU and GPU keep this fast.
+- **Small on disk** — Quantization can make a model 4× smaller on disk, with little loss in accuracy.
+- **Easy to integrate** — It has few dependencies and offers simple [Python](https://opennmt.net/CTranslate2/python/overview.html) and C++ APIs that cover most needs.
+- **Configurable, interactive decoding** — [Advanced decoding features](https://opennmt.net/CTranslate2/decoding.html) let you autocomplete a partial sequence or return alternatives at a chosen spot.
+- **Tensor parallelism for distributed inference** — Very large models can be split across multiple GPUs. See [this guide](docs/parallel.md#model-and-tensor-parallelism) to set it up.
 
 Many of these features are hard to get from standard deep learning frameworks. That gap is why this project exists.
 
