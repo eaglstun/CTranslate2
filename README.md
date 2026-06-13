@@ -1,18 +1,20 @@
+> ⚠️ **Experimental fork — built with AI.** This fork adds a new Apple Silicon **Metal GPU backend** (FP32, FP16, and a native INT8 path) that upstream CTranslate2 does not have. The Metal code was written with **Claude Opus** and **Claude Fable** (Anthropic). It is research-grade: its output is checked against the CPU version, but it makes no promises about stability or backward compatibility. If you need something for production, use [upstream CTranslate2](https://github.com/OpenNMT/CTranslate2). For the design and current status, see [`METAL_BACKEND.md`](METAL_BACKEND.md).
+
 [![CI](https://github.com/OpenNMT/CTranslate2/workflows/CI/badge.svg)](https://github.com/OpenNMT/CTranslate2/actions?query=workflow%3ACI) [![PyPI version](https://badge.fury.io/py/ctranslate2.svg)](https://badge.fury.io/py/ctranslate2) [![Documentation](https://img.shields.io/badge/docs-latest-blue.svg)](https://opennmt.net/CTranslate2/) [![Gitter](https://badges.gitter.im/OpenNMT/CTranslate2.svg)](https://gitter.im/OpenNMT/CTranslate2?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge) [![Forum](https://img.shields.io/discourse/status?server=https%3A%2F%2Fforum.opennmt.net%2F)](https://forum.opennmt.net/)
 
 # CTranslate2
 
-CTranslate2 is a C++ and Python library for efficient inference with Transformer models.
+CTranslate2 is a C++ and Python library for fast inference with Transformer models.
 
-The project implements a custom runtime that applies many performance optimization techniques such as weights quantization, layers fusion, batch reordering, etc., to [accelerate and reduce the memory usage](#benchmarks) of Transformer models on CPU and GPU.
+It runs models on its own custom engine. The engine uses tricks like weight quantization, layer fusion, and batch reordering to [run Transformer models faster and with less memory](#benchmarks), on both CPU and GPU.
 
-The following model types are currently supported:
+These model types are supported:
 
 - Encoder-decoder models: Transformer base/big, M2M-100, NLLB, BART, mBART, Pegasus, T5, Whisper, T5Gemma, T5Gemma2, MADLAD-400
 - Decoder-only models: GPT-2, GPT-J, GPT-NeoX, OPT, BLOOM, MPT, Llama, Mistral, Gemma, CodeGen, GPTBigCode, Falcon, Qwen2
 - Encoder-only models: BERT, DistilBERT, XLM-RoBERTa
 
-Compatible models should be first converted into an optimized model format. The library includes converters for multiple frameworks:
+Before you can run a model, you convert it to an optimized format. The library ships converters for several frameworks:
 
 - [OpenNMT-py](https://opennmt.net/CTranslate2/guides/opennmt_py.html)
 - [OpenNMT-tf](https://opennmt.net/CTranslate2/guides/opennmt_tf.html)
@@ -21,33 +23,33 @@ Compatible models should be first converted into an optimized model format. The 
 - [OPUS-MT](https://opennmt.net/CTranslate2/guides/opus_mt.html)
 - [Transformers](https://opennmt.net/CTranslate2/guides/transformers.html)
 
-The project is production-oriented and comes with [backward compatibility guarantees](https://opennmt.net/CTranslate2/versioning.html), but it also includes experimental features related to model compression and inference acceleration.
+The project is built for production and promises [backward compatibility](https://opennmt.net/CTranslate2/versioning.html). It also includes some experimental features for shrinking models and speeding up inference.
 
 ## Key features
 
-- **Fast and efficient execution on CPU and GPU**<br/>The execution [is significantly faster and requires less resources](#benchmarks) than general-purpose deep learning frameworks on supported models and tasks thanks to many advanced optimizations: layer fusion, padding removal, batch reordering, in-place operations, caching mechanism, etc.
-- **Quantization and reduced precision**<br/>The model serialization and computation support weights with [reduced precision](https://opennmt.net/CTranslate2/quantization.html): 16-bit floating points (FP16), 16-bit brain floating points (BF16), 16-bit integers (INT16), 8-bit integers (INT8) and AWQ quantization (INT4).
-- **Multiple CPU architectures support**<br/>The project supports x86-64 and AArch64/ARM64 processors and integrates multiple backends that are optimized for these platforms: [Intel MKL](https://software.intel.com/content/www/us/en/develop/tools/oneapi/components/onemkl.html), [oneDNN](https://github.com/oneapi-src/oneDNN), [OpenBLAS](https://www.openblas.net/), [Ruy](https://github.com/google/ruy), and [Apple Accelerate](https://developer.apple.com/documentation/accelerate).
-- **Apple Silicon GPU support (experimental)**<br/>An [Apple Metal](https://developer.apple.com/metal/) backend (`-DWITH_METAL=ON`) runs the Transformer forward pass on Apple Silicon GPUs in FP32 and FP16, using Metal Performance Shaders for matmul and custom kernels for the other ops. It is correctness-complete (a full encoder-decoder runs end-to-end on the GPU) but not yet performance-optimized. See [`METAL_BACKEND.md`](METAL_BACKEND.md) for status and [`METAL_BENCHMARKS.md`](METAL_BENCHMARKS.md) for benchmarks.
-- **Automatic CPU detection and code dispatch**<br/>One binary can include multiple backends (e.g. Intel MKL and oneDNN) and instruction set architectures (e.g. AVX, AVX2) that are automatically selected at runtime based on the CPU information.
-- **Parallel and asynchronous execution**<br/>Multiple batches can be processed in parallel and asynchronously using multiple GPUs or CPU cores.
-- **Dynamic memory usage**<br/>The memory usage changes dynamically depending on the request size while still meeting performance requirements thanks to caching allocators on both CPU and GPU.
-- **Lightweight on disk**<br/>Quantization can make the models 4 times smaller on disk with minimal accuracy loss.
-- **Simple integration**<br/>The project has few dependencies and exposes simple APIs in [Python](https://opennmt.net/CTranslate2/python/overview.html) and C++ to cover most integration needs.
-- **Configurable and interactive decoding**<br/>[Advanced decoding features](https://opennmt.net/CTranslate2/decoding.html) allow autocompleting a partial sequence and returning alternatives at a specific location in the sequence.
-- **Support tensor parallelism for distributed inference**<br/>Very large model can be split into multiple GPUs. Following this [documentation](docs/parallel.md#model-and-tensor-parallelism) to set up the required environment.
+- **Fast, lightweight execution on CPU and GPU**<br/>On supported models, it [runs faster and uses fewer resources](#benchmarks) than general-purpose deep learning frameworks. This comes from many optimizations: layer fusion, padding removal, batch reordering, in-place operations, and caching.
+- **Quantization and reduced precision**<br/>Models can store and compute weights at [lower precision](https://opennmt.net/CTranslate2/quantization.html): 16-bit float (FP16), 16-bit brain float (BF16), 16-bit integer (INT16), 8-bit integer (INT8), and 4-bit AWQ (INT4).
+- **Many CPU architectures supported**<br/>It runs on x86-64 and ARM64 (AArch64) processors, and can use several tuned backends: [Intel MKL](https://software.intel.com/content/www/us/en/develop/tools/oneapi/components/onemkl.html), [oneDNN](https://github.com/oneapi-src/oneDNN), [OpenBLAS](https://www.openblas.net/), [Ruy](https://github.com/google/ruy), and [Apple Accelerate](https://developer.apple.com/documentation/accelerate).
+- **Apple Silicon GPU support (experimental)**<br/>An [Apple Metal](https://developer.apple.com/metal/) backend (`-DWITH_METAL=ON`) runs models on Apple Silicon GPUs in FP32, FP16, and INT8. A full encoder-decoder runs end-to-end on the GPU, and its output matches the CPU. INT8 prefill now matches FP16 speed; small-batch decode is still being tuned. See [`METAL_BACKEND.md`](METAL_BACKEND.md) for status and [`METAL_BENCHMARKS.md`](METAL_BENCHMARKS.md) for benchmarks.
+- **Automatic CPU detection**<br/>One binary can hold several backends (like Intel MKL and oneDNN) and instruction sets (like AVX, AVX2). It picks the right one at runtime based on your CPU.
+- **Parallel and async execution**<br/>You can run many batches at once across multiple GPUs or CPU cores.
+- **Dynamic memory usage**<br/>Memory grows and shrinks with the size of each request. Caching allocators on CPU and GPU keep this fast.
+- **Small on disk**<br/>Quantization can make a model 4× smaller on disk, with little loss in accuracy.
+- **Easy to integrate**<br/>It has few dependencies and offers simple [Python](https://opennmt.net/CTranslate2/python/overview.html) and C++ APIs that cover most needs.
+- **Configurable, interactive decoding**<br/>[Advanced decoding features](https://opennmt.net/CTranslate2/decoding.html) let you autocomplete a partial sequence or return alternatives at a chosen spot.
+- **Tensor parallelism for distributed inference**<br/>Very large models can be split across multiple GPUs. See [this guide](docs/parallel.md#model-and-tensor-parallelism) to set it up.
 
-Some of these features are difficult to achieve with standard deep learning frameworks and are the motivation for this project.
+Many of these features are hard to get from standard deep learning frameworks. That gap is why this project exists.
 
 ## Installation and usage
 
-CTranslate2 can be installed with pip:
+Install CTranslate2 with pip:
 
 ```bash
 pip install ctranslate2
 ```
 
-The Python module is used to convert models and can translate or generate text with few lines of code:
+Use the Python module to convert models and to translate or generate text in a few lines:
 
 ```python
 translator = ctranslate2.Translator(translation_model_path)
@@ -57,25 +59,25 @@ generator = ctranslate2.Generator(generation_model_path)
 generator.generate_batch(start_tokens)
 ```
 
-See the [documentation](https://opennmt.net/CTranslate2) for more information and examples.
+See the [documentation](https://opennmt.net/CTranslate2) for more details and examples.
 
-If you have an AMD ROCm GPU, we provide specific Python wheels on the [releases page](https://github.com/OpenNMT/CTranslate2/releases/).
+Have an AMD ROCm GPU? We provide separate Python wheels on the [releases page](https://github.com/OpenNMT/CTranslate2/releases/).
 
 ## Web Server
 
-[ctranslate2-web-server](https://github.com/jordimas/ctranslate2-web-server) is a web server built on top of CTranslate2 that exposes an OpenAI-compatible REST API, making it easy to integrate CTranslate2 models into applications that already support the OpenAI API.
+[ctranslate2-web-server](https://github.com/jordimas/ctranslate2-web-server) wraps CTranslate2 in a web server with an OpenAI-compatible REST API. If your app already talks to the OpenAI API, it can use CTranslate2 models with little change.
 
 ## Benchmarks
 
-We translate the En->De test set _newstest2014_ with multiple models:
+We translate the En->De test set _newstest2014_ with several models:
 
 - [OpenNMT-tf WMT14](https://opennmt.net/Models-tf/#translation): a base Transformer trained with OpenNMT-tf on the WMT14 dataset (4.5M lines)
 - [OpenNMT-py WMT14](https://opennmt.net/Models-py/#translation): a base Transformer trained with OpenNMT-py on the WMT14 dataset (4.5M lines)
 - [OPUS-MT](https://github.com/Helsinki-NLP/OPUS-MT-train/tree/master/models/en-de#opus-2020-02-26zip): a base Transformer trained with Marian on all OPUS data available on 2020-02-26 (81.9M lines)
 
-The benchmark reports the number of target tokens generated per second (higher is better). The results are aggregated over multiple runs. See the [benchmark scripts](tools/benchmark) for more details and reproduce these numbers.
+The benchmark reports target tokens generated per second (higher is better), averaged over several runs. See the [benchmark scripts](tools/benchmark) for details and to reproduce the numbers.
 
-**Please note that the results presented below are only valid for the configuration used during this benchmark: absolute and relative performance may change with different settings.**
+**These numbers only hold for the exact setup used here. Both absolute and relative speed can change with different settings.**
 
 #### CPU
 
