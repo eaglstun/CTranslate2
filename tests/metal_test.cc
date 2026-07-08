@@ -388,12 +388,9 @@ TEST_F(MetalTest, TopPMaskBitParityWithCPU) {
   expect_bits_eq(y_gpu.to(Device::CPU).to_vector<float>(), y_cpu.to_vector<float>());
 }
 
-// DISABLED (task 7 WIP, Opus checkpoint): the intent is for Metal multinomial to draw its
-// uniforms from the CT2 host generator so the same seed reproduces the same GPU samples.
-// That host-seeded path is not yet fully wired, so same-seed runs are not bit-reproducible.
-// Draws are still valid and correctly distributed (see Float16MultinomialRuns); this is a
-// reproducibility limitation, not a sampling-correctness bug. Re-enable once host-seeded.
-TEST_F(MetalTest, DISABLED_MultinomialSeededReproducible) {
+// Metal multinomial draws its uniforms from the CT2 host generator, so the same seed
+// must reproduce the same GPU samples (set_random_seed reseeds live generators).
+TEST_F(MetalTest, MultinomialSeededReproducible) {
   const dim_t batch = 2;
   const dim_t depth = 1000;
   std::mt19937 rng(5);

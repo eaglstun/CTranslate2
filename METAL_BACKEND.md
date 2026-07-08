@@ -1,6 +1,6 @@
 # Apple Metal Backend — Progress & Roadmap
 
-Status as of 2026-06-08. This document tracks the in-progress Apple Metal GPU backend
+Status as of 2026-07-07. This document tracks the in-progress Apple Metal GPU backend
 (`Device::METAL`, built with `-DWITH_METAL=ON`) for CTranslate2.
 
 ## TL;DR
@@ -10,9 +10,11 @@ end-to-end on Metal in both float32 and float16, with output matching the CPU.**
 entire per-token forward pass — GEMM (MPS), softmax, RMSNorm, LayerNorm, rotary/RoPE,
 gather, bias+activation, standalone activations, and elementwise mul/add — executes as
 real GPU kernels, in both precisions, covering GPT-2-style and Llama/Mistral-style
-(SwiGLU) architectures. The remaining ops (sampling, concat/split, conv, quantization)
-run correctly via a CPU-reference path over unified memory, behind a full regression net
-(the existing op/layer/storage suites all run on `Device::METAL`).
+(SwiGLU) architectures — as do concat/split, int8 quantize/dequantize/GEMM, and the
+sampling ops (TopK/TopPMask/GumbelMax/Multinomial, seeded-reproducible). The remaining
+ops (conv, general-axis norms, …) run correctly via a CPU-reference path over unified
+memory, behind a full regression net (the existing op/layer/storage suites all run on
+`Device::METAL`).
 
 ## Why this is tractable
 
@@ -336,27 +338,64 @@ Engineering shape (the part a future reader needs):
 - Test coverage: the deep-k oracle now pins all three routes — m=3 GEMV, m=16 MPP,
   m=16/alpha=2 tiled (alpha≠1 is MPP-ineligible, keeping fallback coverage).
 
+### ✅ M15 — sampling ops on Metal: TopK / TopPMask / GumbelMax / Multinomial, seeded-reproducible (2026-07-07)
+
+Sampled LLM decode no longer round-trips to the CPU: the four sampling ops route to
+Metal kernels at `operator()` (house pattern, no `DEVICE_CASE`), with
+`CT2_NO_METAL_SAMPLING=1` forcing the CPU reference as the bisection lever.
+
+- **TopK** (fp32/fp16) — row-wise, deterministic order; **bit-parity** with the CPU
+  kernel incl. large-vocab shapes (over `topk_max_k()` falls back to CPU).
+- **TopPMask** (fp32/fp16) — mirrors the CPU kernel's sequential accumulation order
+  exactly; bit-parity (depth-capped by `topp_mask_max_depth()`).
+- **GumbelMax** (fp32/fp16) — counter-based RNG noise kernel, per-launch seed drawn from
+  the CT2 host generator; distributional parity (`GumbelNoiseStatistics`). Also fixed a
+  real hole: GumbelMax previously threw on Metal fp16.
+- **Multinomial** (fp32/fp16, `sample_size == 1`) — inverse-CDF kernel; the uniforms are
+  drawn on the host from the CT2 generator and ride in the command buffer as inline
+  bytes (batch capped by `multinomial_max_batch_size()`).
+
+Closing the milestone required a fix in **shared core**, not Metal: `set_random_seed`
+(`src/random.cc`) only stored the seed in an atomic, while `get_random_generator()`'s
+`thread_local` mt19937 was seeded once, lazily, at first use — so re-seeding a live
+process (or seeding from the main thread while sampling runs on worker threads) never
+took effect, on any backend. Now `set_random_seed` bumps a seed **epoch** and each
+thread's generator reseeds on its next use when it sees a new epoch. Upstream intent
+check: `set_random_seed` was added (#648) explicitly for reproducible sampling — its own
+test asserts same-seed → same output — so the seed-once behavior was a lazy-init
+accident, not a contract. (CUDA's device-side curand states are still seeded once at
+first use per thread; untouched here.)
+
+Verification (M4 Max, macOS 26.4.1, 2026-07-07): `MetalTest` 28/28 incl. the previously
+disabled `MultinomialSeededReproducible` (passes on both the Metal kernel and, with
+`CT2_NO_METAL_SAMPLING=1`, the CPU-reference path — proving the fix is in the RNG core);
+`*Metal*:*METAL*` filter 101 passed / 2 skipped (known CPU-reference Conv1D) / 0 failed;
+full suite 288/292 with the only failure the pre-existing
+`CPU/OpDeviceFPTest.Conv1DGroupNoBiasQuantized` (present in the 2026-06-11 baseline).
+
 ## What runs where today
 
-| Operation                                                                    | Metal execution                                                                                                                             |
-| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| GEMM / MatMul (float32 and float16)                                          | **GPU** — MPSMatrixMultiplication                                                                                                           |
-| SoftMax / LogSoftMax (float32 and float16)                                   | **GPU** — custom kernel                                                                                                                     |
-| RMSNorm (float32 and float16)                                                | **GPU** — custom kernel                                                                                                                     |
-| LayerNorm, last axis + affine (float32 and float16)                          | **GPU** — custom kernel                                                                                                                     |
-| Rotary / RoPE (float32 and float16)                                          | **GPU** — custom kernel                                                                                                                     |
-| Gather (all dtypes)                                                          | **GPU** — custom kernel                                                                                                                     |
-| BiasAdd + activation, last axis (float32 and float16)                        | **GPU** — fused custom kernel (ReLU/GELU/GELUTanh/GELUSigmoid/Swish/Tanh/Sigmoid)                                                           |
-| Standalone activations: ReLU/GELU/Swish/Sigmoid/Tanh (float32 and float16)   | **GPU** — custom kernel                                                                                                                     |
-| Elementwise Mul (float32 and float16)                                        | **GPU** — custom kernel                                                                                                                     |
-| Elementwise add (float32 and float16)                                        | **GPU** — custom kernel (the residual connections; fp16 path added after profiling a real LLM)                                              |
-| Concat / Split / Slide (all dtypes)                                          | **GPU** — strided-copy kernel                                                                                                               |
-| Quantize int8 (fp32/fp16 in; signed path)                                    | **GPU** — custom kernel (u8-shift variant falls through to CPU reference)                                                                   |
-| Dequantize int8, simple + GEMM-output forms (fp32/fp16 out)                  | **GPU** — custom kernels (GEMM-output form: the Dense `!trans_a && trans_b` layout, all activations)                                        |
-| GEMM int8×int8→int32                                                         | **GPU (native)** — exact int32 accumulation; SIMD-group GEMV at m ≤ 8, Metal-4 MPP `matmul2d` at m > 8 (macOS 26+), hand-tiled MSL fallback |
-| Everything else (sampling, general-axis LayerNorm/BiasAdd, conv, int Mul, …) | CPU reference over unified memory (correct, float32 only)                                                                                   |
-| fp16 for ungraduated ops                                                     | Not yet — CPU reference is float32-only, so a full fp16 model needs those ops graduated to half kernels first                               |
-| bf16 compute                                                                 | Not yet                                                                                                                                     |
+| Operation                                                                  | Metal execution                                                                                                                             |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| GEMM / MatMul (float32 and float16)                                        | **GPU** — MPSMatrixMultiplication                                                                                                           |
+| SoftMax / LogSoftMax (float32 and float16)                                 | **GPU** — custom kernel                                                                                                                     |
+| RMSNorm (float32 and float16)                                              | **GPU** — custom kernel                                                                                                                     |
+| LayerNorm, last axis + affine (float32 and float16)                        | **GPU** — custom kernel                                                                                                                     |
+| Rotary / RoPE (float32 and float16)                                        | **GPU** — custom kernel                                                                                                                     |
+| Gather (all dtypes)                                                        | **GPU** — custom kernel                                                                                                                     |
+| BiasAdd + activation, last axis (float32 and float16)                      | **GPU** — fused custom kernel (ReLU/GELU/GELUTanh/GELUSigmoid/Swish/Tanh/Sigmoid)                                                           |
+| Standalone activations: ReLU/GELU/Swish/Sigmoid/Tanh (float32 and float16) | **GPU** — custom kernel                                                                                                                     |
+| Elementwise Mul (float32 and float16)                                      | **GPU** — custom kernel                                                                                                                     |
+| Elementwise add (float32 and float16)                                      | **GPU** — custom kernel (the residual connections; fp16 path added after profiling a real LLM)                                              |
+| Concat / Split / Slide (all dtypes)                                        | **GPU** — strided-copy kernel                                                                                                               |
+| Quantize int8 (fp32/fp16 in; signed path)                                  | **GPU** — custom kernel (u8-shift variant falls through to CPU reference)                                                                   |
+| Dequantize int8, simple + GEMM-output forms (fp32/fp16 out)                | **GPU** — custom kernels (GEMM-output form: the Dense `!trans_a && trans_b` layout, all activations)                                        |
+| GEMM int8×int8→int32                                                       | **GPU (native)** — exact int32 accumulation; SIMD-group GEMV at m ≤ 8, Metal-4 MPP `matmul2d` at m > 8 (macOS 26+), hand-tiled MSL fallback |
+| TopK / TopPMask (float32 and float16)                                      | **GPU** — custom kernels, bit-parity with CPU (size caps fall back to CPU reference)                                                        |
+| GumbelMax / Multinomial sampling (float32 and float16)                     | **GPU** — host-seeded kernels (`set_random_seed`-reproducible); Multinomial at sample_size 1                                                |
+| Everything else (general-axis LayerNorm/BiasAdd, conv, int Mul, …)         | CPU reference over unified memory (correct, float32 only)                                                                                   |
+| fp16 for ungraduated ops                                                   | Not yet — CPU reference is float32-only, so a full fp16 model needs those ops graduated to half kernels first                               |
+| bf16 compute                                                               | Not yet                                                                                                                                     |
 
 ## What's left
 
