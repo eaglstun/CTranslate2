@@ -14,7 +14,10 @@ real GPU kernels, in both precisions, covering GPT-2-style and Llama/Mistral-sty
 sampling ops (TopK/TopPMask/GumbelMax/Multinomial, seeded-reproducible). The remaining
 ops (conv, general-axis norms, …) run correctly via a CPU-reference path over unified
 memory, behind a full regression net (the existing op/layer/storage suites all run on
-`Device::METAL`).
+`Device::METAL`). Perf state: since the fused decode-attention kernel (M16, 2026-07-07),
+**Metal beats the Accelerate CPU baseline in every measured regime** — prefill (fp16
+2.6×, int8 at fp16 parity) and now autoregressive decode too (Qwen bs=1 edges CPU,
+bs=8 ~2.8× over CPU).
 
 ## Why this is tractable
 
@@ -373,6 +376,32 @@ disabled `MultinomialSeededReproducible` (passes on both the Metal kernel and, w
 full suite 288/292 with the only failure the pre-existing
 `CPU/OpDeviceFPTest.Conv1DGroupNoBiasQuantized` (present in the 2026-06-11 baseline).
 
+### ✅ M16 — fused decode attention: Metal wins decode (2026-07-07)
+
+Closes the last regime where the CPU won. The decode profile put 26.3% of a step in
+`dot_product_attention` (MatMul q·K^T → SoftMax → MatMul ·V) — understated, because
+batched MatMul (`gemm.mm`) encodes **one MPS GEMM per batch index**: decode attention at
+bs=8 issued ~5,400 MPS encodes per step. The `ct2_sdpa_*` kernel (`kernels_msl.h`)
+collapses each layer's three ops into **one launch**: one threadgroup per score row,
+4 SIMD-groups striding the key axis with online-softmax partials merged in threadgroup
+memory, float accumulation in both precisions, and no `[rows, T]` score tensor
+materialized. Routed at the top of `dot_product_attention` (`attention.cc`) for the
+decode regime (`q_len ≤ 8`, `d_head ≤ 256`; guards exclude relative-position/bias terms,
+ALiBi, and attention-weights output). The lengths mask follows the SoftMax per-row
+contract, so causal short-prefill masks and cross-attention memory masks (Whisper
+decode) are honored. `CT2_NO_METAL_SDPA=1` forces the unfused reference.
+
+Qwen2.5-0.5B decode (M4 Max, 2026-07-07, two runs, same binary A/B via the env var):
+bs=1 fp32 33.9 → **75.9–79.0 tok/s** (CPU 72.6–75.8), bs=1 fp16 35.8 → **74.6–82.2**;
+bs=8 fp32 62.0 → **403–418** (CPU 175–177), bs=8 fp16 62.7 → **486–493 (~7.9×)**. The
+bs=8 blowout is the per-matrix encode loop dying: fused cost is one launch per layer
+regardless of batch × heads. Full tables in `METAL_BENCHMARKS.md`. Verification: direct
+kernel-vs-reference parity tests (`SdpaFusedParityWithReference`,
+`SdpaFusedMaskedAndBeamParity` — d_head 64/80/256, T=3 and T=1500, beam-shaped q,
+lengths incl. a fully masked row), `DecodeParityLLM` greedy-token equality on real Qwen,
+`*Metal*:*METAL*` 103 passed / 2 skipped with the path on and off, full suite 288/292
+(only the pre-existing CPU Conv1D baseline failure).
+
 ## What runs where today
 
 | Operation                                                                  | Metal execution                                                                                                                             |
@@ -393,6 +422,7 @@ full suite 288/292 with the only failure the pre-existing
 | GEMM int8×int8→int32                                                       | **GPU (native)** — exact int32 accumulation; SIMD-group GEMV at m ≤ 8, Metal-4 MPP `matmul2d` at m > 8 (macOS 26+), hand-tiled MSL fallback |
 | TopK / TopPMask (float32 and float16)                                      | **GPU** — custom kernels, bit-parity with CPU (size caps fall back to CPU reference)                                                        |
 | GumbelMax / Multinomial sampling (float32 and float16)                     | **GPU** — host-seeded kernels (`set_random_seed`-reproducible); Multinomial at sample_size 1                                                |
+| Decode attention: q·K^T → softmax → ·V (float32 and float16)               | **GPU** — fused single-launch SDPA kernel at q_len ≤ 8 (greedy/beam decode, short prefill); larger q_len uses MPS GEMM + softmax kernel     |
 | Everything else (general-axis LayerNorm/BiasAdd, conv, int Mul, …)         | CPU reference over unified memory (correct, float32 only)                                                                                   |
 | fp16 for ungraduated ops                                                   | Not yet — CPU reference is float32-only, so a full fp16 model needs those ops graduated to half kernels first                               |
 | bf16 compute                                                               | Not yet                                                                                                                                     |
@@ -405,8 +435,9 @@ Each follows the established pattern: write an MSL kernel, add a `metal::` entry
 add `if (device == Device::METAL)` routing in the op, verify parity against the CPU
 reference via the existing suite.
 
-- Sampling: `TopK`, `TopPMask`, `Multinomial` (generation)
 - Remaining elementwise variants (sub/min/max/scalar-add) used in decoding
+- Next decode-fusion candidates (post-M16 profile order): the projection GEMM epilogues,
+  KV-cache `Concat` append, RMSNorm, Rotary
 
 ### fp16 — foundation done, full-model fp16 remaining
 

@@ -66,6 +66,22 @@ namespace ctranslate2 {
                         const float16_t* beta, float16_t* sum_out, float16_t* normed_out,
                         dim_t batch_size, dim_t depth, float epsilon);
 
+    // Fused decode-step scaled-dot-product attention: for each of the num_rows score rows
+    // (batch * heads * q_len; q_len == rows_per_bh), context = softmax(scale * q · K^T) · V
+    // over the row's keys — the MatMul → SoftMax → MatMul sequence of dot_product_attention
+    // in one launch, with no [rows, num_keys] score tensor materialized. queries/output are
+    // [num_rows, depth]; keys/values are [num_rows / rows_per_bh, num_keys, depth], all
+    // contiguous. lengths follows the SoftMax mask contract (one int32 per row, len == 0
+    // zeroes the row); pass nullptr for full attention. Requires depth <= 256 (the kernel's
+    // per-lane accumulator budget) — the caller guards. float32 and float16 (float
+    // accumulation in both).
+    void sdpa(const float* queries, const float* keys, const float* values,
+              const int32_t* lengths, float* output,
+              dim_t num_rows, dim_t rows_per_bh, dim_t num_keys, dim_t depth, float scale);
+    void sdpa(const float16_t* queries, const float16_t* keys, const float16_t* values,
+              const int32_t* lengths, float16_t* output,
+              dim_t num_rows, dim_t rows_per_bh, dim_t num_keys, dim_t depth, float scale);
+
     // Rotary position embedding over a [batch_size * max_time, depth] tensor; sin/cos are
     // [max_time, ndims]. Elements >= ndims are copied through. float32 and float16.
     void rotary(const float* input, const float* sin, const float* cos, float* output,

@@ -3,11 +3,15 @@
 Performance measurements for the CTranslate2 Apple Metal backend, tracking the optimization
 journey from the first **correctness-first baseline** (which committed a command buffer and
 `waitUntilCompleted` per op — the dominant cost for small ops) through async command-buffer
-batching, MPS-GEMM object caching, and the GPU `Add`/fp16 fix, to a real-LLM evaluation. The
-headline finding (see the Qwen2.5-0.5B section and Analysis): Metal **wins** the GEMM-heavy
-prefill but **loses** tiny-op autoregressive decode to a fundamental per-op GPU-API floor —
-and command-buffer reuse, the long-assumed fix for that floor, was implemented and measured
-neutral-to-negative (it kills CPU/GPU overlap).
+batching, MPS-GEMM object caching, and the GPU `Add`/fp16 fix, to a real-LLM evaluation.
+The long-standing headline — Metal **wins** GEMM-heavy prefill but **loses** tiny-op
+autoregressive decode to a per-op GPU-API floor — was **overturned on 2026-07-07 by the
+fused decode attention kernel** (see that section): with the MatMul→SoftMax→MatMul decode
+sequence collapsed into one launch, **Metal now wins decode too** (Qwen bs=1 ~2.2×
+kernel-level, edging the CPU e2e; bs=8 ~7–8×, ~2.8× over CPU). The earlier negative result
+stands: command-buffer reuse, the long-assumed fix for the floor, measured
+neutral-to-negative (it kills CPU/GPU overlap) — the working lever was _fewer, bigger ops_,
+not fewer commits.
 
 ## Setup
 
@@ -337,10 +341,55 @@ identical to Phase 1, as expected from a bit-exact GEMM swap. Accumulation is ex
 int32 at any depth: the suite includes an all-saturated k=2048 case (accumulator
 3.3e7 > 2^24) that the retired fp32 shim could not represent.
 
+## Fused decode attention: the decode gap closes (2026-07-07)
+
+The profiler said a decode step spends **26.3% in `dot_product_attention`**
+(MatMul q·K^T → SoftMax → MatMul ·V) and 22.3% in `MatMul` alone — and `gemm.mm`
+explains why the profile understates it: **batched MatMul encodes one MPS GEMM per
+batch index**, so decode attention at bs=8 issued 2 × (8·14) × 24 ≈ **5,400 MPS GEMM
+encodes per step**. The `ct2_sdpa_*` kernel (`kernels_msl.h`) collapses each layer's
+three-op sequence into **one launch** — one threadgroup per score row, 4 SIMD-groups
+striding the key axis with an online-softmax partial each — never materializing the
+`[rows, T]` score tensor. Routed in `dot_product_attention` (`attention.cc`) for the
+q_len ≤ 8 decode regime (greedy, small beams, short prefills; guards exclude relative
+bias / ALiBi / attention-weights output); `CT2_NO_METAL_SDPA=1` forces the unfused
+reference.
+
+Qwen2.5-0.5B (int8 model dir loaded at the listed compute type), M4 Max, macOS 26.4.1,
+2026-07-07. Same binary, same model, two runs each; fused/unfused differ only by env var.
+Decode-bound regime (prompt 32, generate 32) — tok/s, higher is better:
+
+|           | unfused (CT2_NO_METAL_SDPA=1) | **fused**     | speedup | CPU fp32  |
+| --------- | ----------------------------- | ------------- | ------- | --------- |
+| bs=1 fp32 | 33.9                          | **75.9–79.0** | ~2.3×   | 72.6–75.8 |
+| bs=1 fp16 | 35.8                          | **74.6–82.2** | ~2.2×   | —         |
+| bs=8 fp32 | 62.0                          | **403–418**   | ~6.7×   | 175–177   |
+| bs=8 fp16 | 62.7                          | **486–493**   | ~7.9×   | —         |
+
+**Read:**
+
+- **Metal now wins decode — the last regime where the CPU won.** bs=1 edges the CPU
+  (spread straddles it run-to-run; call it parity-to-slightly-ahead), bs=8 is ~2.8× over
+  CPU. Combined with the prefill wins, the Metal backend is now ahead of the Accelerate
+  CPU baseline in every measured regime, fp32 and fp16.
+- **The bs=8 blowout (6.7–7.9×) is the per-matrix MPS encode loop dying.** The unfused
+  cost scaled with batch × heads (per-GEMM encode floor), the fused kernel is one launch
+  per layer regardless — more threadgroups in the same launch is free on a 40-core GPU.
+- The unfused baseline reproduces the historical table above (33.9/35.8/62.0/62.7 vs the
+  2026-06-09 32/35/60/61), so the A/B is apples-to-apples.
+- Prefill-bound numbers moved too (fp16 bs=1 113 → 81–82 ms; bs=8 573 → 480–485): that
+  regime's single decode step at T=512 carried ~672 MPS encodes (~30 ms) now done in 24
+  launches. Prefill itself (q_len > 8) stays on MPS GEMM, which wins compute-bound shapes.
+- The doc's old "fewer, bigger ops per step (e.g. a fused attention kernel)" prediction
+  (Analysis, lever list) is hereby confirmed measured. Remaining decode budget after the
+  fusion: Gemm/Dense (the projections + lm_head), Concat (KV-cache append), RMSNorm,
+  Rotary, Add — the next fusion candidates if more decode speed is wanted.
+
 ## Caveats
 
 - Tiny model + tiny ops is the worst case; a real LLM (large hidden size, big GEMMs) sits
-  much closer to the favorable end of the GEMM table — but autoregressive **decode** is
-  still tiny-op territory (batch-sized GEMMs), so the per-op-overhead bottleneck persists
-  until command buffers are reused. Prefill (big GEMM) already wins at batch 1.
-- Numbers are single-run averages on a warm machine; treat as indicative, not precise.
+  much closer to the favorable end of the GEMM table — and since the fused decode
+  attention kernel (2026-07-07), decode is no longer the loss column: the remaining
+  per-op floor is carried by the projection GEMMs and cache/norm/rotary small ops.
+- Numbers are single-run averages on a warm machine (the fused-SDPA table: two runs,
+  spread shown); treat as indicative, not precise.

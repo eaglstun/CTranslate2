@@ -10,6 +10,11 @@
 #include "dispatch.h"
 #include "cpu/parallel.h"
 
+#ifdef CT2_WITH_METAL
+#  include <cstdlib>
+#  include "metal/primitives.h"
+#endif
+
 namespace ctranslate2 {
   namespace layers {
 
@@ -196,6 +201,56 @@ namespace ctranslate2 {
                                       Alibi* alibi = nullptr,
                                       StorageView* position_bias = nullptr) {
       PROFILE("dot_product_attention");
+
+#ifdef CT2_WITH_METAL
+      // Decode-regime fused SDPA: replace the MatMul → SoftMax → MatMul below with a single
+      // kernel launch (no [rows, keys] score tensor). Routed only in the tiny-q regime
+      // where each score row is a matrix-vector product and the per-op API floor dominates
+      // (greedy decode q=1, small beams, short prefills — larger q goes to MPS GEMM which
+      // wins on compute-bound shapes). The guards exclude every feature the kernel does not
+      // implement: relative-position/bias terms, ALiBi, and attention-weights output. The
+      // lengths mask follows the SoftMax contract (one int32 per row), so causal prefill
+      // masks and cross-attention memory masks are both honored. CT2_NO_METAL_SDPA forces
+      // the unfused reference path.
+      static const bool metal_sdpa_disabled = std::getenv("CT2_NO_METAL_SDPA") != nullptr;
+      if (queries.device() == Device::METAL && !metal_sdpa_disabled
+          && queries.rank() == 4 && keys.rank() == 4
+          && queries.dim(2) <= 8
+          && queries.dim(3) <= 256  // kernel accumulator budget (CT2_SDPA_MAX_D)
+          && queries.dim(0) == keys.dim(0)
+          && queries.dim(1) == keys.dim(1)
+          && queries.dim(3) == keys.dim(3)
+          && values.shape() == keys.shape()
+          && (queries.dtype() == DataType::FLOAT32 || queries.dtype() == DataType::FLOAT16)
+          && keys.dtype() == queries.dtype()
+          && values.dtype() == queries.dtype()
+          && !relative_position_keys && !relative_asymmetric_position_keys
+          && !relative_position_values && !relative_attention_bias
+          && !alibi
+          && !attention
+          && (!values_lengths
+              || (values_lengths->dtype() == DataType::INT32
+                  && values_lengths->device() == Device::METAL
+                  && values_lengths->size()
+                     == queries.dim(0) * queries.dim(1) * queries.dim(2)))) {
+        const dim_t num_rows = queries.dim(0) * queries.dim(1) * queries.dim(2);
+        const dim_t rows_per_bh = queries.dim(2);
+        const dim_t num_keys = keys.dim(2);
+        const dim_t depth = queries.dim(3);
+        const int32_t* lengths_data =
+            values_lengths ? values_lengths->data<int32_t>() : nullptr;
+        output.resize(queries.shape());
+        if (queries.dtype() == DataType::FLOAT32)
+          metal::sdpa(queries.data<float>(), keys.data<float>(), values.data<float>(),
+                      lengths_data, output.data<float>(),
+                      num_rows, rows_per_bh, num_keys, depth, queries_scale);
+        else
+          metal::sdpa(queries.data<float16_t>(), keys.data<float16_t>(),
+                      values.data<float16_t>(), lengths_data, output.data<float16_t>(),
+                      num_rows, rows_per_bh, num_keys, depth, queries_scale);
+        return;
+      }
+#endif
 
       std::unique_ptr<const StorageView> relative_positions;
       if (relative_position_keys || relative_position_values || relative_asymmetric_position_keys) {

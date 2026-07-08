@@ -388,6 +388,101 @@ TEST_F(MetalTest, TopPMaskBitParityWithCPU) {
   expect_bits_eq(y_gpu.to(Device::CPU).to_vector<float>(), y_cpu.to_vector<float>());
 }
 
+// Fused decode-step SDPA vs the unfused CPU reference (the exact MatMul → SoftMax →
+// MatMul sequence it replaces in dot_product_attention). Cases cover the kernel's
+// corners: head depth not a multiple of the SIMD width (80), fewer keys than SIMD-groups
+// (T=3 < 4), a long key axis (online-softmax accumulation), beam-shaped q (2 rows per
+// batch*head), and the SoftMax lengths contract including a fully masked len==0 row.
+namespace {
+
+void sdpa_reference_cpu(const StorageView& q, const StorageView& k, const StorageView& v,
+                        const StorageView* lengths, float scale, StorageView& out) {
+  StorageView scores(DataType::FLOAT32, Device::CPU);
+  ops::MatMul(/*trans_a=*/false, /*trans_b=*/true, scale)(q, k, scores);
+  StorageView attn(DataType::FLOAT32, Device::CPU);
+  ops::SoftMax()(scores, lengths, attn);
+  ops::MatMul()(attn, v, out);
+}
+
+void run_sdpa_case(dim_t batch, dim_t heads, dim_t q_len, dim_t num_keys, dim_t depth,
+                   const std::vector<int32_t>* lengths, unsigned seed) {
+  std::mt19937 rng(seed);
+  std::uniform_real_distribution<float> dist(-2.f, 2.f);
+  std::vector<float> q_host(batch * heads * q_len * depth);
+  std::vector<float> k_host(batch * heads * num_keys * depth);
+  std::vector<float> v_host(batch * heads * num_keys * depth);
+  for (auto& x : q_host) x = dist(rng);
+  for (auto& x : k_host) x = dist(rng);
+  for (auto& x : v_host) x = dist(rng);
+  const float scale = 1.f / std::sqrt(static_cast<float>(depth));
+
+  const StorageView q_cpu({batch, heads, q_len, depth}, q_host, Device::CPU);
+  const StorageView k_cpu({batch, heads, num_keys, depth}, k_host, Device::CPU);
+  const StorageView v_cpu({batch, heads, num_keys, depth}, v_host, Device::CPU);
+  std::unique_ptr<StorageView> len_cpu;
+  if (lengths)
+    len_cpu = std::make_unique<StorageView>(
+        Shape{static_cast<dim_t>(lengths->size())}, *lengths, Device::CPU);
+  StorageView ref(DataType::FLOAT32, Device::CPU);
+  sdpa_reference_cpu(q_cpu, k_cpu, v_cpu, len_cpu.get(), scale, ref);
+
+  const dim_t num_rows = batch * heads * q_len;
+
+  // float32
+  {
+    StorageView q_gpu = q_cpu.to(Device::METAL);
+    StorageView k_gpu = k_cpu.to(Device::METAL);
+    StorageView v_gpu = v_cpu.to(Device::METAL);
+    std::unique_ptr<StorageView> len_gpu;
+    if (len_cpu)
+      len_gpu = std::make_unique<StorageView>(len_cpu->to(Device::METAL));
+    StorageView out({batch, heads, q_len, depth}, DataType::FLOAT32, Device::METAL);
+    metal::sdpa(q_gpu.data<float>(), k_gpu.data<float>(), v_gpu.data<float>(),
+                len_gpu ? len_gpu->data<int32_t>() : nullptr, out.data<float>(),
+                num_rows, q_len, num_keys, depth, scale);
+    metal::synchronize();
+    expect_storage_eq(out.to(Device::CPU), ref, 1e-5);
+  }
+
+  // float16 against the fp32 reference (house fp16 tolerance)
+  {
+    StorageView q_gpu = q_cpu.to(Device::METAL).to(DataType::FLOAT16);
+    StorageView k_gpu = k_cpu.to(Device::METAL).to(DataType::FLOAT16);
+    StorageView v_gpu = v_cpu.to(Device::METAL).to(DataType::FLOAT16);
+    std::unique_ptr<StorageView> len_gpu;
+    if (len_cpu)
+      len_gpu = std::make_unique<StorageView>(len_cpu->to(Device::METAL));
+    StorageView out({batch, heads, q_len, depth}, DataType::FLOAT16, Device::METAL);
+    metal::sdpa(q_gpu.data<float16_t>(), k_gpu.data<float16_t>(), v_gpu.data<float16_t>(),
+                len_gpu ? len_gpu->data<int32_t>() : nullptr, out.data<float16_t>(),
+                num_rows, q_len, num_keys, depth, scale);
+    metal::synchronize();
+    expect_storage_eq(out.to_float32().to(Device::CPU), ref, 2e-2);
+  }
+}
+
+}  // namespace
+
+TEST_F(MetalTest, SdpaFusedParityWithReference) {
+  // Greedy decode shape: q_len 1, d_head 64, mid-size cache.
+  run_sdpa_case(2, 3, 1, 333, 64, nullptr, 11);
+  // Head depth not a multiple of 32, tiny cache (fewer keys than SIMD-groups).
+  run_sdpa_case(1, 2, 1, 3, 80, nullptr, 22);
+  // Long key axis: online-softmax accumulation over many strided chunks.
+  run_sdpa_case(1, 4, 1, 1500, 64, nullptr, 33);
+  // Max supported head depth.
+  run_sdpa_case(1, 2, 1, 64, 256, nullptr, 44);
+}
+
+TEST_F(MetalTest, SdpaFusedMaskedAndBeamParity) {
+  // Beam-shaped q (2 rows per batch*head) with per-row lengths following the SoftMax
+  // contract, including a fully masked row (len 0 → exact zero output) and rows shorter
+  // than the SIMD-group count.
+  const std::vector<int32_t> lengths = {57, 31, 1, 0, 44, 57,     // batch 0, 3 heads x 2 rows
+                                        2, 57, 19, 3, 57, 5};     // batch 1
+  run_sdpa_case(2, 3, 2, 57, 64, &lengths, 55);
+}
+
 // Metal multinomial draws its uniforms from the CT2 host generator, so the same seed
 // must reproduce the same GPU samples (set_random_seed reseeds live generators).
 TEST_F(MetalTest, MultinomialSeededReproducible) {

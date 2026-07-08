@@ -72,6 +72,76 @@ namespace ctranslate2 {
       softmax_impl("ct2_softmax_half", log, input, lengths, output, batch_size, depth);
     }
 
+    // Must match CT2_SDPA_SG (SIMD-groups of 32 lanes) in kernels_msl.h.
+    static constexpr NSUInteger kSdpaThreadgroup = 4 * 32;
+
+    namespace {
+      void sdpa_impl(const char* pipeline_name,
+                     const void* queries,
+                     const void* keys,
+                     const void* values,
+                     const int32_t* lengths,
+                     void* output,
+                     dim_t num_rows,
+                     dim_t rows_per_bh,
+                     dim_t num_keys,
+                     dim_t depth,
+                     float scale) {
+        if (num_rows == 0 || depth == 0)
+          return;
+
+        const BufferRange q_buffer = buffer_and_offset(queries);
+        const BufferRange k_buffer = buffer_and_offset(keys);
+        const BufferRange v_buffer = buffer_and_offset(values);
+        const BufferRange out_buffer = buffer_and_offset(output);
+        const uint32_t has_lengths = lengths ? 1u : 0u;
+        // The lengths index must always be bound; reuse the queries buffer as a never-read
+        // dummy when there is no lengths array (same convention as softmax).
+        const BufferRange len_buffer = lengths ? buffer_and_offset(lengths) : q_buffer;
+
+        id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
+
+        id<MTLCommandBuffer> command_buffer = new_command_buffer();
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        [encoder setComputePipelineState:pso];
+        [encoder setBuffer:q_buffer.buffer offset:q_buffer.offset atIndex:0];
+        [encoder setBuffer:k_buffer.buffer offset:k_buffer.offset atIndex:1];
+        [encoder setBuffer:v_buffer.buffer offset:v_buffer.offset atIndex:2];
+        [encoder setBuffer:out_buffer.buffer offset:out_buffer.offset atIndex:3];
+        [encoder setBuffer:len_buffer.buffer offset:len_buffer.offset atIndex:4];
+        const uint32_t num_keys_u = static_cast<uint32_t>(num_keys);
+        const uint32_t depth_u = static_cast<uint32_t>(depth);
+        const uint32_t rows_per_bh_u = static_cast<uint32_t>(rows_per_bh);
+        [encoder setBytes:&num_keys_u length:sizeof(num_keys_u) atIndex:5];
+        [encoder setBytes:&depth_u length:sizeof(depth_u) atIndex:6];
+        [encoder setBytes:&rows_per_bh_u length:sizeof(rows_per_bh_u) atIndex:7];
+        [encoder setBytes:&scale length:sizeof(scale) atIndex:8];
+        [encoder setBytes:&has_lengths length:sizeof(has_lengths) atIndex:9];
+
+        // One threadgroup per score row; the kernel assumes exactly CT2_SDPA_SG SIMD-groups.
+        const MTLSize grid = MTLSizeMake(static_cast<NSUInteger>(num_rows), 1, 1);
+        const MTLSize group = MTLSizeMake(kSdpaThreadgroup, 1, 1);
+        [encoder dispatchThreadgroups:grid threadsPerThreadgroup:group];
+        [encoder endEncoding];
+
+        commit_command_buffer(command_buffer);
+      }
+    }
+
+    void sdpa(const float* queries, const float* keys, const float* values,
+              const int32_t* lengths, float* output,
+              dim_t num_rows, dim_t rows_per_bh, dim_t num_keys, dim_t depth, float scale) {
+      sdpa_impl("ct2_sdpa_float", queries, keys, values, lengths, output,
+                num_rows, rows_per_bh, num_keys, depth, scale);
+    }
+
+    void sdpa(const float16_t* queries, const float16_t* keys, const float16_t* values,
+              const int32_t* lengths, float16_t* output,
+              dim_t num_rows, dim_t rows_per_bh, dim_t num_keys, dim_t depth, float scale) {
+      sdpa_impl("ct2_sdpa_half", queries, keys, values, lengths, output,
+                num_rows, rows_per_bh, num_keys, depth, scale);
+    }
+
     // Must match CT2_NORM_TG in kernels_msl.h.
     static constexpr NSUInteger kNormThreadgroup = 256;
 
