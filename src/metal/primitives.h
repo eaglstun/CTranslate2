@@ -146,6 +146,40 @@ namespace ctranslate2 {
                 dim_t copy_size_bytes, dim_t batch_stride_bytes,
                 dim_t num_indices, dim_t num_indices_per_batch);
 
+    // Row-wise top-k over the last dimension: values/indices are [batch_size, k] outputs.
+    // Deterministic (value descending, index ascending) order; values are bit-copies of
+    // the selected input elements. Requires k <= depth and k <= topk_max_k().
+    dim_t topk_max_k();
+    void topk(const float* x, float* values, int32_t* indices,
+              dim_t batch_size, dim_t depth, dim_t k);
+    void topk(const float16_t* x, float16_t* values, int32_t* indices,
+              dim_t batch_size, dim_t depth, dim_t k);
+
+    // Row-wise top-p (nucleus) masking, mirroring the CPU TopPMask kernel exactly
+    // (including the sequential float accumulation order over the descending-sorted
+    // probabilities). probs must hold softmax(x). Requires depth <= topp_mask_max_depth().
+    dim_t topp_mask_max_depth();
+    void topp_mask(const float* x, const float* probs, float* y,
+                   dim_t batch_size, dim_t depth, float p, float mask_value);
+    void topp_mask(const float16_t* x, const float16_t* probs, float16_t* y,
+                   dim_t batch_size, dim_t depth, float p, float mask_value);
+
+    // One multinomial draw per row via inverse-CDF search: output is [batch_size] int32.
+    // uniforms is a HOST array of batch_size values in (0, 1] (drawn by the caller from
+    // the CT2 random generator); batch_size is limited to multinomial_max_batch_size()
+    // because the uniforms ride in the command buffer as inline bytes.
+    dim_t multinomial_max_batch_size();
+    void multinomial(const float* probs, const float* uniforms, int32_t* output,
+                     dim_t batch_size, dim_t depth);
+    void multinomial(const float16_t* probs, const float* uniforms, int32_t* output,
+                     dim_t batch_size, dim_t depth);
+
+    // Elementwise y = x + (-log(u)), u ~ U(0, 1), the GumbelMax noise step. seed selects
+    // the per-launch counter-based RNG stream (drawn by the caller from the CT2 random
+    // generator so set_random_seed reproducibility holds).
+    void add_gumbel_noise(const float* x, float* y, dim_t size, uint64_t seed);
+    void add_gumbel_noise(const float16_t* x, float16_t* y, dim_t size, uint64_t seed);
+
     // Single-precision GEMM on the GPU via Metal Performance Shaders, matching the
     // semantics of primitives<D>::gemm: C = alpha * op(A) * op(B) + beta * C, where A,
     // B, C are row-major with leading dimensions lda/ldb/ldc and op() transposes when

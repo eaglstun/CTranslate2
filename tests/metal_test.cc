@@ -11,8 +11,11 @@
 
 #include <cstdlib>
 
+#include <algorithm>
+
 #include <ctranslate2/devices.h>
 #include <ctranslate2/generator.h>
+#include <ctranslate2/random.h>
 #include <ctranslate2/generation.h>
 #include <ctranslate2/models/model.h>
 #include <ctranslate2/ops/ops.h>
@@ -257,6 +260,228 @@ TEST_F(MetalTest, Float16MultinomialRuns) {
   for (dim_t i = 0; i < out_cpu.size(); ++i) {
     EXPECT_GE(idx[i], 0);
     EXPECT_LT(idx[i], 4);
+  }
+}
+
+// ---- Sampling ops on the GPU ----
+// TopK and TopPMask are deterministic comparison/sort ops: the bar is bit-parity with
+// the CPU reference (modulo tie order, which the CPU partial_sort/std::sort leaves
+// unspecified — the GPU kernels are deterministic index-ascending). Multinomial and
+// GumbelMax are RNG ops: the GPU uses a different (host-seeded) stream than the CPU
+// std::mt19937, so the right checks are seeded reproducibility and distribution match,
+// not bit-parity.
+
+namespace {
+
+// Bitwise comparison of two same-length float vectors (EXPECT_FLOAT_EQ allows 4 ulps,
+// which would weaken a bit-parity claim).
+void expect_bits_eq(const std::vector<float>& got, const std::vector<float>& expected) {
+  ASSERT_EQ(got.size(), expected.size());
+  for (size_t i = 0; i < got.size(); ++i) {
+    uint32_t g, e;
+    std::memcpy(&g, &got[i], 4);
+    std::memcpy(&e, &expected[i], 4);
+    EXPECT_EQ(g, e) << "bit mismatch at index " << i << ": " << got[i] << " vs " << expected[i];
+  }
+}
+
+}  // namespace
+
+// fp32 TopK at the Qwen2.5 vocabulary size: values AND indices must be bit-identical to
+// the CPU reference (random fp32 logits are tie-free, so tie order cannot interfere).
+TEST_F(MetalTest, TopKLargeVocabBitParityWithCPU) {
+  const dim_t batch = 3;
+  const dim_t depth = 151936;
+  std::mt19937 rng(42);
+  std::uniform_real_distribution<float> dist(-8.f, 8.f);
+  std::vector<float> logits(batch * depth);
+  for (auto& v : logits)
+    v = dist(rng);
+
+  for (const dim_t k : {dim_t(1), dim_t(50)}) {
+    const ops::TopK op(k);
+
+    StorageView x_gpu({batch, depth}, logits, Device::METAL);
+    StorageView v_gpu(DataType::FLOAT32, Device::METAL);
+    StorageView i_gpu(DataType::INT32, Device::METAL);
+    op(x_gpu, v_gpu, i_gpu);
+
+    StorageView x_cpu({batch, depth}, logits, Device::CPU);
+    StorageView v_cpu(DataType::FLOAT32, Device::CPU);
+    StorageView i_cpu(DataType::INT32, Device::CPU);
+    op(x_cpu, v_cpu, i_cpu);
+
+    expect_bits_eq(v_gpu.to(Device::CPU).to_vector<float>(), v_cpu.to_vector<float>());
+    const auto ig = i_gpu.to(Device::CPU).to_vector<int32_t>();
+    const auto ic = i_cpu.to_vector<int32_t>();
+    ASSERT_EQ(ig.size(), ic.size());
+    for (size_t i = 0; i < ig.size(); ++i)
+      EXPECT_EQ(ig[i], ic[i]) << "index mismatch at " << i << " (k=" << k << ")";
+  }
+}
+
+// fp16 TopK: at a 151936 vocabulary fp16 ties are unavoidable (fewer distinct finite
+// halfs than classes), so indices are only checked for consistency (each index must
+// point at its value); the VALUE sequence is uniquely determined even with ties and must
+// be bit-identical to the fp32 CPU reference run on the fp16-rounded data (fp16 -> fp32
+// conversion is exact and order-preserving).
+TEST_F(MetalTest, Float16TopKLargeVocabValueParityWithCPU) {
+  const dim_t batch = 2;
+  const dim_t depth = 151936;
+  const dim_t k = 50;
+  std::mt19937 rng(7);
+  std::uniform_real_distribution<float> dist(-8.f, 8.f);
+  std::vector<float> logits(batch * depth);
+  for (auto& v : logits)
+    v = dist(rng);
+
+  const ops::TopK topk_op(k);
+
+  StorageView x16({batch, depth}, logits, Device::METAL);
+  x16 = x16.to(DataType::FLOAT16);
+  StorageView v16(DataType::FLOAT16, Device::METAL);
+  StorageView i16(DataType::INT32, Device::METAL);
+  topk_op(x16, v16, i16);
+
+  StorageView x_cpu = x16.to_float32().to(Device::CPU);
+  StorageView v_cpu(DataType::FLOAT32, Device::CPU);
+  StorageView i_cpu(DataType::INT32, Device::CPU);
+  topk_op(x_cpu, v_cpu, i_cpu);
+
+  expect_bits_eq(v16.to_float32().to(Device::CPU).to_vector<float>(), v_cpu.to_vector<float>());
+
+  // Index consistency: x16[row][idx[j]] must equal the returned value bit-for-bit.
+  const auto values = v16.to_float32().to(Device::CPU).to_vector<float>();
+  const auto indices = i16.to(Device::CPU).to_vector<int32_t>();
+  const auto x_host = x16.to_float32().to(Device::CPU).to_vector<float>();
+  for (dim_t b = 0; b < batch; ++b)
+    for (dim_t j = 0; j < k; ++j) {
+      const int32_t idx = indices[b * k + j];
+      ASSERT_GE(idx, 0);
+      ASSERT_LT(idx, depth);
+      EXPECT_EQ(x_host[b * depth + idx], values[b * k + j]);
+    }
+}
+
+// fp32 TopPMask at a non-power-of-two depth within the GPU kernel's in-threadgroup
+// limit: output must be bit-identical to the CPU reference (the GPU kernel mirrors the
+// CPU accumulation order exactly; outputs are bit-copies of the input or the mask).
+TEST_F(MetalTest, TopPMaskBitParityWithCPU) {
+  const dim_t batch = 4;
+  const dim_t depth = 1777;
+  std::mt19937 rng(123);
+  std::uniform_real_distribution<float> dist(-4.f, 4.f);
+  std::vector<float> logits(batch * depth);
+  for (auto& v : logits)
+    v = dist(rng);
+
+  const ops::TopPMask op(0.9f);
+
+  StorageView x_gpu({batch, depth}, logits, Device::METAL);
+  StorageView y_gpu(DataType::FLOAT32, Device::METAL);
+  op(x_gpu, y_gpu);
+
+  StorageView x_cpu({batch, depth}, logits, Device::CPU);
+  StorageView y_cpu(DataType::FLOAT32, Device::CPU);
+  op(x_cpu, y_cpu);
+
+  expect_bits_eq(y_gpu.to(Device::CPU).to_vector<float>(), y_cpu.to_vector<float>());
+}
+
+// Metal multinomial draws its uniforms from the CT2 host generator, so the same seed
+// must reproduce the same GPU samples (set_random_seed reseeds live generators).
+TEST_F(MetalTest, MultinomialSeededReproducible) {
+  const dim_t batch = 2;
+  const dim_t depth = 1000;
+  std::mt19937 rng(5);
+  std::uniform_real_distribution<float> dist(0.f, 1.f);
+  std::vector<float> weights(batch * depth);
+  for (auto& w : weights)
+    w = dist(rng);
+  StorageView probs({batch, depth}, weights, Device::METAL);
+
+  const auto draw_sequence = [&]() {
+    std::vector<int32_t> draws;
+    for (int i = 0; i < 50; ++i) {
+      StorageView output(DataType::INT32, Device::METAL);
+      ops::Multinomial(1)(probs, output);
+      const auto host = output.to(Device::CPU).to_vector<int32_t>();
+      draws.insert(draws.end(), host.begin(), host.end());
+    }
+    return draws;
+  };
+
+  set_random_seed(1234);
+  const auto first = draw_sequence();
+  set_random_seed(1234);
+  const auto second = draw_sequence();
+  EXPECT_EQ(first, second);
+  for (const int32_t d : first) {
+    EXPECT_GE(d, 0);
+    EXPECT_LT(d, depth);
+  }
+}
+
+// The GumbelMax noise is -log(u), u ~ U(0,1): Exp(1) distributed. Check the GPU stream's
+// sample moments and support (all positive, mean and variance near 1). This is the
+// deterministic-given-noise half of the verification: the argmax/TopK that consumes the
+// noised scores is covered bit-exactly by the TopK parity tests above.
+TEST_F(MetalTest, GumbelNoiseStatistics) {
+  const dim_t n = 100000;
+  StorageView x({n}, 0.f, Device::METAL);
+  StorageView y({n}, DataType::FLOAT32, Device::METAL);
+  metal::add_gumbel_noise(x.data<float>(), y.data<float>(), n, /*seed=*/0x1234ABCDu);
+  metal::synchronize();
+
+  const auto noise = y.to(Device::CPU).to_vector<float>();
+  double sum = 0, sum_sq = 0;
+  float min_v = noise[0], max_v = noise[0];
+  for (const float v : noise) {
+    sum += v;
+    sum_sq += double(v) * v;
+    min_v = std::min(min_v, v);
+    max_v = std::max(max_v, v);
+  }
+  const double mean = sum / n;
+  const double var = sum_sq / n - mean * mean;
+  EXPECT_GT(min_v, 0.f);          // u < 1 strictly
+  EXPECT_LT(max_v, 20.f);         // 24-bit u: -log(u) <= ~16.6
+  EXPECT_NEAR(mean, 1.0, 0.02);   // Exp(1) mean, sd of the estimate ~0.003
+  EXPECT_NEAR(var, 1.0, 0.05);    // Exp(1) variance
+}
+
+// GumbelMax implements the same stochastic map on both backends (argmax of scores plus
+// Exp(1) noise), so the sampled index distributions must agree within sampling error
+// even though the RNG streams differ. Also covers fp16 on Metal, which previously threw
+// (the CPU reference is only instantiated for float).
+TEST_F(MetalTest, GumbelMaxMatchesCPUDistribution) {
+  const dim_t depth = 8;
+  const std::vector<float> logits = {1.2f, -0.5f, 2.0f, 0.0f, 0.7f, -1.0f, 1.5f, 0.3f};
+  constexpr int num_draws = 5000;
+  set_random_seed(99);
+
+  const auto histogram = [&](Device device, DataType dtype) {
+    StorageView x = StorageView({1, depth}, logits, device).to(dtype);
+    std::vector<float> freq(depth, 0.f);
+    for (int i = 0; i < num_draws; ++i) {
+      StorageView indices(DataType::INT32, device);
+      ops::GumbelMax(1)(x, indices);
+      const auto idx = indices.to(Device::CPU).to_vector<int32_t>();
+      if (idx[0] < 0 || idx[0] >= depth) {
+        ADD_FAILURE() << "sampled index out of range: " << idx[0];
+        continue;
+      }
+      freq[idx[0]] += 1.f / num_draws;
+    }
+    return freq;
+  };
+
+  const auto cpu_freq = histogram(Device::CPU, DataType::FLOAT32);
+  const auto gpu_freq = histogram(Device::METAL, DataType::FLOAT32);
+  const auto gpu_freq16 = histogram(Device::METAL, DataType::FLOAT16);
+  for (dim_t i = 0; i < depth; ++i) {
+    EXPECT_NEAR(gpu_freq[i], cpu_freq[i], 0.05) << "fp32 frequency mismatch at class " << i;
+    EXPECT_NEAR(gpu_freq16[i], cpu_freq[i], 0.05) << "fp16 frequency mismatch at class " << i;
   }
 }
 

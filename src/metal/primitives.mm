@@ -1,6 +1,7 @@
 #include "metal/primitives.h"
 #include "metal/device.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 
@@ -775,6 +776,191 @@ namespace ctranslate2 {
             threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
       [encoder endEncoding];
       commit_command_buffer(command_buffer);
+    }
+
+    // Must match CT2_TOPK_MAX_TG in kernels_msl.h; the kernel reads the actual
+    // threadgroup size at runtime, so the host clamps to the pipeline's limit (rounded
+    // down to a power of two for the tree reduction).
+    static constexpr NSUInteger kTopKMaxThreadgroup = 1024;
+
+    dim_t topk_max_k() {
+      // Each selected element costs a full pass over the row; cap so a degenerate k
+      // cannot turn the kernel into an O(depth^2) scan. Decode-time k (beam size,
+      // sampling_topk) is far below this.
+      return 256;
+    }
+
+    namespace {
+      void topk_impl(const char* pipeline_name,
+                     const void* x, void* values, int32_t* indices,
+                     dim_t batch_size, dim_t depth, dim_t k) {
+        if (batch_size == 0 || depth == 0 || k == 0)
+          return;
+
+        const BufferRange x_buffer = buffer_and_offset(x);
+        const BufferRange v_buffer = buffer_and_offset(values);
+        const BufferRange i_buffer = buffer_and_offset(indices);
+
+        id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
+        id<MTLCommandBuffer> command_buffer = new_command_buffer();
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        [encoder setComputePipelineState:pso];
+        [encoder setBuffer:x_buffer.buffer offset:x_buffer.offset atIndex:0];
+        [encoder setBuffer:v_buffer.buffer offset:v_buffer.offset atIndex:1];
+        [encoder setBuffer:i_buffer.buffer offset:i_buffer.offset atIndex:2];
+        const uint32_t depth_u = static_cast<uint32_t>(depth);
+        const uint32_t k_u = static_cast<uint32_t>(k);
+        [encoder setBytes:&depth_u length:sizeof(depth_u) atIndex:3];
+        [encoder setBytes:&k_u length:sizeof(k_u) atIndex:4];
+
+        NSUInteger tg = std::min(kTopKMaxThreadgroup, pso.maxTotalThreadsPerThreadgroup);
+        while (tg & (tg - 1))  // round down to a power of two
+          tg &= tg - 1;
+        const MTLSize grid = MTLSizeMake(static_cast<NSUInteger>(batch_size), 1, 1);
+        const MTLSize group = MTLSizeMake(tg, 1, 1);
+        [encoder dispatchThreadgroups:grid threadsPerThreadgroup:group];
+        [encoder endEncoding];
+        commit_command_buffer(command_buffer);
+      }
+    }
+
+    void topk(const float* x, float* values, int32_t* indices,
+              dim_t batch_size, dim_t depth, dim_t k) {
+      topk_impl("ct2_topk_float", x, values, indices, batch_size, depth, k);
+    }
+
+    void topk(const float16_t* x, float16_t* values, int32_t* indices,
+              dim_t batch_size, dim_t depth, dim_t k) {
+      topk_impl("ct2_topk_half", x, values, indices, batch_size, depth, k);
+    }
+
+    // Must match CT2_TOPP_TG / CT2_TOPP_MAX_DEPTH in kernels_msl.h.
+    static constexpr NSUInteger kTopPThreadgroup = 256;
+    static constexpr dim_t kTopPMaxDepth = 4096;
+
+    dim_t topp_mask_max_depth() {
+      return kTopPMaxDepth;
+    }
+
+    namespace {
+      void topp_mask_impl(const char* pipeline_name,
+                          const void* x, const void* probs, void* y,
+                          dim_t batch_size, dim_t depth, float p, float mask_value) {
+        if (batch_size == 0 || depth == 0)
+          return;
+
+        const BufferRange x_buffer = buffer_and_offset(x);
+        const BufferRange probs_buffer = buffer_and_offset(probs);
+        const BufferRange y_buffer = buffer_and_offset(y);
+
+        id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
+        id<MTLCommandBuffer> command_buffer = new_command_buffer();
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        [encoder setComputePipelineState:pso];
+        [encoder setBuffer:x_buffer.buffer offset:x_buffer.offset atIndex:0];
+        [encoder setBuffer:probs_buffer.buffer offset:probs_buffer.offset atIndex:1];
+        [encoder setBuffer:y_buffer.buffer offset:y_buffer.offset atIndex:2];
+        const uint32_t depth_u = static_cast<uint32_t>(depth);
+        [encoder setBytes:&depth_u length:sizeof(depth_u) atIndex:3];
+        [encoder setBytes:&p length:sizeof(p) atIndex:4];
+        [encoder setBytes:&mask_value length:sizeof(mask_value) atIndex:5];
+
+        const MTLSize grid = MTLSizeMake(static_cast<NSUInteger>(batch_size), 1, 1);
+        const MTLSize group = MTLSizeMake(kTopPThreadgroup, 1, 1);
+        [encoder dispatchThreadgroups:grid threadsPerThreadgroup:group];
+        [encoder endEncoding];
+        commit_command_buffer(command_buffer);
+      }
+    }
+
+    void topp_mask(const float* x, const float* probs, float* y,
+                   dim_t batch_size, dim_t depth, float p, float mask_value) {
+      topp_mask_impl("ct2_topp_mask_float", x, probs, y, batch_size, depth, p, mask_value);
+    }
+
+    void topp_mask(const float16_t* x, const float16_t* probs, float16_t* y,
+                   dim_t batch_size, dim_t depth, float p, float mask_value) {
+      topp_mask_impl("ct2_topp_mask_half", x, probs, y, batch_size, depth, p, mask_value);
+    }
+
+    // Must match CT2_MULTINOMIAL_TG in kernels_msl.h.
+    static constexpr NSUInteger kMultinomialThreadgroup = 256;
+
+    dim_t multinomial_max_batch_size() {
+      // The host-drawn uniforms are passed via setBytes (4 KB limit).
+      return 512;
+    }
+
+    namespace {
+      void multinomial_impl(const char* pipeline_name,
+                            const void* probs, const float* uniforms, int32_t* output,
+                            dim_t batch_size, dim_t depth) {
+        if (batch_size == 0 || depth == 0)
+          return;
+
+        const BufferRange probs_buffer = buffer_and_offset(probs);
+        const BufferRange out_buffer = buffer_and_offset(output);
+
+        id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
+        id<MTLCommandBuffer> command_buffer = new_command_buffer();
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        [encoder setComputePipelineState:pso];
+        [encoder setBuffer:probs_buffer.buffer offset:probs_buffer.offset atIndex:0];
+        [encoder setBytes:uniforms length:batch_size * sizeof(float) atIndex:1];
+        [encoder setBuffer:out_buffer.buffer offset:out_buffer.offset atIndex:2];
+        const uint32_t depth_u = static_cast<uint32_t>(depth);
+        [encoder setBytes:&depth_u length:sizeof(depth_u) atIndex:3];
+
+        const MTLSize grid = MTLSizeMake(static_cast<NSUInteger>(batch_size), 1, 1);
+        const MTLSize group = MTLSizeMake(kMultinomialThreadgroup, 1, 1);
+        [encoder dispatchThreadgroups:grid threadsPerThreadgroup:group];
+        [encoder endEncoding];
+        commit_command_buffer(command_buffer);
+      }
+    }
+
+    void multinomial(const float* probs, const float* uniforms, int32_t* output,
+                     dim_t batch_size, dim_t depth) {
+      multinomial_impl("ct2_multinomial_float", probs, uniforms, output, batch_size, depth);
+    }
+
+    void multinomial(const float16_t* probs, const float* uniforms, int32_t* output,
+                     dim_t batch_size, dim_t depth) {
+      multinomial_impl("ct2_multinomial_half", probs, uniforms, output, batch_size, depth);
+    }
+
+    namespace {
+      void add_gumbel_noise_impl(const char* pipeline_name,
+                                 const void* x, void* y, dim_t size, uint64_t seed) {
+        if (size == 0)
+          return;
+
+        const BufferRange x_buffer = buffer_and_offset(x);
+        const BufferRange y_buffer = buffer_and_offset(y);
+
+        id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
+        id<MTLCommandBuffer> command_buffer = new_command_buffer();
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        [encoder setComputePipelineState:pso];
+        [encoder setBuffer:x_buffer.buffer offset:x_buffer.offset atIndex:0];
+        [encoder setBuffer:y_buffer.buffer offset:y_buffer.offset atIndex:1];
+        [encoder setBytes:&seed length:sizeof(seed) atIndex:2];
+
+        NSUInteger tg = pso.maxTotalThreadsPerThreadgroup;
+        if (tg > (NSUInteger)size) tg = size;
+        [encoder dispatchThreads:MTLSizeMake(size, 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+        [encoder endEncoding];
+        commit_command_buffer(command_buffer);
+      }
+    }
+
+    void add_gumbel_noise(const float* x, float* y, dim_t size, uint64_t seed) {
+      add_gumbel_noise_impl("ct2_gumbel_noise_float", x, y, size, seed);
+    }
+
+    void add_gumbel_noise(const float16_t* x, float16_t* y, dim_t size, uint64_t seed) {
+      add_gumbel_noise_impl("ct2_gumbel_noise_half", x, y, size, seed);
     }
 
   }

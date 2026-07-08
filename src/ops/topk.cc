@@ -3,6 +3,8 @@
 #include "dispatch.h"
 
 #ifdef CT2_WITH_METAL
+#  include <cstdlib>
+#  include "metal/primitives.h"
 #  include "metal/utils.h"
 #endif
 
@@ -22,15 +24,37 @@ namespace ctranslate2 {
       indices.resize({batch_size, _k});
 
 #ifdef CT2_WITH_METAL
-      // The TopK kernel is comparison-based and works on fp16 directly (and runs on the
-      // CPU reference over unified memory). The generic float dispatch rejects fp16 on a
-      // non-CUDA build, so call the already-instantiated fp16 path directly.
-      if (x.device() == Device::METAL && x.dtype() == DataType::FLOAT16) {
-        // x is produced asynchronously on the GPU; flush before the CPU reference reads it
-        // over unified memory (the coherence point METAL_DEVICE_CASE provides otherwise).
-        metal::synchronize();
-        compute<Device::CPU, float16_t, int32_t>(x, values, indices);
-        return;
+      if (x.device() == Device::METAL) {
+        // GPU TopK keeps the sampling step of the decode loop on-device (no flush + CPU
+        // sort over the vocabulary). Selection is comparison-based: values are bit-copies
+        // of the input, so it matches the CPU reference exactly (tie order is index-
+        // ascending where the CPU partial_sort leaves it unspecified). k above the kernel
+        // cap takes the CPU reference below. CT2_NO_METAL_SAMPLING forces the CPU
+        // reference for all sampling ops (bisection lever, same spirit as CT2_NO_MPS_ACT).
+        static const bool metal_sampling_disabled = std::getenv("CT2_NO_METAL_SAMPLING") != nullptr;
+        const dim_t depth = x.dim(-1);
+        if (!metal_sampling_disabled && _k <= depth && _k <= metal::topk_max_k()) {
+          if (x.dtype() == DataType::FLOAT32) {
+            metal::topk(x.data<float>(), values.data<float>(), indices.data<int32_t>(),
+                        batch_size, depth, _k);
+            return;
+          }
+          if (x.dtype() == DataType::FLOAT16) {
+            metal::topk(x.data<float16_t>(), values.data<float16_t>(), indices.data<int32_t>(),
+                        batch_size, depth, _k);
+            return;
+          }
+        }
+        // CPU-reference fallback for fp16: the kernel works on fp16 directly over unified
+        // memory, but the generic float dispatch rejects fp16 on a non-CUDA build, so call
+        // the already-instantiated fp16 path directly. Flush first so the CPU sees the
+        // asynchronously produced input (the coherence point METAL_DEVICE_CASE provides
+        // otherwise).
+        if (x.dtype() == DataType::FLOAT16) {
+          metal::synchronize();
+          compute<Device::CPU, float16_t, int32_t>(x, values, indices);
+          return;
+        }
       }
 #endif
 
