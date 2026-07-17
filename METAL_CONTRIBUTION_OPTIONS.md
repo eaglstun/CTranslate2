@@ -1,78 +1,34 @@
-# Metal Backend — Where Does This Work Go?
+# Metal Backend — Open Follow-ups
 
-Context: the Metal GPU backend (fp32/fp16 end-to-end, CPU-parity on the op suite) is
-heavily AI-assisted. CTranslate2's `CONTRIBUTING.md` (lines 32–36) requires that any
-contribution be (a) explicitly disclosed as AI-assisted, (b) fully understood by the
-contributor, and (c) defensible line-by-line. A whole backend dropped as one PR is too
-much surface for a maintainer to vet and will be declined regardless of authorship.
+The fork-vs-upstream question is settled: the Metal backend lives as a **public fork**,
+rebased on upstream, PR'd into the fork's own `main` (the architecturally correct home
+for a separate GPU backend). What remains are two open, optional follow-ups — neither
+blocks anything.
 
-So the question isn't "AI or not" — it's "what's the highest-value home for this work."
-Ranked options below.
+## 1. Deep-dive writeup (portfolio value)
 
-## 1. Maintain it as a public fork (most likely the real answer)
+The perf-investigation arc is good content: profiling a real LLM and finding the `Add`
+op had silently never been on the GPU (27× fp16 blowup); trying command-buffer reuse —
+the "obvious" lever — and **measuring it neutral-to-negative** because batching kills
+CPU/GPU overlap; then the M16 fused-attention and M17 Whisper wins where the real
+culprits (per-batch-index MPS encodes; a CPU-reference `Transpose` draining the queue
+~128×/token; a single-threaded gather) were nothing the priors predicted. The
+through-line — _measure, don't guess_ — is a better story than a clean win.
 
-Out-of-tree GPU backends are normal. Ship `CTranslate2-metal`, people on Apple Silicon
-who want it build from the fork, keep it rebased on upstream. Zero gatekeeping, full
-control of the roadmap, genuinely useful artifact. Cost: ongoing rebase/maintenance —
-but the understanding burden was already ours. For a _separate_ backend this is often
-the architecturally correct home, not a consolation prize.
+Home is already scaffolded: `ai.ericeaglstun.com` has a `deep-dives/` Apple-Silicon
+porting series (`~/Documents/web/ericeaglstun-ai/content/deep-dives/`:
+`porting-ml-to-apple-silicon.md`, `reviving-pulse-apple-silicon.md`,
+`audiocraft-apple-silicon.md`). The CTranslate2 Metal backend slots in as the next
+entry and links straight into the existing glossary terms (`metal`, `mps`, `cuda`,
+`tensor`).
 
-## 2. Open a GitHub Discussion / issue FIRST (do this first — cheap, decides everything)
+## 2. Upstream Discussion (only if there's appetite)
 
-Not a PR. A message: "Working Metal backend, fp32/fp16 end-to-end, parity with CPU on
-the op suite, here's the design — is there appetite for upstreaming, and in what shape?"
-Costs an afternoon, tells us whether option #4 is even open. Maintainers respond very
-differently to "can we talk about this" than to a surprise 50-file diff.
-
-## 3. Contribute the pieces that DO fit the policy
-
-Line 36 explicitly invites docs / examples / integrations:
-
-- `METAL_BACKEND.md` design writeup
-- Apple Silicon build-recipe docs
-- benchmarks doc
-  Low-risk, high-welcome, plants a flag, builds trust for a future backend conversation.
-
-## 4. Salami-slice the upstream attempt (only if #2 says yes)
-
-Don't submit the backend — submit the smallest self-contained piece defensible without
-notes. E.g. the `device_dispatch.h` METAL→CPU binding trick: tight, clever, explainable.
-Land trust in small bites. Slow path; only worth it with a maintainer's signal.
-
-## 5. Write it up publicly
-
-A blog post / technical writeup ("adding a Metal backend to CTranslate2 with
-unified-memory tricks") is arguably more portfolio value than a PR buried in someone
-else's repo. The perf-investigation arc alone is good content: profiling a real LLM,
-finding the `Add` op had silently never been on the GPU (27× fp16 blowup), then
-implementing command-buffer reuse — the "obvious" #1 lever — and **measuring it
-neutral-to-negative** because batching kills CPU/GPU overlap. Three disproven hypotheses
-and a "measure, don't guess" through-line is a better story than a clean win.
-
-This already has a home: ai.ericeaglstun.com has a `deep-dives/` section
-(`~/Documents/web/ericeaglstun-ai/content/deep-dives/`) already running an Apple-Silicon
-porting series — `porting-ml-to-apple-silicon.md`, `reviving-pulse-apple-silicon.md`,
-`audiocraft-apple-silicon.md`. The CTranslate2 Metal backend slots in as the next entry
-in that exact series and can link straight into the existing glossary terms (`metal`,
-`mps`, `cuda`, `tensor`). The scaffolding is already standing — it's a deep dive with a
-slot pre-cut for it, not a hypothetical.
-
-## Recommendation
-
-- Do **#2 this week** — cheap, unlocks everything else.
-- Assume **#1 is where this lives** regardless. Fork = correct architecture for a
-  separate backend.
-
-## Non-negotiable if going upstream
-
-Must be able to defend every load-bearing choice cold:
-
-- the unified-memory pointer contract
-- why METAL binds to the CPU dispatch case (avoiding ~50 dispatch-site instantiations)
-- the `allocator.cc` / `devices.cc` early-returns for `Device::METAL`
-  In this codebase a wrong pointer really does eat a weekend — that's why the rule exists,
-  and it's not aimed at a contributor who can explain these.
-
-## Next step
-
-Draft the Discussion post for #2 when ready (a few days out).
+If upstreaming is ever worth pursuing, open a GitHub **Discussion first — not a PR**:
+"Working Metal backend, fp32/fp16/int8 end-to-end, parity with CPU on the op suite,
+here's the design — is there appetite, and in what shape?" Costs an afternoon and tells
+you whether a salami-sliced upstream attempt is even open. Per CONTRIBUTING.md the work
+must be disclosed as AI-assisted and every load-bearing choice defensible cold — the
+unified-memory pointer contract, why METAL binds to the CPU dispatch case (avoiding ~50
+dispatch-site instantiations), and the `allocator.cc` / `devices.cc` early-returns for
+`Device::METAL`. All three are documented in `METAL_BACKEND.md`.
