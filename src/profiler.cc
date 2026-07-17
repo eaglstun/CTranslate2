@@ -19,7 +19,9 @@ namespace ctranslate2 {
 #else
 
 #include <algorithm>
+#include <cstdlib>
 #include <iomanip>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -139,6 +141,22 @@ namespace ctranslate2 {
     }
   }
 
+
+  // Embedded callers (e.g. Python wheels) have no way to call init_profiling.
+  // CT2_AUTO_PROFILE=cpu|cuda|metal starts a profiler at library load and dumps it to
+  // stderr at process exit. The device controls ScopeProfiler's synchronize_stream:
+  // "cpu" keeps GPU submission asynchronous (wall-clock attribution; queue stalls land
+  // in the scope that calls flush), a GPU device syncs at every scope boundary
+  // (per-op GPU-inclusive times, but serializes the pipeline).
+  static struct AutoProfile {
+    AutoProfile() {
+      const char* env = std::getenv("CT2_AUTO_PROFILE");
+      if (!env || !*env)
+        return;
+      init_profiling(str_to_device(env), 1);
+      std::atexit([] { dump_profiling(std::cerr); });
+    }
+  } auto_profile;
 
   // Track active scope in the current thread.
   static thread_local ScopeProfiler* current_scope = nullptr;

@@ -385,6 +385,52 @@ Decode-bound regime (prompt 32, generate 32) — tok/s, higher is better:
   fusion: Gemm/Dense (the projections + lm_head), Concat (KV-cache append), RMSNorm,
   Rotary, Add — the next fusion candidates if more decode speed is wanted.
 
+## Whisper beam-search decode: two kernels close an 8× gap (2026-07-17)
+
+Whisper large-v3, 30s clip, faster-whisper `transcribe(beam_size=5)` via the whisperX
+rig (`bench/bench_ct2.py`), M4 Max, macOS 26.4.1, 2026-07-17. Post-M16 baseline was
+**39.2s** (0.76× realtime) vs CPU fp32 20.2s — Metal lost by 2×. Root-causing with the
+new env-gated instrumentation (`CT2_AUTO_PROFILE`, `CT2_METAL_STATS` — see
+`METAL_BACKEND.md`) found the entire gap in two kernels nobody had profiled:
+
+1. **`Transpose` had no Metal routing** → CPU reference → `metal::flush()` per call.
+   Beam search folds the beam into `split_heads`/`combine_heads`' time axis
+   (`time == beam = 5 ≠ 1`), so decode hit the transpose path ~4×/layer × 32 layers ≈
+   **128 full GPU queue drains per token** (~12,200 flushes/run, 36.8s total stall).
+   Greedy LLM decode never sees this (`time==1` reshape fast-path) — which is why the
+   Qwen benchmarks couldn't catch it. Fix: `ct2_transpose_b1/b2/b4` (generic rank ≤ 4
+   permute, dispatched on element width, `transpose.cc` routes before generic dispatch).
+2. **`ct2_gather_bytes` copied each gathered row with ONE thread in a serial byte
+   loop.** The per-step beam KV-cache reorder gathers a handful of ~1 MB rows (32
+   layers × 2 tensors × ~5 beams), so the GPU spent the decode copying megabytes with
+   5 threads. With per-op sync, Gather measured **94.4s (80%)** of a 115s run. Fix:
+   2D grid — one thread per 16-byte chunk per row.
+
+Same binary flow (rebuild + `cmake --install` into the whisperX venv), transcript
+byte-identical to CPU in every config (segments, timestamps, text):
+
+| large-v3, 30s clip | before (2026-07-07 binary) | **after**                 | vs CPU          |
+| ------------------ | -------------------------- | ------------------------- | --------------- |
+| metal fp16         | 39.2s (0.76×RT)            | **4.6–4.7s (6.3–6.5×RT)** | **4.3× faster** |
+| metal fp32         | —                          | 5.7s (5.3×RT)             | 3.5× faster     |
+| metal int8         | —                          | 5.8s (5.2×RT)             | 3.5× faster     |
+| cpu fp32           | 20.2s (1.49×RT)            | 20.2s (1.49×RT)           | baseline        |
+
+Full 730s file, metal fp16: **206s (3.54× realtime)**, 5.1 GB peak RSS, completes
+clean — vs 0.41× RT at bring-up (2026-06-09), an ~8.6× end-to-end improvement.
+
+**Read:**
+
+- The residual flush stats after the fix: 3,186 flushes/run (~26/token: sampler D2H,
+  timestamp rules, beam bookkeeping), 803 stalled, **0.7s** total wait (was 36.8s).
+- Qwen2.5-0.5B rechecked on the same binary: no regression — bs=1 within the M16
+  spread (74.6/79.2 tok/s fp32/fp16), bs=8 slightly better (426.8/509.6 vs 403–418/
+  486–493), prefill fp16 bs=1 86→73 ms (prefill transposes now native).
+- The previously-planned levers (GEMM-epilogue fusion, on-device beam step, ICB
+  replay, GPU Conv1D) are all deprioritized: encoder ≈ 3% of the run, and the per-op
+  encode floor priced at ~30ms/token CPU-side against ~250ms of GPU-visible work that
+  turned out to be the gather. Re-profile before building any of them.
+
 ## Caveats
 
 - Tiny model + tiny ops is the worst case; a real LLM (large hidden size, big GEMMs) sits

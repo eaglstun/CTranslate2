@@ -5,6 +5,10 @@
 
 #import <Foundation/Foundation.h>
 
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -170,6 +174,32 @@ namespace ctranslate2 {
     static std::mutex g_commit_mutex;
     static id<MTLCommandBuffer> g_last_committed = nil;
 
+    // Dispatch statistics, dumped at exit when CT2_METAL_STATS=1. Counter increments are
+    // a few ns against a ~10us command-buffer encode, so they stay unconditionally on.
+    // A "stalled" flush found the last-committed buffer not yet completed — the CPU
+    // actually blocked in waitUntilCompleted; the stall time is summed separately.
+    static std::atomic<uint64_t> g_stat_command_buffers{0};
+    static std::atomic<uint64_t> g_stat_flushes{0};
+    static std::atomic<uint64_t> g_stat_flushes_stalled{0};
+    static std::atomic<uint64_t> g_stat_flush_wait_us{0};
+
+    static struct MetalStatsAtExit {
+      MetalStatsAtExit() {
+        const char* env = std::getenv("CT2_METAL_STATS");
+        if (!env || !*env || env[0] == '0')
+          return;
+        std::atexit([] {
+          std::fprintf(stderr,
+                       "[metal-stats] command_buffers=%llu flushes=%llu stalled_flushes=%llu "
+                       "flush_wait_ms=%.1f\n",
+                       (unsigned long long)g_stat_command_buffers.load(),
+                       (unsigned long long)g_stat_flushes.load(),
+                       (unsigned long long)g_stat_flushes_stalled.load(),
+                       g_stat_flush_wait_us.load() / 1000.0);
+        });
+      }
+    } g_metal_stats_at_exit;
+
     // Per-op autorelease pool. Command buffers ([queue commandBuffer]), compute encoders, and
     // MPSMatrixDescriptors are all autoreleased (+0). CTranslate2 issues ops from C++ worker
     // threads that have no run loop, so without an explicit pool these objects are never
@@ -182,6 +212,7 @@ namespace ctranslate2 {
     static thread_local NSAutoreleasePool* g_op_pool = nil;
 
     id<MTLCommandBuffer> new_command_buffer() {
+      g_stat_command_buffers.fetch_add(1, std::memory_order_relaxed);
       g_op_pool = [[NSAutoreleasePool alloc] init];
       return [get_command_queue() commandBuffer];
     }
@@ -214,8 +245,18 @@ namespace ctranslate2 {
         std::lock_guard<std::mutex> lock(g_commit_mutex);
         to_wait = [g_last_committed retain];
       }
+      g_stat_flushes.fetch_add(1, std::memory_order_relaxed);
       if (to_wait) {
-        [to_wait waitUntilCompleted];
+        if (to_wait.status != MTLCommandBufferStatusCompleted) {
+          g_stat_flushes_stalled.fetch_add(1, std::memory_order_relaxed);
+          const auto start = std::chrono::steady_clock::now();
+          [to_wait waitUntilCompleted];
+          const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - start);
+          g_stat_flush_wait_us.fetch_add(elapsed.count(), std::memory_order_relaxed);
+        } else {
+          [to_wait waitUntilCompleted];
+        }
         [to_wait release];
       }
     }

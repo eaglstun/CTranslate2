@@ -840,9 +840,55 @@ namespace ctranslate2 {
       [encoder setBytes:&stride_u length:sizeof(stride_u) atIndex:4];
       [encoder setBytes:&per_batch_u length:sizeof(per_batch_u) atIndex:5];
 
+      // 2D grid: x = 16-byte chunks within a row (CT2_GATHER_CHUNK in the kernel),
+      // y = gathered rows. Rows can be megabytes (KV-cache reorder), so the row copy
+      // must be parallel too.
+      const NSUInteger chunks = (static_cast<NSUInteger>(copy_size_bytes) + 15) / 16;
+      NSUInteger tg_x = pso.maxTotalThreadsPerThreadgroup;
+      if (tg_x > chunks) tg_x = chunks;
+      [encoder dispatchThreads:MTLSizeMake(chunks, num_indices, 1)
+            threadsPerThreadgroup:MTLSizeMake(tg_x, 1, 1)];
+      [encoder endEncoding];
+      commit_command_buffer(command_buffer);
+    }
+
+    void transpose(const void* x, void* y,
+                   const dim_t* out_dims, const dim_t* in_strides, dim_t item_size) {
+      const dim_t total = out_dims[0] * out_dims[1] * out_dims[2] * out_dims[3];
+      if (total == 0)
+        return;
+
+      const char* pipeline_name = nullptr;
+      switch (item_size) {
+      case 1: pipeline_name = "ct2_transpose_b1"; break;
+      case 2: pipeline_name = "ct2_transpose_b2"; break;
+      case 4: pipeline_name = "ct2_transpose_b4"; break;
+      default:
+        throw std::invalid_argument("metal::transpose: unsupported item size "
+                                    + std::to_string(item_size));
+      }
+
+      const BufferRange x_buffer = buffer_and_offset(x);
+      const BufferRange y_buffer = buffer_and_offset(y);
+
+      id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
+      id<MTLCommandBuffer> command_buffer = new_command_buffer();
+      id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+      [encoder setComputePipelineState:pso];
+      [encoder setBuffer:x_buffer.buffer offset:x_buffer.offset atIndex:0];
+      [encoder setBuffer:y_buffer.buffer offset:y_buffer.offset atIndex:1];
+      uint32_t dims_u[4];
+      uint32_t strides_u[4];
+      for (int i = 0; i < 4; ++i) {
+        dims_u[i] = static_cast<uint32_t>(out_dims[i]);
+        strides_u[i] = static_cast<uint32_t>(in_strides[i]);
+      }
+      [encoder setBytes:dims_u length:sizeof(dims_u) atIndex:2];
+      [encoder setBytes:strides_u length:sizeof(strides_u) atIndex:3];
+
       NSUInteger tg = pso.maxTotalThreadsPerThreadgroup;
-      if (tg > (NSUInteger)num_indices) tg = num_indices;
-      [encoder dispatchThreads:MTLSizeMake(num_indices, 1, 1)
+      if (tg > (NSUInteger)total) tg = total;
+      [encoder dispatchThreads:MTLSizeMake(total, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
       [encoder endEncoding];
       commit_command_buffer(command_buffer);
