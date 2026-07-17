@@ -1026,21 +1026,72 @@ kernel void ct2_strided_copy_bytes(device const uchar* src   [[buffer(0)]],
   dst[(ulong)i * dst_step + d] = src[(ulong)i * src_step + d];
 }
 
-// ---- Gather ----  type-agnostic byte copy: one thread per gathered row.
+// ---- Gather ----  type-agnostic byte copy, parallel across rows AND within each row.
 // output[i] = data[batch_of(i) * batch_stride + indices[i] * copy_size], copy_size bytes.
+// The grid is 2D: g.y indexes the gathered row, g.x a CT2_GATHER_CHUNK-byte chunk of it.
+// Beam-search KV-cache reorder gathers a handful of ~megabyte rows; a one-thread-per-row
+// copy leaves the GPU nearly idle there (it was the dominant decode cost for Whisper).
+#define CT2_GATHER_CHUNK 16u
 kernel void ct2_gather_bytes(device const uchar* data    [[buffer(0)]],
                              device const int* indices    [[buffer(1)]],
                              device uchar* output         [[buffer(2)]],
                              constant uint& copy_size      [[buffer(3)]],
                              constant uint& batch_stride   [[buffer(4)]],
                              constant uint& num_per_batch  [[buffer(5)]],
-                             uint i [[thread_position_in_grid]]) {
+                             uint2 g [[thread_position_in_grid]]) {
+  const uint i = g.y;
+  const uint offset = g.x * CT2_GATHER_CHUNK;
+  if (offset >= copy_size)
+    return;
   const uint batch = i / num_per_batch;
   const uint read = (uint)indices[i];
-  device const uchar* src = data + (ulong)batch * (ulong)batch_stride + (ulong)read * (ulong)copy_size;
-  device uchar* dst = output + (ulong)i * (ulong)copy_size;
-  for (uint b = 0; b < copy_size; ++b)
+  device const uchar* src = data + (ulong)batch * (ulong)batch_stride
+                            + (ulong)read * (ulong)copy_size + offset;
+  device uchar* dst = output + (ulong)i * (ulong)copy_size + offset;
+  const uint n = min(copy_size - offset, CT2_GATHER_CHUNK);
+  for (uint b = 0; b < n; ++b)
     dst[b] = src[b];
+}
+
+// ---- Transpose ----  type-agnostic permute for ranks <= 4 (leading dims padded to 1).
+// One thread per element: g is the output linear index, decomposed into output coords;
+// the input offset applies the permuted input strides (element units). For permutations
+// that keep the innermost axis (e.g. split/combine heads' {0,2,1,3}) consecutive threads
+// read consecutive input elements, so loads stay coalesced.
+template <typename T>
+inline void ct2_transpose_impl(device const T* x, device T* y,
+                               uint4 dims, uint4 strides, uint g) {
+  uint r = g;
+  const uint i3 = r % dims.w; r /= dims.w;
+  const uint i2 = r % dims.z; r /= dims.z;
+  const uint i1 = r % dims.y;
+  const uint i0 = r / dims.y;
+  y[g] = x[(ulong)i0 * strides.x + (ulong)i1 * strides.y
+           + (ulong)i2 * strides.z + (ulong)i3 * strides.w];
+}
+
+kernel void ct2_transpose_b1(device const uchar* x [[buffer(0)]],
+                             device uchar* y [[buffer(1)]],
+                             constant uint4& dims [[buffer(2)]],
+                             constant uint4& strides [[buffer(3)]],
+                             uint g [[thread_position_in_grid]]) {
+  ct2_transpose_impl<uchar>(x, y, dims, strides, g);
+}
+
+kernel void ct2_transpose_b2(device const ushort* x [[buffer(0)]],
+                             device ushort* y [[buffer(1)]],
+                             constant uint4& dims [[buffer(2)]],
+                             constant uint4& strides [[buffer(3)]],
+                             uint g [[thread_position_in_grid]]) {
+  ct2_transpose_impl<ushort>(x, y, dims, strides, g);
+}
+
+kernel void ct2_transpose_b4(device const uint* x [[buffer(0)]],
+                             device uint* y [[buffer(1)]],
+                             constant uint4& dims [[buffer(2)]],
+                             constant uint4& strides [[buffer(3)]],
+                             uint g [[thread_position_in_grid]]) {
+  ct2_transpose_impl<uint>(x, y, dims, strides, g);
 }
 
 // ---- Sampling ops ----

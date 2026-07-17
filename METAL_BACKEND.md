@@ -17,7 +17,9 @@ memory, behind a full regression net (the existing op/layer/storage suites all r
 `Device::METAL`). Perf state: since the fused decode-attention kernel (M16, 2026-07-07),
 **Metal beats the Accelerate CPU baseline in every measured regime** — prefill (fp16
 2.6×, int8 at fp16 parity) and now autoregressive decode too (Qwen bs=1 edges CPU,
-bs=8 ~2.8× over CPU).
+bs=8 ~2.8× over CPU). Whisper beam-search decode joined the win column in M17
+(2026-07-17): large-v3 fp16 at 6.4× realtime, 4.3× faster than CPU, transcript
+byte-identical.
 
 ## Why this is tractable
 
@@ -402,6 +404,35 @@ lengths incl. a fully masked row), `DecodeParityLLM` greedy-token equality on re
 `*Metal*:*METAL*` 103 passed / 2 skipped with the path on and off, full suite 288/292
 (only the pre-existing CPU Conv1D baseline failure).
 
+### ✅ M17 — Whisper beam-search decode: native Transpose + parallel gather (2026-07-17)
+
+Whisper large-v3 beam-5 decode was 2× slower than CPU (39.2s vs 20.2s, 30s clip) after
+M16. New env-gated instrumentation attributed it: `CT2_AUTO_PROFILE=cpu|metal`
+(`profiler.cc` — auto-init at load + stderr dump at exit, so Python wheels profile
+without a rebuild; `cpu` keeps submission async for wall-clock attribution, `metal`
+syncs per scope for GPU-inclusive per-op times) and `CT2_METAL_STATS=1` (`device.mm` —
+command-buffer/flush/stall counters). They found **two kernels, not the expected
+encode-floor**:
+
+1. **`Transpose` had no Metal routing** → CPU reference → one `metal::flush()` (full
+   queue drain) per call. Beam search folds the beam into the time axis of
+   `split_heads`/`combine_heads` (`time == beam ≠ 1`), so decode drained the queue
+   ~128×/token (~12,200 flushes, 36.8s total stall). Greedy decode's `time==1`
+   reshape fast-path is why the Qwen benchmarks never saw it. Fix:
+   `ct2_transpose_b1/b2/b4` — a generic rank ≤ 4 permute dispatched on element width
+   (transpose is pure data movement), routed in `transpose.cc`.
+2. **`ct2_gather_bytes` copied each gathered row with one thread in a serial byte
+   loop.** The beam KV-cache reorder gathers a few ~1 MB rows per layer per step; with
+   per-op sync, Gather measured **80% of the run**. Fix: 2D grid, one thread per
+   16-byte chunk of each row.
+
+Result: **39.2s → 4.6s** (6.4× realtime, 4.3× faster than CPU fp32); fp32 5.7s, int8
+5.8s; 730s file 3.54× RT. Transcript byte-identical to CPU (segments, timestamps,
+text) in all configs. Qwen rechecked same-binary: no regression (bs=8 slightly better,
+prefill transposes now native). Suite 104/106 (2 pre-existing Conv1D skips). Full
+tables and the deprioritized-lever list in `METAL_BENCHMARKS.md`;
+`METAL_WHISPER_NEXT_STEPS.md` records the investigation.
+
 ## What runs where today
 
 | Operation                                                                  | Metal execution                                                                                                                             |
@@ -411,7 +442,8 @@ lengths incl. a fully masked row), `DecodeParityLLM` greedy-token equality on re
 | RMSNorm (float32 and float16)                                              | **GPU** — custom kernel                                                                                                                     |
 | LayerNorm, last axis + affine (float32 and float16)                        | **GPU** — custom kernel                                                                                                                     |
 | Rotary / RoPE (float32 and float16)                                        | **GPU** — custom kernel                                                                                                                     |
-| Gather (all dtypes)                                                        | **GPU** — custom kernel                                                                                                                     |
+| Gather (all dtypes)                                                        | **GPU** — custom kernel (row-parallel: one thread per 16-byte chunk, so megabyte KV-cache reorder rows saturate the GPU)                    |
+| Transpose (1/2/4-byte elements, rank ≤ 4)                                  | **GPU** — generic permute kernel dispatched on element width (8-byte elements fall through to CPU reference)                                |
 | BiasAdd + activation, last axis (float32 and float16)                      | **GPU** — fused custom kernel (ReLU/GELU/GELUTanh/GELUSigmoid/Swish/Tanh/Sigmoid)                                                           |
 | Standalone activations: ReLU/GELU/Swish/Sigmoid/Tanh (float32 and float16) | **GPU** — custom kernel                                                                                                                     |
 | Elementwise Mul (float32 and float16)                                      | **GPU** — custom kernel                                                                                                                     |
@@ -468,7 +500,9 @@ Remaining fp16 work:
 ### Deferred / out of scope for now
 
 - Flash-attention (Metal equivalent of the CUDA flash-attn path)
-- `Conv1D` (CUDA path uses cuDNN; needed for Whisper / Wav2Vec2 encoders)
+- `Conv1D` (CUDA path uses cuDNN; used by Whisper / Wav2Vec2 encoder stems — but the M17
+  profile put the whole Whisper encoder at ~3% of a transcribe run, so a GPU Conv1D is
+  low-value there)
 - AWQ int4 GEMM
 - bf16 (only on newer Apple GPUs)
 - NCCL / tensor parallelism (multi-GPU)

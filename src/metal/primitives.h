@@ -162,6 +162,13 @@ namespace ctranslate2 {
                 dim_t copy_size_bytes, dim_t batch_stride_bytes,
                 dim_t num_indices, dim_t num_indices_per_batch);
 
+    // Type-agnostic permute for ranks <= 4: y[out coords] = x[permuted coords]. out_dims and
+    // in_strides are 4 entries each, padded on the LEFT to rank 4 with dim 1 / stride 0;
+    // in_strides[i] is the input stride (in ELEMENTS) of the input axis that became output
+    // axis i. item_size must be 1, 2 or 4 bytes and the element count must fit in uint32.
+    void transpose(const void* x, void* y,
+                   const dim_t* out_dims, const dim_t* in_strides, dim_t item_size);
+
     // Row-wise top-k over the last dimension: values/indices are [batch_size, k] outputs.
     // Deterministic (value descending, index ascending) order; values are bit-copies of
     // the selected input elements. Requires k <= depth and k <= topk_max_k().
