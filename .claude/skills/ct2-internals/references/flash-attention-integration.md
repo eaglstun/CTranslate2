@@ -1,4 +1,20 @@
-# Flash Attention 2 integration (WITH_FLASH_ATTN)
+---
+title: "Flash Attention 2 integration (WITH_FLASH_ATTN)"
+summary: >-
+  How the vendored Flash Attention 2 CUDA kernels integrate as a parallel
+  FlashMultiHeadAttention layer (selected at construction alongside
+  MultiHeadAttention, both deriving from AttentionLayer) rather than a patch
+  to the composed attention. Build-gated by WITH_FLASH_ATTN (head dims 32-256,
+  fp16/bf16, sm80, HIP-incompatible) and runtime-gated to Ampere+ and self-
+  attention only; the user surface is a flash_attention=False load flag, not a
+  compute_type. The layer replaces the QK^T/mask/softmax/×V sequence with one
+  ops::FlashAttention call, keeps heads last via reshape (no transpose), grows
+  the KV cache in preallocated 512-row chunks instead of per-step Concat,
+  moves RoPE into the kernel at decode, and uses is_causal instead of a
+  lengths mask. It explicitly does not support cross-attention, CPU/non-CUDA,
+  fp32/int8, or ALiBi (wired but nullptr-disabled), so Metal attention stays
+  on the composed path — flash is CUDA-only by construction.
+---
 
 CT2-architecture reference: how the vendored Flash Attention 2 CUDA kernels integrate —
 a parallel attention _layer_, not a patch to `MultiHeadAttention`. The composed attention

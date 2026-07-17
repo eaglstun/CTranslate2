@@ -1,4 +1,23 @@
-# The DecoderState contract (state keys, lifecycle, who creates and reorders what)
+---
+title: "The DecoderState contract (state keys, lifecycle, who creates and reorders what)"
+summary: >-
+  Documents the DecoderState contract, the unordered_map<string, StorageView>
+  carrying the KV cache and encoder memory across decode steps, and the
+  layers::Decoder base surface (initial_state, the greedy/beam update_state
+  overloads, replicate_state, and batch_size = state.begin()->second.dim(0)).
+  Details who creates each key: TransformerDecoder::initial_state makes per-
+  layer self_keys_<i>/self_values_<i> and (with encoder attention)
+  memory_keys_<i>/memory_values_<i>, all starting empty as the first-step
+  signal, while the model adds the memory and memory_lengths encoder handoff.
+  Explains the cross-attention lifecycle where memory is read only at step<=0,
+  projected once into per-layer caches, then erased, and the beam interplay
+  where memory K/V are not replicated per beam so self_* entries have
+  dim0=batch*beam while memory_* keep dim0=batch. Covers the Gather
+  reordering/shrinking contract (dim 0 must be batch and tolerate arbitrary
+  gather between steps), cache shapes and dtype (output_type, fp16 for
+  int8_float16 models since int8 touches only weights), DecoderStateCache for
+  static_prompt caching, and that no Metal-specific state code is needed.
+---
 
 CT2-architecture reference: `DecoderState` — the string→tensor map that carries the KV
 cache and encoder memory across decode steps. This is the _contract_ (keys, ownership,

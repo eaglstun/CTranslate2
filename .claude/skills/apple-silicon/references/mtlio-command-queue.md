@@ -1,4 +1,19 @@
-# MTLIOCommandQueue — fast resource loading, and why unified memory mostly neutralizes it
+---
+title: "MTLIOCommandQueue — fast resource loading, and why unified memory mostly neutralizes it"
+summary: >-
+  MTLIOCommandQueue, Metal 3's fast-resource-loading API (macOS 13+) that
+  schedules file-system reads directly into Metal resources off-thread with
+  optional decompression (zlib/lzfse/lz4/lzma/lzBitmap), covering
+  MTLIOFileHandle, MTLIOCommandBuffer, and its load/loadBytes plus
+  MTLSharedEvent handoff. The core argument is that unified memory mostly
+  neutralizes it: CT2 today loads weights disk to CPU StorageView to memcpy
+  into a Shared MTLBuffer (src/models/model.cc consume plus
+  move_variables_to_device), and the direct-into-GPU headline win doesn't
+  exist because a Shared buffer's contents is already CPU-writable. The
+  cheaper lever is allocating variables on Device::METAL first and reading
+  straight into contents, eliminating the staging StorageView; MTLIO becomes
+  interesting only if CT2 ever ships compressed weight files.
+---
 
 Sources: https://developer.apple.com/documentation/metal/mtliocommandqueue,
 https://developer.apple.com/documentation/metal/mtliocommandbuffer,

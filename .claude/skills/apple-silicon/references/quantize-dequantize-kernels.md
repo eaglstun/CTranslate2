@@ -1,4 +1,22 @@
-# int8 quantize/dequantize kernels — the three supporting kernels around the GEMM
+---
+title: "int8 quantize/dequantize kernels — the three supporting kernels around the GEMM"
+summary: >-
+  Documents the three int8 support kernels flanking the Metal GEMM in
+  kernels_msl.h, each in fp32 and fp16 variants. ct2_quantize_s8 does per-row
+  symmetric dynamic quantization (scale=127/amax(row), no zero-point) with one
+  256-thread threadgroup per row using a power-of-two tree reduction,
+  precise::divide for the scale, and rint rounding to stay bit-exact against
+  the CPU reference. ct2_dequantize_s8 is the simple reciprocal-then-multiply
+  form (y=(float)x/scale[row], spelled like the CPU kernel) used for int8
+  embeddings. ct2_dequant_gemm_out is the quantized-Dense epilogue fusing the
+  int32 accumulator to float with per-row activation scale, per-output-channel
+  weight scale, optional bias, and all seven ActivationTypes via
+  ct2_apply_activation (whose switch order is contractually the activation.h
+  enum order). Load-bearing parity details include precise::divide and rint,
+  the 256-thread host/kernel coupling, and the dummy-bias buffer binding at
+  index 3; these launches are the per-Dense overhead keeping int8 decode ~15%
+  behind fp16.
+---
 
 Source: `src/metal/kernels/kernels_msl.h` (kernels `ct2_quantize_s8_{float,half}`
 ~612–672, `ct2_dequantize_s8_{float,half}` ~674–699, `ct2_dequant_gemm_out_{float,half}`

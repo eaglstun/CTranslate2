@@ -1,4 +1,20 @@
-# MTLBlitCommandEncoder — GPU-timeline buffer copies and fills
+---
+title: "MTLBlitCommandEncoder — GPU-timeline buffer copies and fills"
+summary: >-
+  MTLBlitCommandEncoder for GPU-timeline buffer copies and fills —
+  copy(from:sourceOffset:to:destinationOffset:size:),
+  fill(buffer:range:value:) (a byte pattern, cannot splat a float), and
+  synchronize(resource:), noting the macOS multiple-of-4 alignment rule on
+  offsets and sizes. The load-bearing fact is that CT2's Metal backend uses
+  zero blits: contiguous copies go through CPU-side std::copy over Shared
+  MTLBuffer contents pointers (StorageView::copy_from with the METAL-to-CPU
+  device_dispatch binding), while strided/indexed copies use custom kernels
+  ct2_strided_copy_bytes and ct2_gather_bytes in kernels_msl.h.
+  synchronize(resource:) is irrelevant on a Shared-storage-only unified-memory
+  backend, and a blit would only help by keeping a large contiguous device-to-
+  device copy (KV-cache reorg, beam reordering) on the GPU timeline instead of
+  forcing a mid-pipeline CPU read.
+---
 
 Sources: https://developer.apple.com/documentation/metal/mtlblitcommandencoder,
 https://developer.apple.com/documentation/metal/mtlblitcommandencoder/copy(from:sourceoffset:to:destinationoffset:size:),

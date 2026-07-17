@@ -1,4 +1,23 @@
-# Attention & the KV cache in CTranslate2 (RoPE, GQA, per-step cache growth)
+---
+title: "Attention & the KV cache in CTranslate2 (RoPE, GQA, per-step cache growth)"
+summary: >-
+  Explains CTranslate2's MultiHeadAttention structure in
+  attention.cc/attention_layer.cc: the split_heads/combine_heads reshape-and-
+  transpose helpers moving between [batch, time, depth] and [batch, num_heads,
+  time, d_head] (a pure reshape at time==1 decode steps), the fused QKV
+  projection carved by ops::Split whose widths encode GQA/MQA head configs,
+  and replicate_heads broadcasting fewer KV heads via expand_dims + ops::Tile
+  + reshape rather than a copy loop. Details RotaryEmbeddings::apply rotating
+  only Q and K after projection using the sequence-position offset with
+  lazily-grown sin/cos tables, and the heart of decode: the KV cache grown one
+  row per token by ops::Concat on the time dim (dim 2, or dim 1 in the merged
+  MQA layout), with sliding-window Slide trims for bounded caches. Its load-
+  bearing point is that each decode step issues a dozen-plus tiny ops (fused-
+  QKV GEMM, Split, reshapes, Tile, RoPE, cache Concat, score/value GEMMs,
+  combine, output GEMM) at m=batch, which is the structural reason Metal
+  decode is API-overhead-bound; also flags Concat/Split GPU graduation as
+  parity-verified but e2e-neutral.
+---
 
 CT2-architecture reference: how `MultiHeadAttention` projects, reshapes, rotates, and
 **grows the KV cache one step at a time**. This is the structural side of the decode loop —

@@ -1,4 +1,19 @@
-# Activation Ops
+---
+title: "Activation Ops"
+summary: >-
+  CT2's ActivationType enum (ReLU, GELUTanh, Swish, GELU, GELUSigmoid, Tanh,
+  Sigmoid — fixed integer order, reused as raw kernel selectors) and the
+  concrete ops it maps to via get_activation_op, where all three GELU variants
+  are one GELU op parameterized by Approximation. It gives the exact CPU
+  vectorized formulas from src/cpu/kernels.cc (erf GELU, tanh-approx with the
+  sqrt(2/pi) constant, sigmoid quick_gelu with 1.702, SiLU/Swish) and
+  documents the three fusion application sites — the Gemm epilogue
+  apply_bias_and_activation, Dequantize::dequantize_gemm_output, and the
+  FeedForwardNetwork's first linear (with the SwiGLU/GeGLU gate via Mul). It
+  maps HF activation names per model family (BERT/Whisper erf-GELU, Gemma2
+  GELUTanh+GeGLU, llama Swish) and notes the Metal tanh-overflow NaN clamp to
+  [-15,15] that fixed the Gemma2 pad-collapse bug.
+---
 
 `ActivationType`, the concrete activation ops it maps to, the exact formulas, and the three
 places activations get _applied_ (gemm epilogue, dequantize gemm-output, FFN) — the plumbing

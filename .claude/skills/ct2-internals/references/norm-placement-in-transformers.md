@@ -1,4 +1,20 @@
-# Norm placement in CTranslate2 transformers (pre / post / pre-post sandwich)
+---
+title: "Norm placement in CTranslate2 transformers (pre / post / pre-post sandwich)"
+summary: >-
+  Where a LayerNorm/RMSNorm sits within a transformer block — pre-norm, post-
+  norm, or the pre-post sandwich (norm both before and after each sublayer,
+  T5Gemma-style) — as opposed to how the norm is computed. The mental model is
+  a three-layer flow: specs/ declares the placement, converters/ set it per
+  architecture, and src/layers/transformer.cc executes it, with
+  FeedForwardNetwork gated by a _pre_norm bool and the sandwich detected by
+  the presence of all four *_layer_norm objects (plus a parallel-
+  residual/shared-norm decoder variant). Python side, transformer_spec.py
+  carries pre_norm and pre_post_layer_norm defaults and the LayerNormSpec
+  rms_norm flag, and transformers.py sets pre_post_layer_norm=True at specific
+  lines. Placement is pure CPU-side orchestration deciding call order and is
+  orthogonal to Metal; only last-axis affine norms hit the GPU kernel, with
+  general-axis or no-affine norms falling to the CPU reference.
+---
 
 CT2-architecture reference (not an Apple/Metal topic — but the norms work spans both,
 so it lives here next to `math-functions-and-numeric-parity.md`, which covers the

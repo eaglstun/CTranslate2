@@ -1,4 +1,22 @@
-# Transformer model wiring (spec config → constructed layer graph)
+---
+title: "Transformer model wiring (spec config → constructed layer graph)"
+summary: >-
+  How a serialized Transformer becomes a constructed
+  TransformerEncoder/TransformerDecoder object tree at load — the assembly map
+  from spec config to layer graph. Three thin model classes
+  (as_sequence_to_sequence, as_sequence_generator, as_sequence_encoder) build
+  layers under the encoder/decoder scope prefixes, and the ctors resolve
+  everything from model variables where presence/absence IS the config:
+  build_embeddings_scale (sqrt(d_model) or an explicit value),
+  build_position_encoder (learned vs sinusoidal, skipped when attention has
+  RoPE/ALiBi/relative), optional layernorm_embedding, the layer stack, final
+  _output_norm, and decoder extras like _outputs_scale, sliding_window, and
+  final_logit_softcapping. Output projection _proj is a plain Dense with no
+  C++ tying logic — tying happens via converter aliasing so
+  decoder/projection/weight resolves to the same StorageView as the embedding.
+  Structural options (GLU, rms_norm, GQA, parallel_residual, sandwich norms)
+  manifest as weight-variable presence/shape, not scalar attributes.
+---
 
 CT2-architecture reference: how a serialized Transformer model becomes a constructed
 `TransformerEncoder`/`TransformerDecoder` object tree at load time — embeddings scale,

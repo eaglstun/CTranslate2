@@ -1,4 +1,21 @@
-# MTLFence, MTLEvent, MTLSharedEvent — the explicit sync primitives
+---
+title: "MTLFence, MTLEvent, MTLSharedEvent — the explicit sync primitives"
+summary: >-
+  Compares Metal's three explicit synchronization primitives by scope:
+  MTLFence orders passes/encoders within one command queue
+  (updateFence/waitForFence, ordering memory not scheduling), MTLEvent orders
+  across command buffers/queues within one device via a monotonic 64-bit
+  value, and MTLSharedEvent extends that to CPU-GPU and cross-device/process
+  with a CPU-readable/settable signaledValue, notify blocks, blocking waits,
+  and XPC handles. It stresses that for .tracked resources (the default)
+  Metal's automatic hazard tracking orders queue-submitted work with no
+  explicit sync. Crucially none of the three is used in the CT2 Metal backend
+  today, and that is correct: one command queue with Shared tracked buffers
+  and per-op async commit means FIFO order plus tracking handles GPU-GPU
+  dependencies while g_last_committed/metal::flush() handles CPU-GPU. It names
+  the triggers that would make them load-bearing: a second command queue,
+  untracked MTLHeap resources, or finer-grained mid-stream CPU waits.
+---
 
 Sources: https://developer.apple.com/documentation/metal/mtlfence,
 https://developer.apple.com/documentation/metal/mtlevent,

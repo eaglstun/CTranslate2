@@ -1,4 +1,21 @@
-# Translator & seq2seq (TranslationOptions plumbing, encode→decode handoff)
+---
+title: "Translator & seq2seq (TranslationOptions plumbing, encode→decode handoff)"
+summary: >-
+  Maps the encoder-decoder runtime: the Translator pool posting two streams
+  (source and target_prefix) to
+  SequenceToSequenceReplica/EncoderDecoderReplica, vocabulary/start-token
+  loading (shared_vocabulary, decoder_start_token as BOS/EOS/null), and the
+  run_translation flow of tokens-to-ids, encode(), the encode-to-decode
+  handoff installing state memory/memory_lengths projected into cross-
+  attention K/V at step 0, optional vmap output-layer restriction, decode(),
+  and post-processing (EOS strip, attention trimming, replace_unknowns via
+  attention argmax). A large table maps each TranslationOptions field to where
+  it is copied and enforced (beam_size, patience, penalties, prefix_bias_beta,
+  max/min_decoding_length, sampling, use_vmap, etc.). Scoring reuses the
+  shared score_sequences teacher-forced forward. For Metal, encode is the
+  prefill regime that wins while beam decode is the tiny-op regime;
+  nllb_driver.py is the canonical consumer.
+---
 
 CT2-architecture reference: the encoder-decoder runtime path — `Translator` pool →
 `SequenceToSequenceReplica`/`EncoderDecoderReplica` → `decode()` — and the practical

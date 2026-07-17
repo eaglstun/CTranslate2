@@ -1,4 +1,19 @@
-# Converter-Side Weight Transforms: Quantization, Fusion, Aliases
+---
+title: "Converter-Side Weight Transforms: Quantization, Fusion, Aliases"
+summary: >-
+  What CTranslate2 converters do to weights beyond mapping them onto the spec
+  tree: convert-time quantization (model_spec.py _quantize), weight fusion,
+  and alias dedup. It gives the structural quantizability rule (a var is
+  quantizable iff the spec has a sibling {name}_scale, so
+  linear/embedding/conv weights qualify but norms/biases never do), the per-
+  scheme math (int8 per-output-row symmetric 127/amax, int16 global scalar
+  scale, float16/bfloat16 casts), and how AWQ bypasses _quantize entirely via
+  detected quantization_config. It covers QKV fusion (fuse_linear
+  concatenating along output rows, split by C++ after one GEMM), the un-fused
+  SwiGLU gate+up, pre-quant fusion, and how the chosen scheme becomes the
+  saved compute type read back by infer_compute_type. Metal note: an int8
+  model converted once runs unchanged on CPU and Metal.
+---
 
 What converters do to weights BEYOND mapping them onto the spec tree
 (`specs-and-converters.md` owns that pipeline) — convert-time quantization, weight

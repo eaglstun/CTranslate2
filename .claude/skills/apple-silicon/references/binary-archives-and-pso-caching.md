@@ -1,4 +1,19 @@
-# MTLBinaryArchive & PSO caching — what's left to win here (answer: nothing)
+---
+title: "MTLBinaryArchive & PSO caching — what's left to win here (answer: nothing)"
+summary: >-
+  MTLBinaryArchive and pipeline-state-object caching, argued to be a dead
+  lever for the CT2 Metal backend. An archive (macOS 11+) stores compiled GPU
+  binaries at the PSO level, skipping the AIR-to-binary backend compile that a
+  .metallib does not, harvested via makeBinaryArchive,
+  addComputePipelineFunctions, and serialize. The card shows the system's
+  implicit source-hash shader cache already makes newLibraryWithSource ~0.5 ms
+  warm and the repo's function-based PSO builds sub-millisecond, that an app-
+  side archive cannot touch the ~493 ms MPSMatrixMultiplication warmup (MPS
+  builds its own pipelines with no exposed descriptor), and that archives
+  don't survive OS updates without AIR recompile. Verdict: nothing to win; if
+  first-run latency matters, warm the MPS GEMM instead. Touches
+  src/metal/device.mm ensure_library and the PSO cache.
+---
 
 Sources: https://developer.apple.com/documentation/metal/mtlbinaryarchive,
 https://developer.apple.com/documentation/metal/creating-binary-archives-from-device-built-pipeline-state-objects

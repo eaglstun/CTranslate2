@@ -1,4 +1,19 @@
-# Instruments GPU profiling (the GPU-side view the CPU harness can't give)
+---
+title: "Instruments GPU profiling (the GPU-side view the CPU harness can't give)"
+summary: >-
+  Using Instruments and the xctrace CLI for GPU-side profiling that the CPU
+  wall-clock harness cannot provide — the two load-bearing questions being
+  whether CPU/GPU overlap is real (Metal System Trace timeline lanes) and
+  whether ct2_gemm_s8 is ALU-bound (Metal GPU Counters limiter percentages).
+  It documents the locally-verified template/instrument inventory (Metal
+  System Trace template; Metal Application, Metal GPU Counters, Metal
+  Performance Overview, os_signpost instruments), headless xctrace record
+  recipes with --template/--instrument/--launch/--env flags, and how to label
+  anonymous C++ encoder regions with os_signpost_interval_begin/end and
+  os_signpost_id_generate. It honestly flags that Instruments was not actually
+  run while writing the card; descriptions of trace contents come from Apple
+  docs and must be verified in the UI on first use.
+---
 
 The repo's benchmark harness (`benchmarking-and-profiling.md`) measures _wall time from
 the CPU side_ — it found the encode floor and the op-level wins, but it cannot say what

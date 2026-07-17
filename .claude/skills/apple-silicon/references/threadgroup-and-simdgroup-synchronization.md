@@ -1,4 +1,18 @@
-# Threadgroup & SIMD-group synchronization (barriers)
+---
+title: "Threadgroup & SIMD-group synchronization (barriers)"
+summary: >-
+  Metal barriers (threadgroup_barrier, simdgroup_barrier from §6.10.1) as both
+  execution barrier and optional memory fence, with the mem_flags table
+  (mem_none, mem_device, mem_threadgroup, mem_texture) selecting which memory
+  space is ordered. It states the divergence rule — a barrier in divergent
+  control flow is undefined behavior (typically a GPU hang), all threads must
+  enter a conditional/loop iteration containing it — and notes SIMD-group
+  functions (simd_sum, simd_shuffle) share data with no barrier at all. CT2
+  relevance: the tiled int8 ct2_gemm_s8 is the textbook double-barrier stage-
+  then-MAC loop (removing the second barrier is the classic bug), the
+  256-thread tree reductions barrier per halving step, early-exit guards must
+  be uniform per group, and ct2_gemv_s8 folds via simd_sum barrier-free.
+---
 
 Source (Apple): Metal Shading Language Specification, §6.10.1 + §4.4.1 (v4.1, 2026-06-04).
 PDF: <https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf>

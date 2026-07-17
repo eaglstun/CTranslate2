@@ -1,4 +1,21 @@
-# Memory footprint & residency on unified-memory Macs
+---
+title: "Memory footprint & residency on unified-memory Macs"
+summary: >-
+  Explains memory footprint and residency on unified-memory Macs through the
+  MTLDevice query surface — recommendedMaxWorkingSetSize (the model-fits
+  preflight number), currentAllocatedSize (live Metal footprint),
+  MTLResource.allocatedSize vs MTLBuffer.length, hasUnifiedMemory, and
+  maxBufferLength (256 MB floor) — and the setPurgeableState cache lever
+  (nonVolatile/volatile/empty, where volatile resources do not count toward
+  the limit but must be relocked and checked). Because unified memory makes
+  GPU bytes into process RSS, it records two project measurements:
+  int8-resident Qwen2.5-0.5B weights cut peak RSS from 2494 to 1453 MB (−42%),
+  and a Whisper wired-memory balloon (9.07 to 2.06 GB) from autoreleased
+  command buffers where heap RSS stayed flat. Notes the allocator does not
+  cache (allocator.mm makes a fresh newBufferWithLength per request) and
+  suggests preflight against recommendedMaxWorkingSetSize plus ru_maxrss as
+  the measurement default.
+---
 
 Sources (Apple Developer Documentation, fetched via DocC JSON, 2026-06-11):
 

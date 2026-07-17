@@ -1,4 +1,21 @@
-# Quantization Scheme & the Quantize/Dequantize Ops
+---
+title: "Quantization Scheme & the Quantize/Dequantize Ops"
+summary: >-
+  CT2's int8 quantization scheme — symmetric, per-row, scale=127/amax with no
+  zero-point — and the Quantize and Dequantize ops that implement it on any
+  device. The same convention is defined in the CPU kernel quantize_s8_row,
+  the CUDA quantize_kernel, and the Python converter _quantize; activations
+  are quantized dynamically each forward pass while weight scales are static
+  in {scope}/weight_scale. It details Quantize's three ctor options
+  (int16_scale_type governing int16 only, shift_to_uint8 for CPU u8s8s32
+  backends and CUDA/Metal-skipped, round_before_cast gated on binary version
+  5) and Dequantize's two overloads: simple int8-to-float and the GEMM-output
+  rescale that divides int32 by a_scale*b_scale then fuses bias and
+  activation. int32 accumulation is the contract, keeping GEMM pure-integer
+  and exact; AWQ ({scope}/weight_zero) is a separate asymmetric scheme. Metal
+  routes all three kernels with the fused epilogue and also accepts fp16
+  endpoints.
+---
 
 CT2's int8 scheme (symmetric, per-row, no zero-point) and the two ops that implement it
 at runtime, on any device.

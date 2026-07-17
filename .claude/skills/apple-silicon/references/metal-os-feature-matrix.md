@@ -1,4 +1,19 @@
-# Metal feature ↔ version ↔ OS floor — the matrix that stops version-guessing
+---
+title: "Metal feature ↔ version ↔ OS floor — the matrix that stops version-guessing"
+summary: >-
+  A lookup matrix mapping Metal features to their MSL/API requirement and
+  macOS OS floor to stop version-guessing: MTLBlitCommandEncoder (10.11),
+  function constants, SIMD-group reductions, simdgroup_matrix (MSL 2.3,
+  Apple7/M1), atomic_float (MSL 3), MTLIOCommandQueue and metal3 query (13.0),
+  bfloat (MSL 3.1), mathMode and MPSNDArrayQuantizedMatrixMultiplication
+  (15.0), and MTLTensor/MPP matmul2d/metal4 (26.0). It notes the MSL-version
+  column is authoritative and hardware gates are separate from OS gates.
+  Crucially it records that this repo is version-silent: CMakeLists WITH_METAL
+  requires only APPLE+arm64 with no deployment pin, src/metal/device.mm has no
+  availability checks, and the newest language dependency actually used is
+  Metal-2-era SIMD-group reductions, so the implicit M1/macOS-11 floor is
+  untested (only run on M4 Max).
+---
 
 Sources: each row cites either an existing reference in this skill (which carries the
 original Apple citation) or a DocC platform stamp fetched 2026-06-11

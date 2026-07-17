@@ -1,4 +1,19 @@
-# The Downstream Validation Harness — Real Consumers as the Loose Oracle
+---
+title: "The Downstream Validation Harness — Real Consumers as the Loose Oracle"
+summary: >-
+  The end-to-end validation rig (scripts/validate-downstream.sh,
+  tests/downstream/) that exercises four real consumers — whisperX, faster-
+  whisper, Qwen2.5 Generator, NLLB Translator — through the installed wheel as
+  a loose oracle (catches garbage, not the gtest suite's ULP drift). It
+  documents coupling via a pinned dedicated install prefix with fix_rpath
+  install_name_tool/codesign patching, the two modes (--capture-goldens
+  forcing float16 vs int8 candidate runs), the projects.json schema, and the
+  three tolerance metrics (WER ≤0.10, teacher-forced agreement ≥0.90,
+  char_similarity ≥0.90). Goldens are fp16-on-Metal from the same build so
+  int8's occasional argmax flips are absorbed. The worked 2026-06-11 int8 run
+  passed 4/4, and the rig caught the Whisper int8 conv-weight-quantization
+  load crash fixed by the model.cc conv-float guard.
+---
 
 End-to-end validation against the four real consumers of this library (whisperX,
 faster-whisper, and direct `Generator`/`Translator` use). The C++ gtest suite

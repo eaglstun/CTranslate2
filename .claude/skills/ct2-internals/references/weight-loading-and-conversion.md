@@ -1,4 +1,21 @@
-# Weight loading & conversion
+---
+title: "Weight loading & conversion"
+summary: >-
+  The model-load weight pipeline in src/models/model.cc: Model::load reading
+  the binary header, parsing config.json for quantization_type, the variable
+  loop that consumes raw bytes into StorageView buffers (with tensor-parallel
+  split/concat), then set_compute_type dtype conversion, device placement,
+  alias registration, and process_linear_weights/initialize finalize. It
+  details ensure_dtype's quantize/dequantize/cast paths keyed by the paired
+  {name}_scale variable, is_quantizable (name ends in weight) versus
+  is_convertible logic, and the load-time nature of the conversion. The
+  centerpiece is the conv-weight guard: conv weights are forced to stay
+  float_dtype on CUDA/Metal/DNNL because quantized convolution is unsupported
+  — and the bug story where advertising int8 for Metal left an int8 Whisper's
+  conv weights un-dequantized until Metal was added to the guard, fixed by one
+  line, since Conv1D on Metal runs the float32 CPU reference over unified
+  memory.
+---
 
 The model-load weight pipeline in `src/models/model.cc`: binary read → variable index →
 per-variable dtype conversion (quantize / dequantize / cast) → device placement. The

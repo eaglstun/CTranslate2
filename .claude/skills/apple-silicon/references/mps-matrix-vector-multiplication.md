@@ -1,4 +1,23 @@
-# MPSMatrixVectorMultiplication (GEMV)
+---
+title: "MPSMatrixVectorMultiplication (GEMV)"
+summary: >-
+  Reference for Apple's MPSMatrixVectorMultiplication (GEMV, y = alpha*op(A)*x
+  + beta*y), sourced from DocC JSON plus the MPSMatrix.framework SDK header.
+  Covers the initializers (full
+  initWithDevice:transpose:rows:columns:alpha:beta: and the convenience no-
+  transpose alpha=1 beta=0 form), the
+  encodeToCommandBuffer:inputMatrix:inputVector:resultVector: call with its
+  in/out resultVector contract, the MPSVector/MPSVectorDescriptor wrappers
+  including strided batch-of-vectors descriptors, and the
+  shape/transpose/scalar-fixed-at-init, operands-at-encode property that makes
+  per-shape caching valid. Emphasizes that no integer matrix-vector multiply
+  is documented anywhere (unlike MPSMatrixSoftMax/FindTopK which mandate
+  float), so float32/float16 is the proven set and int8 lives in the custom
+  ct2_gemv_s8 kernel. Frames MPSMatrixVectorMultiplication as the untried MPS-
+  native alternative for the fp16 m=1 decode path currently riding the
+  degenerate MPSMatrixMultiplication, and sketches a fair A/B against the
+  current matrix kernel and the int8 GEMV floor.
+---
 
 Source: https://developer.apple.com/documentation/metalperformanceshaders/mpsmatrixvectormultiplication
 (fetched via DocC JSON, 2026-06-11). The DocC pages for the MPSMatrix family have been

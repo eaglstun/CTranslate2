@@ -1,4 +1,24 @@
-# The CT2 model binary format
+---
+title: "The CT2 model binary format"
+summary: >-
+  Specifies the serialized CT2 model directory the C++ loader reads and Python
+  converters write, a stable backward-compatible surface where every converted
+  model must keep loading and the reader rejects models newer than itself. A
+  model dir holds model.bin (weights plus alias table), config.json
+  (ModelConfig with tokens and quantization_type), vocabulary JSON (collapsed
+  to shared_vocabulary.json when identical), and extra registered files like
+  vmap.txt; scalar attributes are serialized as variables, not in config.json.
+  model.bin is little-endian: uint32 binary_version (currently 6), spec name
+  string, spec_revision, num_variables, then per variable
+  name/rank/dims/dtype_id/num_bytes/raw row-major data, then the alias table;
+  dtype_id order is pinned to the C++ DataType enum (float32, int8, int16,
+  int32, float16, bfloat16) and is append-only. It distinguishes the two
+  version numbers (file-format binary version with feature gates at >=2/3/4/5,
+  vs per-architecture spec revision), describes alias dedup (duplicate tensors
+  replaced by the survivor's name, sharing a shared_ptr at load), and notes
+  quantization is baked in by the writer with the loader twinning the same
+  127/amax logic.
+---
 
 The serialized model directory the C++ loader reads and the Python converters write.
 

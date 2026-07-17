@@ -1,4 +1,18 @@
-# Common functions (clamp, mix, saturate, sign, step, smoothstep)
+---
+title: "Common functions (clamp, mix, saturate, sign, step, smoothstep)"
+summary: >-
+  Documents the MSL metal_common standard-library functions from spec section
+  6.3: clamp, mix, saturate, sign, step, and smoothstep, all float/half-only,
+  with each function's exact return semantics and undefined-behavior cases
+  (clamp undefined when minval greater than maxval, sign returns 0.0 for NaN,
+  smoothstep's Hermite interpolation). It flags that clamp and saturate have
+  fast versus precise variants differing only in NaN handling, and that the
+  backend's default fast-math build makes clamp(NaN,...) undefined. The CT2
+  relevance ties this to the Gemma2 NaN fix in kernels_msl.h: ct2_tanh_safe
+  clamps the tanh argument to [-15,15] before the call (clamping the argument,
+  not the NaN result), and notes ct2_quantize_s8_impl deliberately does not
+  clamp to plus/minus 127.
+---
 
 Source (Apple): Metal Shading Language Specification, §6.3 (v4.1, 2026-06-04).
 PDF: <https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf>

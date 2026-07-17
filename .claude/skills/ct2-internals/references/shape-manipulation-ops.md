@@ -1,4 +1,18 @@
-# Shape-Manipulation Ops
+---
+title: "Shape-Manipulation Ops"
+summary: >-
+  The data-movement op family the decode loop lives on, with semantics and one
+  load-bearing call site each: Concat (re-materializes the KV cache every
+  decode step), Split (un-fuses the QKV projection after one GEMM, GQA-aware
+  sizes), Transpose (the {0,2,1,3} head layout flip, a materialized copy not a
+  stride trick), Tile (GQA head replication in replicate_heads), Slide
+  (sliding-window attention dropping the oldest timestep), Gather (embedding
+  lookup and beam/batch reordering), and metadata-only Squeeze/Unsqueeze.
+  Metal relevance: Concat/Split/Slide route to the generic
+  ct2_strided_copy_bytes kernel keeping KV-cache append off the CPU, Gather
+  has a kernel for the axis==batch_dims case, but Transpose and Tile have no
+  Metal routing and run the CPU reference on unified memory.
+---
 
 The data-movement family the decode loop lives on: Concat, Split, Transpose, Tile, Slide,
 Gather, Squeeze/Unsqueeze. A map of semantics + the one load-bearing call site each — not an

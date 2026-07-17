@@ -1,4 +1,20 @@
-# MSL address spaces (device / constant / threadgroup / thread)
+---
+title: "MSL address spaces (device / constant / threadgroup / thread)"
+summary: >-
+  Explains MSL's four address spaces from spec sections 4-4.8: device
+  (runtime-sized readable/writable buffer memory for all tensor data),
+  constant (read-only, required for program-scope variables initialized with
+  core constant expressions and used for uniform broadcast data), thread (per-
+  thread, invisible to others), and threadgroup (shared within one
+  threadgroup, tile-backed and faster than device). It stresses that address
+  spaces are disjoint with no casts, every pointer declaration and every
+  kernel pointer argument must name one explicitly, and device memory has only
+  threadgroup coherence by default. For the CT2 backend it maps the
+  kernels_msl.h signature pattern: arrays are device, host scalars arrive as
+  constant T& via setBytes, tuning constants like CT2_GEMM_S8_BM are program-
+  scope constant, GEMM tiles are threadgroup, and char4 element
+  reinterpretation within a space is legal.
+---
 
 Source (Apple): Metal Shading Language Specification, §4–4.4.1, §4.8 (v4.1, 2026-06-04).
 PDF: <https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf>

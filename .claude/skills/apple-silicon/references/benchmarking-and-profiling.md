@@ -1,4 +1,20 @@
-# Benchmarking & profiling the Metal backend (the methodology that found every win)
+---
+title: "Benchmarking & profiling the Metal backend (the methodology that found every win)"
+summary: >-
+  Documents the Metal-backend benchmarking harness that produced every number
+  in METAL_BENCHMARKS.md: the DISABLED_Benchmark* Google Test cases in
+  tests/metal_test.cc (BenchmarkGemm, BenchmarkGemmEncode, BenchmarkReduction,
+  BenchmarkAddRMSNorm, BenchmarkTranslation, BenchmarkLLM), built Release with
+  tests on and run via --gtest_also_run_disabled_tests. Its centerpiece is the
+  probe-isolation trick in BenchmarkGemmEncode, which separates per-op encode
+  cost from GPU round-trip by encoding N ops and flushing once, isolating the
+  ~0.042 ms encode floor (cut to ~0.031 ms by the MPS-object cache). Covers
+  the time_ms warmup primitive, the CT2_LLM_MODEL/CT2_LLM_PROFILE env knobs,
+  ENABLE_PROFILING with PROFILE() scopes, and the cautionary tale where
+  profiling exposed the elementwise Add op exploding 27x in fp16. Its
+  discipline rules are always-Release-always-warm, isolate the decode/prefill
+  regime, and pick the right probe for the question.
+---
 
 Every number in `METAL_BENCHMARKS.md` — and every conclusion in
 `dispatch-overlap-and-perf-model.md` — came out of this harness. The repeated lesson of

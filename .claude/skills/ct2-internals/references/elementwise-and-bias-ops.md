@@ -1,4 +1,20 @@
-# Elementwise & Bias Ops
+---
+title: "Elementwise & Bias Ops"
+summary: >-
+  The binary elementwise family (Add, Sub, Mul, Min, Max) and BiasAdd in CT2:
+  broadcasting is scalar-or-nothing (b is a scalar or a and b are flat same-
+  size arrays — no numpy broadcasting, no shape checks, so mismatches read out
+  of bounds), header-resident compute, DEVICE_AND_TYPE_DISPATCH over any
+  dtype, and safe aliasing/in-place used pervasively for residual adds.
+  BiasAdd is the axis-broadcast and fusion carrier (add_batch_broadcast for
+  axis -1, add_block_broadcast for Conv1D's axis -2, then residual and
+  activation), glued behind linear layers by apply_bias_and_activation.
+  Structural call sites include post-attention/post-FFN residual adds, the
+  SwiGLU/GeGLU gate Mul, and scalar Muls. On Metal, Add/Mul/BiasAdd are
+  graduated (fused bias+residual+activation) while Sub/Min/Max fall to the CPU
+  reference; wiring one GPU Add kernel gave 27x on that op and flipped fp16
+  prefill to a win.
+---
 
 The binary elementwise family (Add, Sub, Mul, Min/Max) and BiasAdd: what broadcasting CT2
 actually supports (NOT numpy), in-place/aliasing patterns, and where these ops sit

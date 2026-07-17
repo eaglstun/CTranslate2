@@ -1,4 +1,19 @@
-# MSL math functions & numeric parity (for norm / reduction kernels)
+---
+title: "MSL math functions & numeric parity (for norm / reduction kernels)"
+summary: >-
+  MSL math functions and the fast-versus-precise numeric-parity trap for norm
+  and reduction kernels (RMSNorm, LayerNorm, softmax), sourced from the Metal
+  Shading Language Specification's §6.6 and the §8.4 ULP/relative-error
+  tables. It catalogs the <metal_math> function set (notably no erf/erfc,
+  which forces an Abramowitz-Stegun approximation for exact GELU) and explains
+  that fast math is the default: under it sqrt is implemented as x*rsqrt(x)
+  and division is only 2.5-ulp accurate, so bit-parity with a CPU is not
+  guaranteed. Two rules the CT2 kernels bake in: use 1.0f/sqrt(...) not rsqrt
+  (double-rounding matches the CPU), and beware FMA contraction fusing a*b+c.
+  The parity lever is setting MTLMathModeSafe or metal::precise:: in
+  ensure_library, since src/metal/device.mm compiles the kernel library with
+  default fast math.
+---
 
 Source: Metal Shading Language Specification (vendored at
 `../sources/Metal-Shading-Language-Specification.pdf`), §6.6 Math Functions,

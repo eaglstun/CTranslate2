@@ -1,4 +1,20 @@
-# Sampling & TopK (BestSampler/RandomSampler, TopPMask, temperature, RNG)
+---
+title: "Sampling & TopK (BestSampler/RandomSampler, TopPMask, temperature, RNG)"
+summary: >-
+  Details how a row of scores becomes a token id: the Sampler strategy
+  interface (outputs must be CPU tensors), make_sampler choosing BestSampler
+  (greedy TopK when sampling_topk==1 or temperature==0) versus RandomSampler,
+  and RandomSampler's ordered filtering pipeline (top-k restrict, temperature
+  Mul on log-scores, TopPMask nucleus masking, then SoftMax+Multinomial or
+  LogSoftMax+GumbelMax draw, then Gather remap). It documents the TopK op
+  (axis=-1 only, returns values and int32 indices, ties by index), TopPMask as
+  a shape-preserving masking op with a CUDA class cap of 8192 (256x32)
+  enforced by validate_decoding_options, and the RNG story: a thread_local
+  mt19937 lazily seeded per thread, with CPU and CUDA using entirely different
+  RNGs so outputs are not cross-device reproducible. On Metal, sampling runs
+  the CPU reference over unified memory after a synchronize flush, matching
+  CPU determinism exactly.
+---
 
 CT2-architecture reference: how a row of (log-)scores becomes a token id. The decode loop
 (`decoding-loop-and-beam-search.md`) hands the sampler post-processor logits; everything

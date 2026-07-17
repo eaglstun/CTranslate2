@@ -1,4 +1,21 @@
-# int8 GEMM kernel design — hand-tiled int8×int8→int32 (`ct2_gemm_s8`)
+---
+title: "int8 GEMM kernel design — hand-tiled int8×int8→int32 (`ct2_gemm_s8`)"
+summary: >-
+  Details ct2_gemm_s8, the hand-tiled int8xint8->int32 GEMM in kernels_msl.h,
+  needed because Apple GPUs have no integer matrix units
+  (MPSMatrixMultiplication is float-only, simdgroup_matrix has no int8 type).
+  A 16x16 threadgroup computes a 64x64 C-tile with k in 32-deep depth-major
+  chunks staged through threadgroup memory, each thread holding a 4x4 int4
+  micro-tile; transposes resolve at tile-load time, edges zero-pad on load and
+  guard only on store, and the inner loop reinterprets tiles as char4 widened
+  to int4 for 4 MACs per op. int32 accumulation is bit-exact at any real depth
+  (products bounded by 127*127<2^14), proven by
+  Int8GemmSaturatedAccumulatorExact past fp32's 2^24 ceiling. The gemm.cc
+  routing guard requires beta==0, no u8-shift compensation, and integral
+  alpha. The tiled kernel is ALU-bound ~2.4 T-MAC/s (structurally ~3-5x slower
+  than MPS fp16) and is now the fallback since the Metal-4 MPP matmul2d path
+  ties MPS fp16, but int8 still wins peak RSS (-42%).
+---
 
 Source: `src/metal/kernels/kernels_msl.h` (kernel `ct2_gemm_s8`, lines ~744–829),
 `src/metal/primitives.mm` (`metal::gemm_s8`, ~586–673), `src/ops/gemm.cc` (INT8 routing,

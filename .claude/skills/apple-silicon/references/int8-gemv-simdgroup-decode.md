@@ -1,4 +1,20 @@
-# int8 SIMD-group GEMV for decode (`ct2_gemv_s8`) — the small-m fast path
+---
+title: "int8 SIMD-group GEMV for decode (`ct2_gemv_s8`) — the small-m fast path"
+summary: >-
+  Details the ct2_gemv_s8 int8 SIMD-group GEMV kernel (kernels_msl.h ~831-869,
+  routed in primitives.mm gemm_s8 ~603) that serves the small-m decode regime
+  where the 64x64 tiled kernel wastes 63/64 of its A-tile at m=1. Specifies
+  the exact routing gate (!transpose_a, transpose_b, m<=8, k and both leading
+  dims and both MTLBuffer offsets 4-byte aligned so operands reinterpret as
+  char4*), and the design of one SIMD-group per output element with lanes
+  striding the k axis in char4 steps folded by a single simd_sum, dispatched
+  as 8 SIMD-groups per threadgroup on a (ceil(n/8), m) grid. Explains why the
+  regime is bandwidth-bound (weight matrix B dominates, int8 moves half the
+  bytes of fp16) so int8 beats every float path here, with the Qwen2.5 lm_head
+  at m=1 sustaining ~280 GB/s and hitting 0.49 ms versus fp16's 0.84 ms
+  (1.7x). Notes int8 still trails fp16 ~15% e2e per token due to added
+  quantize/dequant launches, and the m=3 deep-accumulator exactness oracle.
+---
 
 Source: `src/metal/kernels/kernels_msl.h` (kernel `ct2_gemv_s8`, lines ~831–869),
 `src/metal/primitives.mm` (routing + dispatch inside `metal::gemm_s8`, ~599–636),

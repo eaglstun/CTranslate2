@@ -1,4 +1,21 @@
-# Logits processing (LogitsProcessor, DisableTokens, Whisper's timestamp rules)
+---
+title: "Logits processing (LogitsProcessor, DisableTokens, Whisper's timestamp rules)"
+summary: >-
+  CT2's logit-manipulation machinery between the decoder forward and token
+  selection: the thin LogitsProcessor abstract class (apply with
+  step/logits/DisableTokens/sequences/batch_offset/prefix, plus apply_first
+  ordering and get_batch_index/get_sample_begin helpers), and the
+  DisableTokens collector that writes float lowest directly for CPU logits but
+  accumulates a sorted-unique flat-index list flushed by one indexed_fill for
+  non-CPU devices. It enumerates the concrete processors (RepetitionPenalty,
+  NoRepeatNgram, SuppressTokens, SuppressTokensBegin, SuppressSequences),
+  notes min_length is a separate apply_min_length free function, and gives the
+  make_logits_processors ordering. Whisper is the heaviest consumer:
+  suppress_tokens/suppress_blank map to disable_ids, GetNoSpeechProbs is a
+  read-only apply_first processor, and ApplyTimestampRules does real per-step
+  LogSoftMax tensor math. On Metal, DisableTokens takes the non-CPU
+  indexed_fill branch and ApplyTimestampRules upcasts fp16 log-probs to fp32.
+---
 
 CT2-architecture reference: the logit-manipulation machinery that runs between the
 decoder forward and token selection. The hook point is in the decode loop

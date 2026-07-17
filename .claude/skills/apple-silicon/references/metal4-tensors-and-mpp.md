@@ -1,4 +1,19 @@
-# Metal 4 tensors & Metal Performance Primitives — is there a supported int8 matmul?
+---
+title: "Metal 4 tensors & Metal Performance Primitives — is there a supported int8 matmul?"
+summary: >-
+  Answers whether Metal 4 offers a supported int8 matmul: yes — MSL §7.2.1
+  Table 7.3 lists char×char→int as a base-Metal-4 matmul2d combination, CT2's
+  exact int8×int8→int32 contract. It covers the host-side MTLTensor (zero-copy
+  MTLBuffer wrapping), MTLTensorDataType (int8/int4/fp8/bfloat16 storage), the
+  MTL4MachineLearningCommandEncoder network surface, and the shader-side MSL
+  tensor/cooperative_tensor types plus mpp::tensor_ops::matmul2d with dynamic
+  K and SIMD-group execution scopes. The Task-6 measurement (M4 Max,
+  2026-06-11) resolved the open questions: char×char→int matmul2d ties MPS
+  fp16 GEMM (2048³ 1.51ms, 4.8× over the hand-tiled kernel), is int32-bit-
+  exact, compiles via newLibraryWithSource, but requires 2 cooperating SIMD-
+  groups (not Apple's 4) and exact-type dispatch. It is the documented
+  successor to the hand-tiled ct2_gemm_s8.
+---
 
 Sources: Apple DocC JSON (fetched 2026-06-11):
 <https://developer.apple.com/documentation/metal/mtltensor>,

@@ -1,4 +1,17 @@
-# Logging & environment configuration
+---
+title: "Logging & environment configuration"
+summary: >-
+  The operational debugging card for CTranslate2's spdlog wiring and complete
+  environment-variable surface. It maps LogLevel to CT2_VERBOSE (−3 Off to 3
+  Trace, default 0 Warning) and what each level adds — level 1 Info prints the
+  load banner and log_system_config CPU/ISA/GEMM/GPU dump, the first thing to
+  enable when a backend picks the wrong path. It gives the grepped, verified
+  env-var table (CT2_FORCE_CPU_ISA, CT2_USE_MKL, CT2_PACKED_GEMM,
+  OMP_NUM_THREADS, the CT2_CUDA_* family) and debunks folklore vars that don't
+  exist (no CT2_USE_EXPERIMENTAL_PACKED_GEMM, no CT2_CPU_BACKEND). Crucially
+  the Metal backend has zero env vars — only MSL threadgroup-size constants —
+  and the removed CT2_NO_MPS_ACT bisection switch should not be cited as live.
+---
 
 The operational debugging card: spdlog wiring, what each `CT2_VERBOSE` level prints, and
 the complete (grepped, verified) environment-variable surface of the engine.

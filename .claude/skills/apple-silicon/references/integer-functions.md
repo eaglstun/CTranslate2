@@ -1,4 +1,19 @@
-# Integer functions
+---
+title: "Integer functions"
+summary: >-
+  The MSL <metal_integer> standard-library functions from spec section 6.4
+  Table 6.2: saturating arithmetic (addsat, subsat, madsat), averaging (hadd,
+  rhadd), high-half products (mulhi, madhi), 24-bit mul24/mad24,
+  min3/max3/median3, and bit manipulation (clz, ctz, popcount, reverse_bits,
+  rotate, extract_bits, insert_bits). Its distinctive angle is an honest
+  inventory of what an int8 GEMM kernel actually needs, concluding almost none
+  of the table: plain int/int4 multiply-accumulate suffices for
+  int8xint8->int32 because a char product is at most 16129 and int32
+  accumulates ~2^17 terms before overflow. Explains why mul24/mad24,
+  saturating helpers, clamp, and mulhi/madhi are irrelevant to CT2's float-
+  side dequant and bit-exact contract, tying back to ct2_gemm_s8 and
+  ct2_gemv_s8 in kernels_msl.h.
+---
 
 Source (Apple): Metal Shading Language Specification, §6.4, Table 6.2 (v4.1, 2026-06-04).
 PDF: <https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf>

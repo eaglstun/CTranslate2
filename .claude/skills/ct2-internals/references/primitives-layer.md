@@ -1,4 +1,22 @@
-# The primitives<Device> layer
+---
+title: "The primitives<Device> layer"
+summary: >-
+  The primitives<Device> layer — CT2's BLAS-like substrate below ops and above
+  ISA kernels, a single templated struct of static methods operating on raw
+  typed pointers plus element counts (no StorageView, shapes, or dtype
+  dispatch). It surveys the families (fill/copy/convert, reductions,
+  elementwise arithmetic with batch/depth/block broadcast, decoding helpers
+  like penalize_previous_tokens, transpose, math/activations, and
+  gemm/gemm_batch_strided/quantized-GEMM support), notes what is NOT here
+  (softmax, norms, topk, quantize live as ops), and the
+  cross_device_primitives::copy. It explains the specialization-per-device-
+  with-explicit-instantiation pattern (the reason adding a Device to
+  DEVICE_DISPATCH is expensive), the CPU two-level split into parallel_for +
+  CPU_ISA_DISPATCH + kernels.cc, and CUDA's Thrust+cuBLAS implementation.
+  Crucially there is no primitives<Device::METAL>: METAL_DEVICE_CASE binds
+  D=CPU so generic dispatch runs CPU primitives on Metal-resident pointers,
+  while GPU compute enters via separate metal:: entry points.
+---
 
 The "basic vector/matrix functions over raw arrays" level of the engine — below ops, above ISA kernels. CLAUDE.md names it; this documents it.
 

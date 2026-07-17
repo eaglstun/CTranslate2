@@ -1,4 +1,23 @@
-# The CUDA Backend's Structure
+---
+title: "The CUDA Backend's Structure"
+summary: >-
+  Maps the CUDA backend as the reference template the int8-Metal work
+  mirrored: shared infrastructure lives in src/cuda/ (primitives.cu with the
+  cuBLAS GEMM wrappers, utils.{h,cc} for error macros and capability queries
+  like gpu_supports_int8, allocator.cc, helpers.h, random/stubs) while per-op
+  kernels sit next to each op in src/ops/<op>_gpu.cu, not in src/cuda/. The
+  concurrency model is one CUDA stream plus one cuBLAS/cuDNN handle per host
+  thread, created lazily and cached thread_local, giving each replica worker
+  an independent stream. The cuBLAS GEMM wrappers have one explicit
+  specialization per dtype combo (Sgemm for f32; cublasGemmEx for f16/bf16 and
+  the int8->int32 path with CUDA_R_8I operands, CUDA_R_32I output,
+  CUBLAS_COMPUTE_32I, alpha/beta truncated to int32), all swapping A/B because
+  cuBLAS is column-major. It contrasts CUDA participating as a real
+  DEVICE_CASE (via DEVICE_DISPATCH/DEVICE_AND_FLOAT_DISPATCH) against Metal's
+  operator()-level targeted routing, and lists the three properties Metal
+  mirrored: signed int8 no shift compensation, int32 accumulation with integer
+  alpha/beta, and dequantize-after as a separate fused epilogue.
+---
 
 The CUDA backend as the reference implementation for any new GPU backend — what lives
 where, the handle/stream model, the cuBLAS GEMM wrapping, and how its op files plug into
