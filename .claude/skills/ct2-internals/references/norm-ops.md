@@ -1,4 +1,20 @@
-# Norm Ops (LayerNorm & RMSNorm)
+---
+title: "Norm Ops (LayerNorm & RMSNorm)"
+summary: >-
+  The two normalization ops, ops::LayerNorm and ops::RMSNorm, at the
+  numerics/contract level. LayerNorm (axis, epsilon) has affine/no-affine/in-
+  place forms, an outer/axis/inner decomposition, a last-axis fast path
+  computing var = max(sum_sq/n - mean^2, 0) clamped with epsilon inside the
+  sqrt, and a general multi-axis form. RMSNorm is gamma-only, always last
+  axis, inv_rms = 1/sqrt(mean(x^2)+epsilon) with epsilon INSIDE the sqrt (the
+  parity-bug hotspot), and a use_residual flag applying (1+gamma) for Gemma at
+  runtime rather than baking it into stored weights. Explains that
+  layers::LayerNorm picks RMSNorm vs LayerNorm by whether a beta variable
+  exists, sets epsilon defaults (1e-5 with beta, 1e-6 without), and exposes a
+  fused add_norm. Notes the Metal-only fused
+  ct2_add_rms_norm/ct2_add_layer_norm kernels measured 1.2-1.9x faster.
+semantic_id: "yhiiwo-rqm3SE__tTmFrvaEip2-Ti64jCoXqGpyP9PYmH3kD56uJViU7egW_g91aoG0gm8xyxa5-9IzpBrRtpw"
+---
 
 The two normalization ops: constructor params, gamma/beta vs gamma-only, the general
 multi-axis LayerNorm form, RMSNorm's formula (epsilon is INSIDE the sqrt — parity bugs live

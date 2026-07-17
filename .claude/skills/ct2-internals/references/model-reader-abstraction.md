@@ -1,4 +1,25 @@
-# ModelReader abstraction (directory vs in-memory models)
+---
+title: "ModelReader abstraction (directory vs in-memory models)"
+summary: >-
+  Explains the ModelReader interface that decouples model loading from the
+  filesystem: two virtuals, get_model_id (a display string for logs/errors)
+  and get_file(filename, binary) returning an istream or nullptr, wrapped by
+  the throwing get_required_file. Contrasts the two implementations,
+  ModelFileReader (joins model_dir + filename, opens an ifstream) and
+  ModelMemoryReader (user register_file with each file's bytes as a
+  std::string, served zero-copy via an imemstream, ignoring the binary flag)
+  for the embed-a-model-in-your-app path. Traces exactly what Model::load
+  requests and in what order: the sole required model.bin, optional
+  config.json, then the model->initialize hook where LM/Whisper request a
+  vocabulary (json-then-txt fallback) and seq2seq requests
+  shared/target/source vocabularies plus optional vmap.txt, noting there is no
+  directory-listing API, only point lookups, which is what makes the map-
+  backed memory reader sufficient. Covers the Python files= constructor arg
+  building a ModelMemoryReader, contains_model, and the Metal note that reader
+  choice is device-orthogonal (bytes land in host memory then move to
+  Device::METAL) with a ~2x peak-RSS cost during load.
+semantic_id: "SRwh9g2qo23Tkf1ZBvEtPQcop2qSiqoBClVuiqz-4t6rC7gV9as8Wi9wfg0tyo5Zrm00uc3z3Y5e_y-xx7Rqow"
+---
 
 How `Model::load` gets its bytes: the small `ModelReader` interface that decouples
 loading from the filesystem, its two implementations (`ModelFileReader`,

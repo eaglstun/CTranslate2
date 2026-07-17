@@ -1,4 +1,20 @@
-# The Dense Layer & Quantized Linear Orchestration
+---
+title: "The Dense Layer & Quantized Linear Orchestration"
+summary: >-
+  How layers::Dense orchestrates the choice between a plain GEMM and the
+  quantize-to-gemm-to-dequantize pipeline entirely from loaded model state,
+  with zero device- or backend-specific code. The constructor resolves members
+  by scope-name lookup (_weight, _bias, _qscale from weight_scale, _qzero for
+  AWQ, _u8_shift_compensation only on MKL/DNNL CPU) and sets the single
+  selector _quantized_gemm from a dtype test (INT16 or INT8 weight).
+  operator() is a three-way branch: the quantized path runs _quantize_op then
+  int32 _gemm_op then a fused _dequantize_op epilogue carrying bias and
+  activation, the _qzero+_qscale path is AWQ (asymmetric packed int4), and the
+  else path is one Gemm. The doc's proof of the layering is that the entire
+  int8-Metal project changed this file zero lines — all Metal int8 work landed
+  in the quantize/dequantize/gemm op routing and src/metal/.
+semantic_id: "yh4ixo-Pu22SQfxNRl0pvac8p6uTz64hCpV6m_CdwuYiAfkPpaeLUocwOhwPrsQahC0k2sx7lY569RyihuxtoQ"
+---
 
 How `layers::Dense` decides between plain GEMM and the quantize→gemm→dequantize pipeline,
 entirely from model state, with zero device- or backend-specific code.

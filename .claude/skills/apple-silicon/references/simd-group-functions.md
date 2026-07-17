@@ -1,4 +1,22 @@
-# SIMD-group (and quad-group) functions
+---
+title: "SIMD-group (and quad-group) functions"
+summary: >-
+  SIMD-group and quad-group functions (<metal_simdgroup>, MSL spec
+  §6.10.2-6.10.3) that let 32-lane lockstep threads share data without
+  threadgroup memory or barriers: reductions
+  (simd_sum/product/min/max/and/or/xor and prefix scans), shuffle/broadcast
+  permutes (simd_shuffle_down, simd_shuffle_xor butterfly), and vote/ballot
+  (simd_all/any/ballot/is_first), plus the position attributes
+  threads_per_simdgroup, thread_index_in_simdgroup, and
+  simdgroup_index_in_threadgroup, and the canonical two-level threadgroup
+  reduction. The load-bearing CT2 fact: rewriting the row-reduction kernels
+  ct2_softmax, ct2_rms_norm, ct2_layer_norm from 256-thread tree reductions to
+  a simd_sum-based version was tried, measured, and REVERTED (2026-06-09)
+  because these kernels are memory-bound, so the SIMD version only added
+  barriers and a cross-group bounce; don't re-chase it without fusing the
+  reduction into an adjacent op.
+semantic_id: "yhwU5onqom3Tw-39S30pHYVgo2-TyqulCk-mOZSn5N4uHemHX6erXw85eF17iwUahCEs291zjR5-9a6TxjT_pA"
+---
 
 Source (Apple): Metal Shading Language Specification, §6.10.2–6.10.3 (v4.1, 2026-06-04).
 PDF: <https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf>

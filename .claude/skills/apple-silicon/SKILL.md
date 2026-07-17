@@ -413,6 +413,22 @@ are easy to get wrong from memory.**
 
 ## Conventions for this skill
 
+- **Add references freely — growing this corpus is the point, not a chore.** When you
+  dig out a reusable, source-cited Metal fact that isn't already covered here, write it
+  up as a new `references/<topic>.md` rather than leaving the finding buried in a
+  conversation. A new sibling doc is cheap and compounds; a lost finding gets
+  re-derived. Same discipline as the backend itself: pull on demand, but once pulled,
+  keep it.
+- **Every reference carries YAML frontmatter and no body `# H1`.** The first line is
+  `---`, then a quoted `title` and a one-paragraph `summary`, then `---`, then the
+  source-cited notes. The title lives in frontmatter only (do not also put an `# H1` at
+  the top of the body). The `summary` is what the semantic-ID search embeds, so make it
+  one dense, discriminating paragraph — name the specific APIs, kernels, and files the
+  doc is really about, not generic filler.
+- **After writing a reference, stamp its semantic ID:**
+  `python3 .claude/scripts/stamp_semantic_ids.py .claude/skills/apple-silicon/references/<topic>.md`
+  (run with no path to re-mint the whole corpus, `--health` to check bit health). This
+  fills in the `semantic_id` frontmatter field that powers "find related".
 - Each reference cites its Apple source URL at the top and ends with a
   `### Relevance to the CT2 Metal backend` section connecting the API to specific files.
 - Keep SKILL.md lean: one-line pointers only. Detail lives in `references/`.

@@ -1,4 +1,20 @@
-# GPU capture & shader validation (catching the misplaced pointer)
+---
+title: "GPU capture & shader validation (catching the misplaced pointer)"
+summary: >-
+  Covers the Metal debugging tools for catching a misplaced pointer:
+  programmatic GPU capture into a .gputrace via MTLCaptureManager.shared(),
+  MTLCaptureDescriptor, and MTLCaptureScope (enabled by MTL_CAPTURE_ENABLED=1
+  or Info.plist MetalCaptureEnabled), plus Metal Shader Validation
+  (MTL_SHADER_VALIDATION=1 and its GLOBAL_MEMORY, THREADGROUP_MEMORY,
+  FAIL_MODE, ABORT_ON_FAULT, and per-pipeline ENABLE_PIPELINES env vars) which
+  detects out-of-bounds and non-resident accesses on any binary without
+  source, and API validation via MTL_DEBUG_LAYER=1. It gives a one-command
+  validated ctranslate2_test recipe and, honestly, notes what these would NOT
+  catch — the Gemma2 tanh NaN was numeric, requiring CPU-ref bisection
+  instead, since MTL_SHADER_VALIDATION_NAN_INF only applies to render-pipeline
+  vertex interpolants.
+semantic_id: "zl6w1gnOu20Dwf190N0bHKfsoaOTm6uhChVyj9ScwN4aq20EZfetmA8wbp0k66cL0Cso2t37lY5O_Y3vRvxvoA"
+---
 
 Sources (Apple Developer Documentation, fetched via DocC JSON, 2026-06-11):
 

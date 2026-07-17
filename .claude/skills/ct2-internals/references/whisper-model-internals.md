@@ -1,4 +1,25 @@
-# Whisper model internals (encoder stem, prompt structure, align/DTW, no_speech)
+---
+title: "Whisper model internals (encoder stem, prompt structure, align/DTW, no_speech)"
+summary: >-
+  Maps the Whisper model surface (encode/generate/detect_language/align) in
+  src/models/whisper.cc and src/layers/whisper.cc. The encoder stem is two
+  Conv1D+GELU layers (conv2 stride-2 gives the x2 turning 3000 mel frames into
+  1500) then transpose, a learned PositionEmbedding, plain pre-norm
+  transformer layers, and a final LayerNorm; the mel-input contract (80 or 128
+  mels, 30s window) is derived from weights, and is_encoded lets callers pass
+  either mel features or a prior encode() output. generate follows OpenAI's
+  prompt layout (previous text, <|startoftranscript|>, language, task,
+  optional <|notimestamps|>, forced text), splitting into a one-batch
+  forward_prompt prefill (KV cache fill, no logits) plus the decode loop,
+  appending ApplyTimestampRules when timestamps are implied. It also covers
+  no_speech probability, detect_language (single decoder step, softmax over
+  lang_ids), and align (forced decoding plus cross-attention DTW using config
+  alignment_heads, MedianFilter, Mean over heads, then CPU negative_dtw). On
+  Metal the conv stem is a CPU-reference island needing the conv-weight float
+  guard, and ApplyTimestampRules carries the file's one CT2_WITH_METAL
+  fp16->fp32 upcast branch.
+semantic_id: "yxyy8omKt23Tgb1dQukrvCcuJ-PRzrspCldgGpS8wl5qK9kEjb8sX484Wo0u6-ZapG0s8t7ylY5-_YyTjnBtpw"
+---
 
 CT2-architecture reference: the Whisper model surface — `encode` / `generate` /
 `detect_language` / `align` — and what each actually computes. The decode driver it

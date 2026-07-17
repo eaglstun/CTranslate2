@@ -1,4 +1,28 @@
-# StorageView — the core data structure
+---
+title: "StorageView — the core data structure"
+summary: >-
+  The definitive reference for StorageView, CTranslate2's light row-major
+  buffer wrapper that adds shape but no math semantics, with dtype and device
+  resolved at runtime (plain _dtype/_device fields, not template params) so
+  heterogeneous storages share a collection and the header stays flag-free.
+  Details the members (typeless void* _data, the _allocated_size capacity vs
+  _size logical-count split, Shape as vector<dim_t>) and semantics: reshape
+  reinterprets shape without reallocating while resize/reserve is the single
+  allocation point encoding the reuse policy (shrinking or re-fitting never
+  reallocates, growing past capacity frees and reallocates uninitialized).
+  Covers data access with ASSERT_DTYPE guards,
+  copy_from/operator=/shallow_copy/view (non-owning views leave _allocator
+  null so owns_data is false), to(Device)/to(DataType) conversions, lazy
+  allocator binding, and the performance contract that clear() preserves
+  capacity and caching allocators recycle buffers so allocation churn is a
+  bug. Explains why runtime dtype/device forces the
+  TYPE_DISPATCH/DEVICE_DISPATCH macros, and the Metal note that a Metal
+  StorageView's buffer is a shared-storage MTLBuffer whose CPU-addressable
+  contents pointer (unified memory) satisfies the same pointer-based contract,
+  with allocation routed to the real Metal allocator via early-returns in
+  allocator.cc/devices.cc.
+semantic_id: "yx4w1whOom3TEX1NQ9VpvIMYp2vbzqthThVyE4z85s4GK_UXd-dtWoVwas11voYZhA0suu_5zY5-vYyrTvxvoQ"
+---
 
 Source:
 

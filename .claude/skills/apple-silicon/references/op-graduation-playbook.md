@@ -1,4 +1,19 @@
-# Op-graduation playbook (CT2 → Metal GPU kernel)
+---
+title: "Op-graduation playbook (CT2 → Metal GPU kernel)"
+summary: >-
+  The CT2-specific procedure for moving an op from the Device::METAL-to-CPU-
+  reference binding onto a real Metal GPU kernel: the route-don't-switch model
+  (an if device==METAL branch calling a metal:: entry point before generic
+  dispatch, never a real DEVICE_CASE), and the four steps — write the
+  templated MSL kernel in kernels_msl.h, add fp32/fp16 metal:: entry points
+  resolving StorageView pointers via buffer_and_offset, route at operator()
+  level, verify parity. It details the two fp16 paths (real half kernel vs
+  direct-instantiation bypass, the latter requiring metal::synchronize() first
+  to avoid reading stale GPU data). It catalogs MSL landmines (no erf, lazy
+  library compilation, use 1/sqrt not rsqrt, bind every buffer, host scalars
+  by value) and states sampling/Conv1D aren't worth a kernel.
+semantic_id: "zlyQxouus-3Tg_19Quk7PIc4q2uT6qsxDldwG5S94v4KDGkHt-8vDw2wWxVXr48QzC0k2sfxhY5e_Y3357VvoA"
+---
 
 How to correctly move a CTranslate2 op from the CPU-reference binding onto a real Metal
 GPU kernel — the repo procedure and its sharp edges. Unlike the other references here,

@@ -1,4 +1,25 @@
-# The HuggingFace converter: loader registry & ModelLoader anatomy
+---
+title: "The HuggingFace converter: loader registry & ModelLoader anatomy"
+summary: >-
+  Dissects the internal architecture of
+  python/ctranslate2/converters/transformers.py — the HuggingFace converter
+  every new model goes through — centered on the _MODEL_LOADERS registry keyed
+  by HF config class name (register_loader('Qwen2Config'), 42 stateless
+  singleton loaders instantiated at import), resolved by
+  TransformersConverter._load via AutoConfig with a hard error on a miss and
+  no generic fallback (the version-coupling stale-install trap that bites
+  Metal work since its runtime is always a local build). It lays out the
+  ModelLoader contract and hook order (get_model_spec, set_config,
+  get_vocabulary, set_vocabulary), architecture_name, the
+  set_layer_norm/set_linear/set_embeddings weight idioms, get_rotary_params
+  RoPE parsing, and the module-level activation/rope-scaling/quantization
+  translation tables. Walks Qwen2Loader end-to-end (GQA num_heads_kv
+  normalization, TransformerDecoderModelSpec.from_config keywords,
+  set_decoder's per-layer q/k/v fuse_linear and gate/up/down mapping with
+  delattr+gc.collect to keep peak RSS at one model), and notes adding a llama-
+  family variant is often one new subclassed @register_loader class.
+semantic_id: "S17y9wu-su3T4X19RvnLnSc8pyuSxKoDClVtHo68xt4qKWgEYb8tWg25eg0t740Rrm0k-837jY5uvQybxrzvsw"
+---
 
 The internal architecture of `python/ctranslate2/converters/transformers.py` — the
 converter every new HF model goes through. `specs-and-converters.md` owns the overall

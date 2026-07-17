@@ -1,4 +1,20 @@
-# SoftMax & Masking
+---
+title: "SoftMax & Masking"
+summary: >-
+  The SoftMax/LogSoftMax op in CT2: always reducing over the last dimension
+  (every other dim collapsed into batch_size, no axis parameter), four
+  overloads including in-place and two masked forms, and float-only generic
+  dispatch (DEVICE_AND_FLOAT_DISPATCH) with fp16/bf16 only via CUDA or the
+  Metal route. The lengths mask is not an additive -inf matrix but an int32
+  tensor of one valid length per softmax row, where positions past the length
+  are written as exactly 0 and zero-length rows skipped; lengths come from
+  AttentionLayer::prepare_length_mask (causal capping plus decode step
+  offset). It documents the max-subtract numerical pattern (log path never
+  materializing exponentials) and the key fact that the 1/sqrt(d) query scale
+  is folded into the QK^T MatMul alpha, not into SoftMax. On Metal, fp32/fp16
+  route to metal::softmax with the masked contract holding bit-for-bit.
+semantic_id: "yho49g-vom2Tk23dzt0rvadyoyuTzqonChWynJSPxN4GD_kHRa8t349wah0-q6UIhC0gksz5nY5-9ZW3jrStpw"
+---
 
 The SoftMax/LogSoftMax op: last-dim semantics, the optional lengths mask (how padding is
 excluded), in-place forms, and where attention folds in the 1/√d scale (spoiler: into the

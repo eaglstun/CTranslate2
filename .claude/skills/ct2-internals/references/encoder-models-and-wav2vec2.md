@@ -1,4 +1,25 @@
-# Encoder-only models & the audio encoders (Encoder, EncoderReplica, wav2vec2)
+---
+title: "Encoder-only models & the audio encoders (Encoder, EncoderReplica, wav2vec2)"
+summary: >-
+  Covers CTranslate2's encoder-only surface: the text Encoder pool
+  (ReplicaPool<SequenceEncoderReplica>) with its forward_batch_async family
+  returning EncoderForwardOutput (last_hidden_state plus optional
+  pooler_output), the overload funnel through make_sequence_inputs and the on-
+  device synchronize_stream return, and EncoderReplica::forward_impl handling
+  token_type_ids segment embeddings and the CLS-token Gather + pooler Dense
+  with default-Tanh activation. Names the targeting specs/converters
+  (TransformerEncoderModelSpec; DistilBert/Bert/XLMRoberta/Roberta/Camembert
+  loaders, the BERT/XLM-R/sentence-transformers family). Then details the two
+  standalone audio encoders: Wav2Vec2, a CTC speech encoder detecting upgraded
+  vs old converter generations, embedding a Conv1D feature extractor
+  (LayerNorm conv layers, stride-5 plus stride-2 stack), grouped positional
+  conv, 24 transformer layers, and optional CTC lm_head; and Wav2Vec2Bert with
+  a Conformer body (half-step-FFN sandwich around self-attention and a
+  depthwise-conv module, Swish/ReLU activations) plus downsampling adapter
+  layers. Flags that the wav2vec2 family is the only non-Whisper Conv1D user,
+  hitting the Metal CPU-reference/fp32-upcast island.
+semantic_id: "S1xw8gnKt23S4619RugLvDc8o2vRxqsCCtTiGpacwN6mHVwt7_utX286Xl0Mqu0Kgi0sUsXyzY5-rQzfDnB_pA"
+---
 
 CT2-architecture reference: the encoder-only surface — the `Encoder` pool for BERT-style
 text encoders and the two standalone audio encoders (`Wav2Vec2`, `Wav2Vec2Bert`). The

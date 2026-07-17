@@ -1,4 +1,19 @@
-# MPSMatrixSoftMax / MPSMatrixLogSoftMax / MPSMatrixFindTopK
+---
+title: "MPSMatrixSoftMax / MPSMatrixLogSoftMax / MPSMatrixFindTopK"
+summary: >-
+  MPSMatrixSoftMax, MPSMatrixLogSoftMax, and MPSMatrixFindTopK: row-wise
+  softmax/log-softmax over an MPSMatrix (fp32 or fp16, matching input/result,
+  no masking or per-row lengths, always reduces the full sourceColumns width)
+  and per-row top-k with the hard constraint numberOfTopKValues <= 16, UInt32
+  index matrix, and indexOffset. The key CT2 finding is that the backend
+  deliberately does NOT use MPS softmax because its custom
+  ct2_softmax_float/ct2_softmax_half kernels take a lengths buffer for masked
+  attention softmax that MPS cannot express, whereas TopK/sampling (currently
+  CPU-reference) is the real graduation opportunity, gated by the k<=16 limit:
+  greedy and beam sizes fit but k=40-style top-k sampling does not. Lays out
+  the four-step graduation path including the UInt32-to-int32 index shim.
+semantic_id: "wByQ5gmru22Sw-3dztkLvCdmJ2uTirs1ChfmmJStwP4MD_kGRa-t34807g1_r60IjmUkm8z52Y5u_YTxjrRvpQ"
+---
 
 Sources: https://developer.apple.com/documentation/metalperformanceshaders/mpsmatrixsoftmax,
 https://developer.apple.com/documentation/metalperformanceshaders/mpsmatrixlogsoftmax,

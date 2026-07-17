@@ -1,4 +1,20 @@
-# Compute-encoder dispatch semantics — serial vs concurrent, and the backend's one-op encoders
+---
+title: "Compute-encoder dispatch semantics — serial vs concurrent, and the backend's one-op encoders"
+summary: >-
+  Metal compute-encoder dispatch semantics: MTLDispatchType.serial (the
+  default from makeComputeCommandEncoder) guarantees dispatch N's memory is
+  visible to N+1 with no barriers, while .concurrent flips the contract and
+  forces you to insert memoryBarrier(scope:)/memoryBarrier(resources:) for any
+  write racing another access. It covers automatic hazard tracking between
+  encoders for tracked resources (the heap-suballocation untracked trap)
+  versus the manual barriers concurrent passes require. The CT2 backend uses
+  one-op-per-command-buffer serial encoders (~17 sites in
+  src/metal/primitives.mm), so .concurrent has nothing to act on today; a
+  fused multi-op encoder is the only lever that would unlock it, but that re-
+  serializes CPU/GPU overlap — the same idea that lost 23% on prefill when
+  command-buffer reuse was tried.
+semantic_id: "yh4gxgnPo23Q0S19RuspHIVII2uTyqsBClXmC5a9wtYaHXsF76cpX4-4XF1ly8Y6Qissst_zzY5WtezrRrRs4A"
+---
 
 Sources: https://developer.apple.com/documentation/metal/mtlcommandbuffer/makecomputecommandencoder(dispatchtype:),
 https://developer.apple.com/documentation/metal/mtldispatchtype/serial,

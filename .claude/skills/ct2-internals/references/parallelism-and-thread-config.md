@@ -1,4 +1,20 @@
-# Parallelism & thread configuration
+---
+title: "Parallelism & thread configuration"
+summary: >-
+  Explains CPU-side threading: the two levels inter_threads (replica copies
+  processing different batches via CT2's std::thread ThreadPool) versus
+  intra_threads (compute threads inside one op via parallel_for), which
+  multiply. It covers the two intra-op runtimes selected by OPENMP_RUNTIME
+  (Intel OpenMP versus the vendored BS_thread_pool when _OPENMP is undefined,
+  which is what Apple Silicon Metal builds use with OPENMP_RUNTIME=NONE), the
+  GRAIN_SIZE=32768 default and nesting rules, and the thread-count plumbing
+  from Python args down through set_num_threads (default min(4,hw) favoring
+  replica parallelism) enforced per-worker in ReplicaWorker::initialize. The
+  replica ThreadPool mechanics cover backpressure at max_queued_batches,
+  worker lifecycle, the idle() synchronize_stream hook (metal::synchronize on
+  Metal), and Linux-only core pinning.
+semantic_id: "yhywwoovs-3SkbldVvFvMKEBp0OTi6uhClXzGJSU4uzLTXkE94eHHg94ek1vqo8ZJC4k2szzzZ4a_Wb7Bnz-ow"
+---
 
 CPU-side threading: the two parallel runtimes, `parallel_for`, and how `inter_threads`/`intra_threads` flow from the public API down to the loops. Practical focus: which knob does what, where it's enforced.
 

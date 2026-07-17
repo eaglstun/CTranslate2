@@ -1,4 +1,23 @@
-# Replica pools & the async API
+---
+title: "Replica pools & the async API"
+summary: >-
+  Explains the top of the engine stack: how Translator, Generator, Encoder,
+  and Whisper are all instantiations of the header-only ReplicaPool<Replica>
+  template (each a thin veneer whose replica provides create_from_model), and
+  how ModelLoader produces device_indices.size() times num_replicas_per_device
+  replicas where a model is loaded once then copy_to'd per device and all
+  replicas on one device share the same shared_ptr<const Model> weight
+  storage. Details the Job/JobQueue/Worker mechanics on ThreadPool
+  (backpressure via a bounded queue, the idle()/before_wait hook, thread_local
+  local_worker), and the async contract through BatchJob:
+  post/post_batch/post_examples return futures, exceptions propagate via
+  exception_ptr set on every promise rather than crashing workers, and token
+  streaming is the callback field on options structs (greedy only), not a
+  separate API. Notes pool lifecycle (detach_models/set_models, clear_cache)
+  and that on single-device Metal all replicas share one const Model so int8
+  weights are resident once regardless of inter_threads.
+semantic_id: "Sxyywolrt22T0X19VktJHac4J-uTxosBCtV5CYycwszuDlkO5a_tXi84Xk0vq89apGssut_zzZxa_Syrhnzo4w"
+---
 
 The top of the engine stack: how `Translator`/`Generator`/`Encoder`/`Whisper` are all the
 same `ReplicaPool<Replica>` template, how work becomes `Job`s on a `ThreadPool`, and the

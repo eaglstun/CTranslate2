@@ -1,4 +1,20 @@
-# Position encodings (sinusoidal/learned, ALiBi, relative bias, RoPE variants)
+---
+title: "Position encodings (sinusoidal/learned, ALiBi, relative bias, RoPE variants)"
+summary: >-
+  The CT2 position-encoding family tree and where each comes from in the spec:
+  additive PositionEncoder (learned PositionEmbedding from a model variable vs
+  computed SinusoidalPositionEncoder starting at position 1), ALiBi (geometric
+  per-head slopes added after the QK^T GEMM before softmax via ops::AlibiAdd),
+  and the two distinct relative schemes — T5-style learned
+  relative_attention_bias (log-bucketed, cached across layers) and Shaw-style
+  relative_position_keys/values. It tabulates the RoPE variant/option surface
+  (rotary_dim, interleave, base, and the Linear/Su/Llama3 scaling types with
+  longrope mapping to Su). The additive encoder is built only when attention
+  has no positional mechanism of its own. Metal note: RoPE has a native kernel
+  with scaling variants upstream of it, while additive/ALiBi/relative-bias
+  additions run the CPU reference over unified memory.
+semantic_id: "il6mxglrm23Twz19R-0LXCc4o2-Ty6sDCpZ2G9zv5s42K3kHb6etX404Wk0_i49Tsi8sc9z7h456_Q2LBLhvpQ"
+---
 
 CT2-architecture reference: the position-encoding family. `attention-and-kv-cache.md`
 owns _where RoPE is applied_ in the attention data flow (the `offset` trick); this file

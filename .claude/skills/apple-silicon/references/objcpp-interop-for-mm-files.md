@@ -1,4 +1,21 @@
-# Objective-C++ interop survival card (editing the `.mm` files)
+---
+title: "Objective-C++ interop survival card (editing the `.mm` files)"
+summary: >-
+  A survival card for editing the src/metal/*.mm Objective-C++ files, whose
+  single most important local fact is that the backend is compiled WITHOUT ARC
+  (manual retain/release / MRC — no -fobjc-arc anywhere, OBJCXX standard 17 in
+  CMakeLists.txt). It explains the header-split discipline (pure-C++ utils.h
+  and primitives.h safe from any .cc, .mm-only device.h importing
+  Metal/Metal.h) that keeps ObjC types out of C++ translation units by passing
+  raw float pointers mapped back via buffer_and_offset(), and the three MRC
+  ownership patterns used: ObjC id members in a C++ class (MetalContext), a
+  raw-object side table (allocator.mm), and a thread-local +1 cache (gemm.mm).
+  Adds the MRC ownership cheat-sheet (alloc/new/copy give +1 owned vs
+  autoreleased +0), bridge-cast reference, and two silent-failure rules —
+  messaging nil is a no-op returning zero, and NSError** out-params signal
+  failure via the return value not the error object.
+semantic_id: "ihoz5o8urm2X07t9Q3krPYE4J-ORyqsxDlNwnpCdxv4aHVgH57YrW6_4Xk0uq4wYbisk-sz5jY5-ve2Tjr7tpg"
+---
 
 How this repo actually mixes Objective-C and C++ in `src/metal/`, plus the language
 rules a contributor needs before touching a `.mm` file. **The single most important

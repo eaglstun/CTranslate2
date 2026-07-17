@@ -1,4 +1,20 @@
-# Atomic functions, memory order, and fences
+---
+title: "Atomic functions, memory order, and fences"
+summary: >-
+  Metal Shading Language atomic functions, memory order, and fences (MSL spec
+  2.6 and 6.16): which types support atomic<T> (int/uint/bool/ulong/float,
+  with no atomic_char/short/half/bfloat and float restricted to device-memory
+  add/sub), the atomic_store/load/exchange/compare_exchange_weak/fetch_KEY
+  function surface, and why memory_order_relaxed is effectively the only
+  usable order until the Metal 4.1 floor. It explains atomic_thread_fence,
+  thread_scope, and that nothing barriers across threadgroups within a
+  dispatch except relaxed device atomics or splitting into two dispatches. The
+  CT2 relevance is that kernels_msl.h is atomics-free by design (each
+  threadgroup owns its output tile), so adding an atomic is a design change; a
+  split-k int8 GEMM could safely use atomic_fetch_add on int32 partials while
+  a float split-k would not be bit-exact.
+semantic_id: "yhm85o7uo33Sg6z9w_1pvYUgN2vTi6MhDlf2GZSfweQqDXkHXKcvXi94SB1_p48Kgi0Eks_7hZ5utW2jBvxroA"
+---
 
 Source (Apple): Metal Shading Language Specification, §2.6 (atomic types) and §6.16
 (functions, memory order, thread scope, fences) (v4.1, 2026-06-04).

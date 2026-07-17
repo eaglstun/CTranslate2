@@ -1,4 +1,22 @@
-# The C++ Test Suite — Structure & Device Parameterization
+---
+title: "The C++ Test Suite — Structure & Device Parameterization"
+summary: >-
+  Describes the single ctranslate2_test Google Test binary (built from
+  ops_test.cc, layers_test.cc, model_test.cc, translator_test.cc,
+  metal_test.cc, etc., run with the data dir as argv[1]) and how one test body
+  runs across CPU/CUDA/METAL via value-parameterized suites rather than typed
+  tests: OpDeviceTest over Device and OpDeviceFPTest over FloatType (a struct
+  bundling device, dtype, and tolerance). INSTANTIATE_TEST_SUITE_P at each
+  file's bottom decides what runs — CPU always at 1e-5, CUDA under ifdef with
+  fp16 1e-2 and bf16 4e-2, Metal fp32-only at 1e-5 — with no skip macros
+  beyond compile-time ifdef and runtime GTEST_SKIP (e.g. MetalTest skips when
+  no GPU). Covers expect_storage_eq copying both views to CPU (cheap under
+  Metal unified memory) before asserting shape/dtype and element-wise
+  tolerance, the tiny aren-transliteration test models with i16/i8 quantized
+  variants feeding ModelVariantTest, and a five-step recipe for a device-
+  covering op test.
+semantic_id: "zhg41o7vmm2Xgf1pQnkpPaEwo-uRiqMiClXyGpS1w94YB-kO56ctjg-yeh0mr58KgG0o-tfwlY5etYS1Rq5_4Q"
+---
 
 How `tests/` is organized, how one test body runs on CPU/CUDA/METAL, and the tolerance
 conventions — the oracle that any backend or quantization change lives and dies by.

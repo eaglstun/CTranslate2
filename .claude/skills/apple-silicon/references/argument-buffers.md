@@ -1,4 +1,19 @@
-# Argument buffers — many resources behind one binding
+---
+title: "Argument buffers — many resources behind one binding"
+summary: >-
+  Argument buffers pack references to many Metal resources (buffers, textures,
+  samplers, inline constants) behind a single setBuffer binding, declared MSL-
+  side as a struct. The doc explains the two-tier model: Tier 2 (all Apple
+  Silicon) matches C-struct layout so you write MTLBuffer.gpuAddress directly
+  with no MTLArgumentEncoder, while Tier 1/older OSes require an argument
+  encoder and immutable CPU-accessible buffers. It covers residency via
+  useResource and useHeap since argument-buffer-referenced resources are
+  invisible to Metal's hazard tracking. The key CT2 verdict: the backend does
+  not use them and does not need to (kernels bind at most ~6 buffers), and
+  they would only matter paired with an indirect-command-buffer decode-
+  batching redesign — measure first.
+semantic_id: "zx4w1gmvqu3Tg-19BvkLPQMkJWuTy6qBChc2mJS_4t4qCHkOVcct3QX8H11f7KYYvA8sAMzp9Z5K_Qyvxvx_oQ"
+---
 
 Sources: https://developer.apple.com/documentation/metal/mtlargumentencoder,
 https://developer.apple.com/documentation/metal/improving-cpu-performance-by-using-argument-buffers,

@@ -1,4 +1,21 @@
-# Vocabulary & the tokenization boundary
+---
+title: "Vocabulary & the tokenization boundary"
+summary: >-
+  The tokenization boundary: CT2 never tokenizes text — translate/generate
+  take and return token strings, and the only string↔id conversion is
+  Vocabulary::to_ids/to_tokens (subword tokenization is the caller's job). It
+  covers the bidirectional Vocabulary index (VocabularyInfo special tokens
+  sourced from config.json, from_text_file/from_json_file construction, unk
+  appended if missing, to_id allow_unk fallback, the max_length truncation
+  that preserves trailing EOS), how seq2seq/LM/Whisper models ship vocab
+  files, and the optional VocabularyMap target-vocab restriction (vmap.txt
+  n-gram rules). update_output_layer physically shrinks the output projection
+  to |candidates| rows via select_weights with −1e10 pad bias. Metal notes:
+  consumers tokenize in Python so the backend never sees strings, and an
+  active vmap re-Gathers the output projection per batch, defeating cached MPS
+  GEMM descriptors.
+semantic_id: "zRyU953rpy2Tw21JxuEPtLcso_nTTqshClUhS5S0tlciDXgUB-8tX685eok9qodaiC0MsM_7jY5etZ2Sh7D9pg"
+---
 
 What the engine knows about text: an indexed token list and an optional target-vocab
 restriction map. **CT2 never tokenizes text** — `translate_batch`/`generate_batch` take

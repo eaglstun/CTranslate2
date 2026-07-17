@@ -1,4 +1,20 @@
-# Batching & length sorting (rebatch_input, batch_type, Padder, order restoration)
+---
+title: "Batching & length sorting (rebatch_input, batch_type, Padder, order restoration)"
+summary: >-
+  How CT2 turns user inputs into padding-efficient batches and restores
+  original order, driven by rebatch_input in src/batch_reader.cc, which sorts
+  examples longest-to-shortest so similar lengths batch together and finished
+  rows drop off the array end during decode. Defines Example/Batch/BatchType
+  (Examples vs Tokens counting), the variable- vs fixed-increment fill
+  strategies, and the readers (TextLineReader, VectorReader,
+  ParallelBatchReader). Order restoration is free because
+  ReplicaPool::post_examples pre-creates one promise per example in input
+  order and moves them into batches by example_index. Details the Padder,
+  which removes padding around position-independent FFN/projection regions via
+  ops::Gather index maps, gated by allow_padding_removal (CPU always, GPU only
+  when compute_type is not FLOAT16), so Metal fp16 runs keep padded shapes.
+semantic_id: "yx644wvqo32Sw7x9hth_nYcoonuTxKuzDhV9mvS9Zs5uLrmO16cpXy84fskSx49oBw088sz5zY56vaS3BrLtoQ"
+---
 
 CT2-architecture reference: how user inputs become efficiently-shaped batches and how
 results come back in the original order. The driver is padding waste: a batch runs at the

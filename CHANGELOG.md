@@ -2,7 +2,13 @@
 
 ### New features
 
+* **Apple Silicon Metal GPU backend (`-DWITH_METAL=ON`)** — experimental, fork-only, AI-assisted. A full encoder-decoder transformer runs end-to-end on Apple Silicon GPUs in FP32, FP16, and a native INT8 path (int8×int8→int32 GEMM/GEMV plus a Metal-4 MPP `matmul2d` prefill path), with output verified against the CPU backend by the existing op/layer suites parameterized over `Device::METAL`. Design, milestones, and gotchas in [`METAL_BACKEND.md`](METAL_BACKEND.md); benchmarks in [`METAL_BENCHMARKS.md`](METAL_BENCHMARKS.md).
+* **Fused single-launch decode-attention kernel on Metal (M16)** — collapses q·Kᵀ → softmax → ·V into one GPU launch per layer for the `q_len ≤ 8` decode regime, replacing a per-batch-index MPS GEMM encode loop. Metal now beats the Accelerate CPU backend in every measured regime (Qwen2.5-0.5B bs=8 ~2.8× over CPU).
+* **Env-gated Metal profiling** — `CT2_AUTO_PROFILE=cpu|metal` auto-initializes the built-in profiler at library load and dumps to stderr at exit (works through the Python wheel with no rebuild; `cpu` gives async-preserving wall-clock attribution, `metal` gives per-op GPU-inclusive times), and `CT2_METAL_STATS=1` reports command-buffer / flush / stalled-flush counters.
+
 ### Fixes and improvements
+
+* **Whisper beam-search decode on Metal is now ~4× faster than CPU (M17)** — large-v3 FP16 went from 2× slower than CPU to 6.4× realtime (transcript byte-identical to CPU in FP16/FP32/INT8). The gap was two unaccelerated kernels, not the per-op encode floor: `Transpose` had no Metal routing and fell to the CPU reference, forcing a full GPU-queue drain per call (~128×/token in beam decode, since beam folds into the head-split time axis), and `gather` copied each ~1 MB KV-cache-reorder row with a single thread. Fixed with a native element-width `Transpose` kernel and a row-parallel `gather`.
 
 ## [v4.8.1](https://github.com/OpenNMT/CTranslate2/releases/tag/v4.8.1) (2026-07-03)
 

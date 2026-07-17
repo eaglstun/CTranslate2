@@ -1,4 +1,20 @@
-# Metal compute kernels & dispatch
+---
+title: "Metal compute kernels & dispatch"
+summary: >-
+  The lifecycle of a Metal compute kernel from MSL source to GPU execution:
+  the once-per-process object pipeline (MTLDevice, MTLLibrary/MTLFunction, the
+  expensive-to-build MTLComputePipelineState, MTLCommandQueue) and the per-
+  dispatch command-buffer/encoder/setBuffer/dispatchThreads sequence. It
+  explains mandatory MSL address-space keywords, thread_position_in_grid
+  replacing host loops, and threadgroup/grid sizing via
+  maxTotalThreadsPerThreadgroup and threadExecutionWidth (32 on Apple GPUs).
+  It contrasts dispatchThreads (non-uniform, no bounds check) against
+  dispatchThreadgroups (manual, needs a guard). CT2 notes: device.mm runs
+  steps 1-4 but compiles MSL at runtime lazily via newLibraryWithSource, hand
+  kernels use dispatchThreads (hence no OOB guards), and every referenced
+  buffer must be bound (the dummy-buffer gotcha).
+semantic_id: "yByQxguus-3Wk-19SvkpPKdoqWsTyqupCpXyOpS_4t4qTHkGla8vFY32eR1vj48aQC8s8szzxZ5etSzjBvU7oQ"
+---
 
 Sources (Apple Developer Documentation):
 

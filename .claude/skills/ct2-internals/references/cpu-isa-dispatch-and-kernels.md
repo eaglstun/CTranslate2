@@ -1,4 +1,20 @@
-# CPU ISA dispatch & vectorized kernels
+---
+title: "CPU ISA dispatch & vectorized kernels"
+summary: >-
+  How one CT2 binary carries several ISA variants of the CPU inner loops and
+  selects at runtime: the arch-gated CpuIsa enum (AVX/AVX2/AVX512 on x86, NEON
+  on arm64, plus GENERIC), get_cpu_isa()/init_isa() with the CT2_FORCE_CPU_ISA
+  override and the rule that AVX512 is never auto-selected, and cpu_features-
+  based detection. It explains the build mechanic where ENABLE_CPU_DISPATCH
+  copies kernels.cc into per-ISA object files with -mavx2/-mavx512f/-DUSE_NEON
+  flags, each compiling one TARGET_ISA explicit-specialization so symbols
+  don't collide, and the CPU_ISA_DISPATCH constexpr-binding switch. Also
+  covers the Vec<T,ISA> SIMD abstraction (width 4/8/16) and the separate
+  get_gemm_backend priority ladder (MKL/DNNL/Accelerate/OpenBLAS/Ruy). For
+  Metal: Apple Silicon builds get NEON+GENERIC, and CPU-reference ops on
+  Metal-resident data run these NEON kernels.
+semantic_id: "2lo45ouusm3Sg619SskpHA88oWnTwqsjChf3m5zF5tQSaXkE5Y-NX6-8XlQnqr0qwC0s2s76hY5qpb7zBrR9pA"
+---
 
 How one binary carries several ISA variants of the CPU inner loops (AVX/AVX2/AVX512/NEON) and picks one at runtime.
 

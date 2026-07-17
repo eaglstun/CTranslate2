@@ -1,4 +1,23 @@
-# Embeddings & the Output Projection
+---
+title: "Embeddings & the Output Projection"
+summary: >-
+  Covers the two bookends of a forward pass: the Embeddings layer (token ids
+  to vectors) and the Dense output projection (hidden states to logits).
+  Embeddings holds a {scope}/weight table plus optional weight_scale and an
+  ops::Gather; a float table is a single gather while an int8/int16 table
+  gathers int8 rows then runs ops::Dequantize (the table can legitimately be
+  int8, cutting RSS). The sqrt(d) scale is NOT in the layer;
+  build_embeddings_scale resolves it and it is applied as a plain ops::Mul
+  after lookup. The projection is an ordinary Dense from scope
+  decoder/projection running its GEMM with trans_b=true, storing weight as
+  [vocab, depth] exactly like the embedding table, so weight tying is pure
+  serialization (converter aliases the tensors, register_variable_alias shares
+  one shared_ptr) with no runtime transpose. Vocabulary restriction hooks the
+  projection via update_output_layer/select_weights, gathering selected rows
+  into _partial buffers with -1e10 bias on padding rows. On Metal the
+  projection is the dominant decode-step GEMM driving the small-m GEMV win.
+semantic_id: "yhmy4g1Csm2Tge1txv0JvCc8p2_TjrolSlRqG9S95t4sL_gG56-pXi85bp376-QOKG8Eu8VblYx65Qy_jvDvpQ"
+---
 
 The two bookends of every forward pass: token ids → vectors (`Embeddings`, a Gather) and
 hidden states → logits (`Dense` as the projection), plus weight tying and the

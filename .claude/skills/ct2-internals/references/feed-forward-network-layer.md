@@ -1,4 +1,20 @@
-# The FeedForwardNetwork layer (standard FFN vs GLU, shapes, fusion hooks)
+---
+title: "The FeedForwardNetwork layer (standard FFN vs GLU, shapes, fusion hooks)"
+summary: >-
+  The layers::FeedForwardNetwork transformer sublayer: its members
+  (_layer_norm, _pre_norm, _activation_type, _ff1 carrying a fused activation
+  pointer, optional _ff1_noact GLU up-projection, _ff2 marked is_layer_out),
+  and how one operator() body serves both standard FFN =
+  linear_1(act(linear_0(x))) and GLU FFN = linear_1(act(linear_0(x))
+  elementwise-times linear_0_noact(x)). The distinctive facts: the presence of
+  the linear_0_noact weight IS the GLU flag (no runtime ffn_glu attribute),
+  SwiGLU vs GeGLU is just which ActivationType rides _ff1, the residual is
+  fused into _ff2 only when the FFN owns its norm, and gate+up are never fused
+  at conversion unlike QKV. Includes shapes (d_ff inner), the
+  FeedForwardSpec(glu=) converter mappings (llama gate/up/down proj, T5
+  gated), and notes GLU means three GEMMs per layer.
+semantic_id: "yx7j8g_OkmXR4f39RuELnac4peuTzqOBChUyDrYN5NwoFHkHTaetHgc7egUtj-0epD0E2s5zlY5-rIzPBvzs4A"
+---
 
 CT2-architecture reference: `layers::FeedForwardNetwork` — the one transformer sublayer
 not owned by another ref. Scope is the block structure and the gate+up representation;

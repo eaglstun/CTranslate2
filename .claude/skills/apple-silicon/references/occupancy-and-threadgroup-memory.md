@@ -1,4 +1,20 @@
-# Compute occupancy & threadgroup memory (the API-side levers)
+---
+title: "Compute occupancy & threadgroup memory (the API-side levers)"
+summary: >-
+  Covers the API-side levers bounding concurrent occupancy on Apple GPUs: per-
+  PSO properties maxTotalThreadsPerThreadgroup (kernel-dependent, first thing
+  to check on low occupancy or dispatch asserts), threadExecutionWidth (32),
+  and staticThreadgroupMemoryLength, plus the descriptor hint
+  maxTotalThreadsPerThreadgroup / max_total_threads_per_threadgroup attribute
+  that the backend does not use. It gives the threadgroup-memory budget (32 KB
+  measured on M4 Max via maxThreadgroupMemoryLength) and the occupancy
+  arithmetic. A table tallies per-group threadgroup bytes for the real
+  kernels: ct2_gemm_s8 uses 4096 B (12.5% of budget, register-limited), the
+  softmax/norm/quantize reductions use ~1-2 KB with 256-thread groups, and
+  ct2_gemv_s8 uses zero threadgroup memory by design. Ends with a low-
+  occupancy triage checklist.
+semantic_id: "ykwRxguvk33Sk-1tQv0LPYdapWPTy6slCpW3GpSH4M4OL28W96ctnI1-fl1viwY6oC8s-8xTjZ5u9YyTxvUupQ"
+---
 
 What bounds how many threads/threadgroups actually run concurrently, and the properties
 to check when a kernel "mysteriously" underperforms. Companion to

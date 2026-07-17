@@ -1,4 +1,21 @@
-# Tensor parallelism (WITH_TENSOR_PARALLEL: NCCL + MPI weight sharding)
+---
+title: "Tensor parallelism (WITH_TENSOR_PARALLEL: NCCL + MPI weight sharding)"
+summary: >-
+  The WITH_TENSOR_PARALLEL multi-GPU mode (NCCL + MPI, CUDA-only, inert
+  otherwise): one process per rank under mpirun, with ScopedMPISetter running
+  MPI_Init and lazy ncclCommInitRank, and getNRanks/getCurRank returning 1/0
+  single-GPU. Explains Megatron-style weight sharding at load via
+  classify_variable and split_variables: column-parallel splits output dim 0
+  (fused QKV attention linear_0, FFN linear_0/linear_0_noact, interleave-aware
+  with an MQA variant) and row-parallel splits input dim 1 (output
+  projections, producing rank-partial sums). The two collectives are
+  ops::ReduceAll(SUM) after each row-parallel projection and ops::GatherAll in
+  the lm-head Dense. Lists the contributor invariants (name-based
+  classification, reduce points, getNRanks-divided head geometry) and notes it
+  is entirely dead code on Metal, where parallelism means replicas, not
+  sharding.
+semantic_id: "ylw24govq22Uw_ldRv0LFaUgpyuTyrunDhfzmpTd5u-qTckGaacp20eYek1vq-QKBC8s2tzzpY4-9A-nzrz-pQ"
+---
 
 CT2-architecture reference, survey level: the multi-GPU tensor-parallel mode — what
 exists, where it lives, and what a change to Dense/attention/FFN must not break. CUDA-only

@@ -1,4 +1,23 @@
-# Runtime MSL compilation & pipeline creation
+---
+title: "Runtime MSL compilation & pipeline creation"
+summary: >-
+  Runtime MSL compilation and compute-pipeline creation:
+  makeLibrary(source:options:) compiling an MSL source string (which can only
+  import the Metal default library), MTLCompileOptions with mathMode
+  (.fast/.relaxed default on Apple silicon/.safe) replacing fastMathEnabled,
+  languageVersion and preprocessorMacros, and function constants
+  ([[function_constant]] + MTLFunctionConstantValues) versus preprocessor
+  macros for building pipeline variants with back-end dead-code elimination.
+  It covers makeComputePipelineState cost (front-load it), threadExecutionWidt
+  h/maxTotalThreadsPerThreadgroup/staticThreadgroupMemoryLength, the ~493 ms
+  first-MPS-GEMM warmup, and why precompiled .metallib was measured dead
+  (macOS caches compiled shaders by source hash, so runtime compile is ~0.5 ms
+  after the first ~123 ms cold run). CT2 compiles via device.mm
+  ensure_library() with default options and caches pipelines in a name-keyed
+  map; function constants are the clean lever for int8 GEMM tile-size
+  variants.
+semantic_id: "yhyw14muu03U0elNSvULPIc4L-OTzqmhCtdyGpSf486oTV0WtKevXg92fx83r74JCi8kutzrlYZ69ay3Rvl9pQ"
+---
 
 Sources (Apple Developer Documentation, fetched via DocC JSON, 2026-06-11):
 

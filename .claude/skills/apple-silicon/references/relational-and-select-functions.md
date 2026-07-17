@@ -1,4 +1,22 @@
-# Relational functions (isnan, isinf, select, all/any, signbit)
+---
+title: "Relational functions (isnan, isinf, select, all/any, signbit)"
+summary: >-
+  Reference for MSL's <metal_relational> functions from Metal Shading Language
+  Specification section 6.5: the classification predicates isnan, isinf,
+  isfinite, isnormal, isordered/isunordered, signbit, the componentwise
+  vector-collapse all/any and not, and the branchless select(a, b, c) whose
+  true condition picks the second argument b. The critical caveat is that fast
+  math (-fmetal-math-mode=fast, this backend's default) enables No-NaNs/No-
+  INFs, letting the compiler legally fold an in-kernel isnan(x) to false, so
+  reliable NaN checks require compiling that source with mathMode relaxed/safe
+  or a math_mode(safe) pragma. Ties to the CT2 backend by noting the Gemma2
+  pad-collapse bug was found with host-side NaN tripwires (where std::isnan is
+  reliable) not in-kernel, landing on Metal tanh overflow fixed by clamp in
+  ct2_tanh_safe. Distinguishes componentwise all/any from the cross-lane
+  simd_all/simd_any votes, and notes no relational function is currently
+  called in kernels_msl.h, making this a debugging-session card.
+semantic_id: "yhg0xg0ur-2T0ex5TtkJFYksNyvTyiMRDldqGpSeUtQqH3EHZL8rXg84el0sr68ajC8sms37hY5e_C6Pxugmow"
+---
 
 Source (Apple): Metal Shading Language Specification, §6.5 (v4.1, 2026-06-04); fast-math
 semantics from §1.6.3.

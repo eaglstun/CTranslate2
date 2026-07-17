@@ -1,4 +1,26 @@
-# Python bindings architecture
+---
+title: "Python bindings architecture"
+summary: >-
+  Describes how python/cpp/*.cc wraps the C++ engine into the ctranslate2
+  package: the PYBIND11_MODULE(_ext) layout with free functions
+  (contains_model, get_supported_compute_types via mayiuse_* queries) and per-
+  translation-unit register_* calls, and the ReplicaPoolHelper<T> base shared
+  by every *Wrapper that maps inter_threads/intra_threads/compute_type ctor
+  args and guards load/unload with a shared_mutex. Details the three GIL-
+  release points (gil_scoped_release call_guard on blocking methods,
+  AsyncResult<T>::result() releasing only around future.get, and load/unload
+  in ctor/dtor) plus the streaming callback re-acquiring the GIL. Covers async
+  results via maybe_wait_on_futures and declare_async_wrapper, and the
+  StorageView bridge exposing __array_interface__/__cuda_array_interface__
+  (array-interface protocols, not DLPack) for zero-copy views, noting the
+  Python Device enum has only cpu and cuda so Metal is addressed by
+  device="metal" string. Explains the build-linkage reality that _ext links
+  the prebuilt installed libctranslate2 (so a C++ change needs both a library
+  rebuild and a wheel rebuild, with rpath/CTRANSLATE2_ROOT and the downstream
+  install_name_tool rig), which bites hardest for Metal kernel changes hidden
+  in the dylib.
+semantic_id: "yxqx0o2qs-22gy1tRnUrvKcho-vTxatBChVmG5Ttx3aMLXgXocc9nye4-lk9rg8hJikk-sf5jY56tYUvxjx9sw"
+---
 
 How `python/cpp/*.cc` wraps the C++ engine into the `ctranslate2` package: module layout,
 the GIL discipline, the async-result wrappers, the StorageView array-interface bridge, and

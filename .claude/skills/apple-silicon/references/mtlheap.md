@@ -1,4 +1,21 @@
-# MTLHeap — suballocating resources from one memory pool
+---
+title: "MTLHeap — suballocating resources from one memory pool"
+summary: >-
+  MTLHeap, a memory pool for suballocating buffers/textures from one driver-
+  level allocation, all sharing the heap's storage and cache mode. Covers
+  MTLHeapDescriptor, the automatic/placement/sparse heap types, makeBuffer
+  with and without caller-chosen offset, sizing via heapBufferSizeAndAlign and
+  maxAvailableSize, and explicit memory reuse through makeAliasable (automatic
+  heaps only, one-way, UB to touch afterward, requires MTLFence/MTLEvent
+  ordering). Stresses that heaps are untracked by default (hazardTrackingMode
+  .default equals untracked), unlike individual resources. For CT2 this is
+  unused: MetalAllocator::allocate makes one Shared MTLBuffer per call with no
+  pooling, and adopting a heap would force fence discipline across
+  primitives.mm/gemm.mm; presented as an evaluated future option triggered
+  only if profiling shows allocation churn in the decode loop's transient
+  activations.
+semantic_id: "yV0Awhgvou3Kk31NS98LnCc4pSNTyouzCpXgCIS19swIGfsG7YdtWg8wKF03rqcJHjuMtt3ZiZ5-9Y6rRvZ9oA"
+---
 
 Sources: https://developer.apple.com/documentation/metal/mtlheap,
 https://developer.apple.com/documentation/metal/mtlheapdescriptor,

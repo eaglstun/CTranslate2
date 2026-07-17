@@ -1,4 +1,18 @@
-# MSL data types, sizes & alignment
+---
+title: "MSL data types, sizes & alignment"
+summary: >-
+  The MSL scalar, vector, packed, and matrix type tables with their sizes and
+  alignments (from spec §2.1-2.5): the unsupported types (double, long long),
+  the bfloat 3.1+ and half formats, and the trap that 3-component vectors pad
+  to 4 (float3 is 16/16, char3 is 4/4) while packed_ variants stay byte-tight.
+  It covers host/device struct-sharing gotchas — a C++ float[3] is not an MSL
+  float3, simd::float3 is 16 bytes and matches. CT2 relevance: char4/int4 are
+  the int8 GEMM/GEMV workhorses (4-byte aligned tile loads), half kernels
+  accumulate in float because half's 11-bit significand can't survive a
+  256-wide sum, simdgroup_matrix has no int8 element type (why int8 GEMM is
+  hand-tiled not WMMA), and scalar params are 4-byte types passed by setBytes.
+semantic_id: "yhww4o-Ou33Twe1dz8kLvYc4p0uT2rGhDlVmGPyX5twcHfkPS66tXS99Kh0_664IBE0s28z7AY5-_I-VzvQvpA"
+---
 
 Source (Apple): Metal Shading Language Specification, §2.1–2.5 (v4.1, 2026-06-04).
 PDF: <https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf>

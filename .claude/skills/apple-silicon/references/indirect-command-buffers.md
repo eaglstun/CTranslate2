@@ -1,4 +1,21 @@
-# Indirect command buffers (ICBs) for compute — and the honest decode-loop verdict
+---
+title: "Indirect command buffers (ICBs) for compute — and the honest decode-loop verdict"
+summary: >-
+  Indirect command buffers (MTLIndirectCommandBuffer) hold reusable compute
+  commands encoded once on CPU or GPU and replayed via
+  executeCommandsInBuffer, configured through
+  MTLIndirectCommandBufferDescriptor (concurrentDispatch types,
+  inheritPipelineState/Buffers, maxKernelBufferBindCount). The doc documents
+  the MTLIndirectComputeCommand surface and its constraints — no setBytes
+  (scalars must live in buffers), no textures, barriers only where you
+  setBarrier — plus the simpler dispatchThreadgroups(indirectBuffer:) for
+  dynamic grids. Its central argument is a CT2 verdict: ICBs are the tempting
+  answer to the per-op encode floor but likely lose like command-buffer reuse
+  did (−6% bs8 decode, −23% prefill from killed CPU/GPU overlap), shapes
+  change every decode step, and MPS GEMMs can't participate; the honest first
+  step is indirect dispatch plus op fusion, not ICBs.
+semantic_id: "yh0xxglvqm3Uk219xukpnYMgrXvTy6uZDpdiEpT35taqOXkG56ctXw08esXv7w47pAcgsu3x5Y5-9W__TrQrpA"
+---
 
 Sources (Apple DocC JSON, fetched 2026-06-11):
 <https://developer.apple.com/documentation/metal/mtlindirectcommandbuffer>,

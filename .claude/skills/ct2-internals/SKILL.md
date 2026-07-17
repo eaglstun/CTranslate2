@@ -402,6 +402,10 @@ silently un-quantizes), and the Python surface (`get_supported_compute_types`,
 
 ## Conventions for this skill
 
+- **Add references freely — growing this corpus is the point, not a chore.** When you
+  trace out how a subsystem actually works and it isn't already covered here, write it up
+  as a new `references/<topic>.md` rather than leaving the finding buried in a
+  conversation. A new sibling doc is cheap and compounds; a lost finding gets re-derived.
 - Each reference cites the source files it was built from (top of file) with real
   file:line references, and ends with a brief `### Relevance to the Metal backend`
   bridge to the `apple-silicon` skill where the two intersect.
@@ -410,6 +414,16 @@ silently un-quantizes), and the Python surface (`get_supported_compute_types`,
   acting on a citation. Prefer quoting a function/macro name the reader can find.
 - To add a reference: read the actual code, cite file:line, stay device-agnostic (push
   backend specifics to `apple-silicon`), add a one-line pointer above.
+- **Every reference carries YAML frontmatter and no body `# H1`.** The first line is
+  `---`, then a quoted `title` and a one-paragraph `summary`, then `---`, then the
+  source-cited notes. The title lives in frontmatter only (no `# H1` atop the body). The
+  `summary` is what the semantic-ID search embeds, so make it one dense, discriminating
+  paragraph — name the specific ops, layers, files, and mechanisms the doc is really
+  about, not generic filler.
+- **After writing a reference, stamp its semantic ID:**
+  `python3 .claude/scripts/stamp_semantic_ids.py .claude/skills/ct2-internals/references/<topic>.md`
+  (run with no path to re-mint the whole corpus, `--health` to check bit health). This
+  fills in the `semantic_id` frontmatter field that powers "find related".
 - **Before trusting any `file:line` here, run `bash scripts/audit-citations.sh`** (`-q`
   for problems-only). It flags missing files, out-of-range lines, and ambiguous basenames;
   it CANNOT see content drift (a line that moved a few rows), so it prints each cited line

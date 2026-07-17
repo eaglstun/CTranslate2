@@ -1,4 +1,19 @@
-# Apple-GPU architecture for compute kernels (calibrate your mental model)
+---
+title: "Apple-GPU architecture for compute kernels (calibrate your mental model)"
+summary: >-
+  Calibrates a compute-kernel author's mental model of Apple GPUs,
+  distinguishing provenance-labeled facts (Apple doc, spec, measured-here,
+  marketing, unverified). It argues TBDR render machinery is off the compute
+  path, leaving a simple model of many cores times 32-wide SIMD ALUs plus
+  threadgroup memory over unified device memory; execution width is 32
+  (threads_per_simdgroup, matching threadExecutionWidth). Load-bearing
+  measured numbers: ~280 GB/s sustained weight reads on the Qwen lm_head int8
+  GEMV against a 546 GB/s spec peak, and fp16 at ~1.55x fp32 for GEMM. Key
+  structural fact: simdgroup_matrix is half/bfloat/float only with no int8
+  WMMA, so int8 wins only in bandwidth-bound decode GEMV, never on ALU
+  throughput, unlike CUDA dp4a/tensor cores.
+semantic_id: "yj8wxg-eu02Swe19XtULHUcwreqTyqilChU2mpS34N46P-kH0acpCg80fg1v640YpCkk-tzS_45-9QzzzvQfpQ"
+---
 
 Sources: Apple DocC article "Tailor your apps for Apple GPUs and tile-based deferred
 rendering" (<https://developer.apple.com/documentation/metal/tailor-your-apps-for-apple-gpus-and-tile-based-deferred-rendering>,

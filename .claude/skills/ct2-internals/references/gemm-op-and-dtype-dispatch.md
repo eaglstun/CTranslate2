@@ -1,4 +1,22 @@
-# The Gemm Op & Its Dtype Dispatch
+---
+title: "The Gemm Op & Its Dtype Dispatch"
+summary: >-
+  Details ops::Gemm and its dtype dispatch: the construction-time
+  alpha/beta/transpose interface, the operator() switch on a.dtype() routing
+  INT8 to compute<D, int8_t, int32_t> (int8xint8 into an int32 accumulator),
+  INT16 to CPU only, and floats to same-in-same-out, followed by unconditional
+  apply_bias_and_activation. It explains that compute<D,In,Out> collapses
+  leading dims into m and calls primitives<D>::gemm per device (CPU switching
+  on the runtime gemm_s8_backend, CUDA via cublasGemmEx, Metal via
+  operator()-level early routing). The load-bearing contract is that integer
+  alpha=1/beta=0 is convention not assertion — enforced by callers like
+  quantized Dense while Dequantize owns all scaling — and that CUDA truncates,
+  Ruy emulates, and the Metal route guards on beta==0 with integral alpha and
+  no shift compensation. Also explains a_shift_compensation: MKL's s8-to-u8
+  shift-by-128 trick and its per-column compute_u8_compensation, which signed-
+  int8 backends (cuBLAS, Metal, CUDA) skip entirely.
+semantic_id: "ShqQ5osPum2W0e1dTlgpHacwr-uT2qIhChfwu9S1xsQyFUkXr-9vEA8wapXvz6YapGwk-877jY569bTjDrhdoQ"
+---
 
 How `ops::Gemm` resolves dtype → implementation, what the integer-GEMM alpha/beta
 contract really is, and why the MKL u8-shift compensation exists.

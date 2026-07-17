@@ -1,4 +1,24 @@
-# Profiling infrastructure
+---
+title: "Profiling infrastructure"
+summary: >-
+  Describes the integrated profiler behind --log_profiling: a compile-time-
+  gated (ENABLE_PROFILING -> CT2_ENABLE_PROFILING) RAII scoped-timer system
+  where PROFILE(NAME) expands to a zero-cost do{}while(0) when off and
+  init_profiling throws loudly rather than producing empty output. In a
+  profiling build PROFILE declares a stack ScopeProfiler (carried by ~55 files
+  as the first line of an op's operator()); nesting is tracked via a
+  thread_local current_scope whose destructor subtracts elapsed time from the
+  parent's self-time, aggregation is by name across threads under a mutex, and
+  both constructor and destructor call synchronize_stream so async GPU work is
+  charged correctly but pipelining is serialized. dump_profiling sorts by
+  self-time and prints %self/%total/%cum/name/self_ms with the denominator
+  multiplied by num_threads. It also documents --log_throughput (generated
+  target tokens of the best hypothesis over end-to-end wall time) and warns
+  that on Metal the per-scope sync becomes a full metal::synchronize()
+  destroying async-commit overlap, so trust the ranking not the magnitudes;
+  profiling is C++/CLI only, not bound in Python.
+semantic_id: "ylyy5wmrou2XkfldQvlJnaUkpyOTiqonChN0W5S9R94qDfMW56-NXw9yHk0ty-87iCUsm85yjQ56_IyvRvzsJw"
+---
 
 The integrated profiler behind `--log_profiling`: a compile-time-gated, RAII scoped-timer
 system with per-name aggregation, plus the `--log_throughput` tokens/sec metric. These two

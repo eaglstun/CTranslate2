@@ -1,4 +1,20 @@
-# Dispatch & Op Implementation
+---
+title: "Dispatch & Op Implementation"
+summary: >-
+  Explains how CTranslate2 ops are structured and dispatched on device and
+  dtype at runtime, using SoftMax as the worked example. It details the 4-file
+  pattern (flag-free header in include/, .cc doing input checks plus dispatch,
+  _cpu.cc/_gpu.cu providing compute<D,T> specializations) and the dispatch
+  macros in device_dispatch.h/type_dispatch.h/dispatch.h: DEVICE_CASE and
+  TYPE_CASE introduce constexpr/typedef bindings inside a runtime switch, and
+  DEVICE_AND_FLOAT_DISPATCH restricts to float unless CUDA forces fp16/bf16 to
+  Device::CUDA. The central Metal fact: METAL_DEVICE_CASE binds constexpr
+  Device D = Device::CPU (calling metal::flush first) so CPU primitives run on
+  unified-memory buffers without instantiating primitives<Device::METAL> at
+  ~50 sites; a real GPU kernel is reached only by targeted operator()-level
+  routing checking x.device()==METAL and returning before generic dispatch.
+semantic_id: "yxqYwgmrkm2Wsaz9QllpHLUgoWuTyqElCpXkGpTnw94WLUkD9-svHw2wal11y68KICis8sbwjY56haS_h7U9pQ"
+---
 
 How CTranslate2 ops are structured and how they dispatch on device + dtype at runtime.
 

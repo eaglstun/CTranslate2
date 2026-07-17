@@ -1,4 +1,20 @@
-# GPU counters & timestamps (GPU-side timing)
+---
+title: "GPU counters & timestamps (GPU-side timing)"
+summary: >-
+  Covers three tiers of GPU-side timing on Metal. Tier 1 is free whole-buffer
+  timing via MTLCommandBuffer.gpuStartTime/gpuEndTime (readable only after
+  completion, command-buffer granularity). Tier 2 is
+  MTLDevice.sampleTimestamps() returning paired CPU/GPU timestamps to
+  correlate the two clocks by linear interpolation. Tier 3 is counter sample
+  buffers (MTLCounterSampleBufferDescriptor, MTLCommonCounterSet.timestamp,
+  sampleCounters, resolveCounterRange) for per-kernel sampling at
+  stage/dispatch boundaries with runtime support queries. For the CT2 Metal
+  backend it argues gpuStartTime/gpuEndTime is the zero-effort upgrade over
+  today's CPU-side time_ms() wall-clock method, directly separating encode
+  from execute since the backend commits one buffer per op and already tracks
+  g_last_committed.
+semantic_id: "yhy4xguvqu2xob19UtB5FDfoo6OTw6uyDhd0mJQ14s4aDVsG7KevGQ99W5l_664aom8su87zrY5W9ZTvxrwuoQ"
+---
 
 Sources (Apple Developer Documentation, fetched via DocC JSON, 2026-06-11):
 

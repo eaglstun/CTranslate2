@@ -1,4 +1,23 @@
-# Metal performance & dispatch-overlap model (the perf conclusions, with the graveyard)
+---
+title: "Metal performance & dispatch-overlap model (the perf conclusions, with the graveyard)"
+summary: >-
+  The canonical home for the Metal backend's performance reasoning, distilling
+  conclusions (especially dead ends) from METAL_BENCHMARKS.md. Its single
+  mental model is the fixed ~0.03-0.04 ms per-op GPU-API floor versus CPU/GPU
+  overlap, splitting workloads into compute-bound prefill (GPU wins, fp16
+  batch-8 ~2.6x over CPU, 3.7x GEMM at n=2048) and overhead-bound
+  autoregressive decode (tall-skinny m=batch GEMVs where the floor dominates
+  and fp16 buys almost nothing). The load-bearing insight is that async per-op
+  commit overlaps CPU encoding of op N+1 with GPU execution of op N, which is
+  why the tempting command-buffer-reuse optimization backfired (-6% bs8
+  decode, -23% bs8 prefill) and lives in the graveyard alongside net-zero
+  MPSMatrixDescriptor caching. Records the real wins in landing order: async
+  command-buffer batching (~20%), shape-keyed MPSMatrixMultiplication caching
+  (~35%), and GPU fp16 Add for residuals (27x on that op). Also flags
+  Concat/Split GPU graduation as correctness-only and lists open levers like
+  .metallib, fp16 RMSNorm, and fused attention.
+semantic_id: "yjk4xg-uu-2bAb19RN0pFKc4JWOTgqslClf-GpSdxnY6CnkG568LSwf5Whxj6a84JGsks87z3Z5-9aSrxrxuow"
+---
 
 **This is the canonical home for the Metal backend's performance reasoning.**
 `METAL_BENCHMARKS.md` has the raw numbers and the journey narrative; this file distills

@@ -1,4 +1,21 @@
-# The decoding loop & beam search (greedy/beam step structure, batch shrinking)
+---
+title: "The decoding loop & beam search (greedy/beam step structure, batch shrinking)"
+summary: >-
+  The token-generation driver in src/decoding.cc: decode() sets up prefix
+  splitting, search strategy (GreedySearch when beam_size==1 and
+  prefix_bias_beta==0 else BeamSearch), sampler, and logits processors. Walks
+  the greedy per-step loop (decoder forward, DisableTokens/min-length/logits
+  processors, in-place LogSoftMax only when return_scores, sampling with
+  prefix override, token-append and finish check, then batch shrinking that
+  drops finished rows via non_finished_index and an ops::Gather over every KV-
+  cache entry). Covers beam search specifics: batch*beam flat layout,
+  num_candidates=beam_size*2, expand_after_first_step, broadcast score
+  accumulation, unflatten_ids beam-origin tracking, length/coverage penalties
+  in finalize_hypothesis_score, and hard vs biased (prefix_bias_beta) prefix
+  modes. The shrinking-m batch dimension and on-GPU Gather cache reorder are
+  the Metal-relevant hooks.
+semantic_id: "yx628gnrs22awT1NwMgpnYcqoS-TyYuqCh1mu4ykw1ZqL9kex75F3o-4ftleo4cKBC0s-sb5jY56vezDRvB4oQ"
+---
 
 CT2-architecture reference: the token-generation driver in `src/decoding.cc` — what a
 decode _step_ actually does between the decoder forward and the next input token, and how

@@ -1,4 +1,20 @@
-# GPU options for Conv1D — MPSCNNConvolution vs MPSGraph conv2d vs custom MSL
+---
+title: "GPU options for Conv1D — MPSCNNConvolution vs MPSGraph conv2d vs custom MSL"
+summary: >-
+  Scoping card for graduating CT2's Conv1D to the GPU, comparing three
+  options: MPSCNNConvolution (MPSImage feature maps with an
+  MPSCNNConvolutionDataSource callback and OHWI weight layout — poor fit
+  because CT2 activations are row-major MTLBuffers), MPSGraph convolution2D
+  (buffer-native rank-4 tensors with declared dataLayout/weightsLayout, the
+  most natural MPS fit but drags in the whole-graph framework), and a custom
+  MSL kernel (the op-graduation-playbook path, most control, removes the
+  fp16-fp32 round-trip). Current state: Conv1D runs on the CPU reference on
+  Metal with fp16 upcast to fp32, and conv weights stay float via the
+  src/models/model.cc is_conv guard. The consumer is the Whisper/Wav2Vec2 two-
+  Conv1D encoder stem (per-encode, not per-token); the decision rule is
+  prototype the custom MSL kernel first.
+semantic_id: "yhwQ5guuv22S4e11SskLvAcoN2uTiq-nCpcnmoSl4t6qj3gG9--tXU-6epFj768TTCos29Ty2Y5OvI7_jrZupA"
+---
 
 Sources: https://developer.apple.com/documentation/metalperformanceshaders/mpscnnconvolution,
 https://developer.apple.com/documentation/metalperformanceshaders/mpscnnconvolutiondatasource,

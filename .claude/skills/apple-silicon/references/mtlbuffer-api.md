@@ -1,4 +1,22 @@
-# MTLBuffer & the MTLDevice allocation surface (lookup card)
+---
+title: "MTLBuffer & the MTLDevice allocation surface (lookup card)"
+summary: >-
+  MTLBuffer and the MTLDevice allocation surface: the three creation variants
+  (makeBuffer(length:options:) which zero-fills, makeBuffer(bytes:...) which
+  copies, and makeBuffer(bytesNoCopy:...) which wraps existing page-aligned
+  single-VM-region memory), plus the instance surface — contents() (nil only
+  for private storage), length vs allocatedSize, gpuAddress (Metal 3),
+  didModifyRange (managed-only), setPurgeableState, and label. The CT2 backend
+  uses exactly one variant,
+  newBufferWithLength:options:MTLResourceStorageModeShared in
+  src/metal/allocator.mm, whose contents pointer feeds StorageView (the
+  unified-memory trick), with an address-ordered side table mapping any
+  interior pointer back to buffer+offset. Notes bytesNoCopy as the unused
+  mmap-weights opportunity, the explicit %4 offset alignment checks gating
+  int8 GEMV, and that no buffer sets label so GPU captures show anonymous
+  buffers.
+semantic_id: "zh0w1wgvq23T0etNx8wrvIOgpSuTiaujClfzGpbX4s4KDX0GZactGQ-xfkV3r48KDCskusz7zY5-_Q3jTr5voQ"
+---
 
 Sources (Apple Developer Documentation, fetched via DocC JSON, 2026-06-11):
 

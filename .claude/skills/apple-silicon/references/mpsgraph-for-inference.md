@@ -1,4 +1,21 @@
-# MPSGraph for inference (one card) — and its quantization surface
+---
+title: "MPSGraph for inference (one card) — and its quantization surface"
+summary: >-
+  MPSGraph, the symbolic whole-graph framework above MPS, and its quantization
+  op surface, evaluated as a candidate for CT2 inference. It covers building
+  graphs with placeholder and per-op tensor methods (matrixMultiplication,
+  softMax, topK with no documented k limit, scaledDotProductAttention, and erf
+  which MSL lacks), executing against real MTLBuffers via MPSGraphTensorData,
+  and the production compile path to a cached MPSGraphExecutable that can
+  encode(to:) an MPSCommandBuffer. The verified quantization facts:
+  quantize/dequantize (macOS 13.1+, i8/u8, per-axis scaleTensor and LUT
+  variants exist) but there is NO quantized/integer matmul op, only
+  dequantize-then-float-matmul. CT2 uses no MPSGraph anywhere and is
+  structurally mismatched because CT2 itself is the imperative graph executor;
+  the only realistic experiment is wrapping one cached weight-stationary
+  quantized matmul.
+semantic_id: "yx0w5o8vu-2S8-1Nx80LtCcwp2uTzq8lCtf7i9T_wvoiCXwGZK-tXY-4Wplvr5QvjG8ku93xzY5ONQ3zxLRvpQ"
+---
 
 Source: https://developer.apple.com/documentation/metalperformanceshadersgraph/mpsgraph
 (fetched via DocC JSON, 2026-06-11; op pages fetched individually — unlike the MPSMatrix

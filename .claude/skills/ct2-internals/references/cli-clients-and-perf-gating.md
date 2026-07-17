@@ -1,4 +1,22 @@
-# CLI client (ct2-translator) & the perf-gating workflow
+---
+title: "CLI client (ct2-translator) & the perf-gating workflow"
+summary: >-
+  The sole CLI client cli/translator.cc (built as ct2-translator) and the
+  maintainer recipe for gating a performance change with it. It documents the
+  cxxopts flag surface (--task translate/score, --device where metal works
+  despite the help text, --compute_type with no Metal override so plain
+  --compute_type applies, batch/translation/scoring options) and the two
+  gating flags: --log_throughput prints tokens/sec on stderr and
+  --log_profiling requires an ENABLE_PROFILING build. It explains what the
+  throughput number times — translate_raw_text_file wall-clocks the whole
+  pipeline including IO, whitespace tokenization, and the consume_batches
+  prefetching driver that reads max_batch_size*16 ahead and drains in
+  submission order. The gating recipe stresses identical input/flags/model,
+  three-plus runs recording spread, and --out /dev/null; there is no
+  generation or Whisper CLI, so those changes need a Python driver or gtest
+  micro-benchmarks.
+semantic_id: "yxqa1wnrl22Vwa1tRv1tnIUuK3uTwoMnClf0G9b950xqj0kHd--MX4062l1N6o8aqC0o88_zrYZ-veyfxrQ9pQ"
+---
 
 The one CLI client — `cli/translator.cc`, built as `ct2-translator`
 (`cli/CMakeLists.txt`: `OUTPUT_NAME ct2-translator`; `BUILD_CLI=ON` by default, needs

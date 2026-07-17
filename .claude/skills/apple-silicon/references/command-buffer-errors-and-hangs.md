@@ -1,4 +1,21 @@
-# Command-buffer errors & GPU hangs (failure diagnosis)
+---
+title: "Command-buffer errors & GPU hangs (failure diagnosis)"
+summary: >-
+  Diagnoses GPU-side failures on the Metal backend through the
+  MTLCommandBuffer lifecycle: the notEnqueued through
+  committed/scheduled/completed/error status progression, the
+  MTLCommandBuffer.error codes (timeout for the GPU-hang watchdog, pageFault
+  for OOB pointers, plus outOfMemory, invalidResource, etc.), and per-encoder
+  blame via MTLCommandBufferDescriptor.errorOptions with
+  encoderExecutionStatus. The load-bearing local fact is that the backend
+  never checks status or error today (only waitUntilCompleted in flush() in
+  device.mm), so a fault surfaces as silent garbage output; it supplies a
+  five-line status check and an addCompletedHandler recipe to add during
+  debugging. Closes with a triage order for garbage output on Metal (stale
+  read, error'd buffer, non-faulting OOB caught by MTL_SHADER_VALIDATION,
+  numeric NaN).
+semantic_id: "yh6g1gsvo-2Wg719QMkpPaPJ6SOTy6qhChdqCJDvwv4oG_0G5OctHA_6Wh3Fy68agC88483RpY5G2S2nRvZOoA"
+---
 
 What a command buffer's lifecycle looks like, how the GPU reports runtime failures, and
 — the repo-specific punchline — **this backend never checks any of it today**, so a

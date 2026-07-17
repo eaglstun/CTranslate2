@@ -1,4 +1,20 @@
-# GEMM layouts & transpose conventions — the row/column-major Rosetta stone
+---
+title: "GEMM layouts & transpose conventions — the row/column-major Rosetta stone"
+summary: >-
+  The row-major-versus-column-major Rosetta stone for GEMM across CT2's
+  backends, resolving the recurring transpose confusion. Everything in CT2 is
+  row-major, so for C[m,n]=op(A)op(B) a leading dimension lda/ldb/ldc means
+  the stored row length, and src/ops/gemm.cc derives m/n/k and the ld values
+  once; Dense passes trans_a=false, trans_b=true with weights stored
+  [output,input]=[n,k]. MPS on Metal maps operands directly (stored dims into
+  MPSMatrixDescriptor, transpose flags into the cached
+  MPSMatrixMultiplication, lda into rowBytes) with an explicit do-NOT-
+  replicate-the-cuBLAS-swap warning, whereas cuBLAS is column-major and the
+  CUDA wrapper swaps A and B. The int8 MSL kernel ct2_gemm_s8 resolves all
+  four transpose combinations at tile-load time while ct2_gemv_s8 and the
+  dequant epilogue are Dense-layout-only, enforced by host routing.
+semantic_id: "yhiQ7ovOq22Swe19T9EpvYcwr2uT2qohTpXwmvSXxtYiDeEXb6_MUgcwSpR3ju4apGwgus37hY5-9YzjDuBvoQ"
+---
 
 Sources: repo code read 2026-06-11 (`src/ops/gemm.cc`, `src/layers/common.cc`,
 `src/metal/gemm.mm`, `src/cuda/primitives.cu`, `src/metal/kernels/kernels_msl.h`) plus

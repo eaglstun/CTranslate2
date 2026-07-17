@@ -1,4 +1,24 @@
-# Model import pipeline: specs & converters
+---
+title: "Model import pipeline: specs & converters"
+summary: >-
+  Traces the device-agnostic model import pipeline: an external checkpoint
+  flows Converter._load -> ModelSpec (a declarative weight/layer tree) ->
+  validate/optimize/save -> CT2 model dir -> C++ create_model via ModelFactory
+  -> runnable Model. A LayerSpec is a FrozenAttr object whose non-underscore
+  attributes are weights (None required, ndarray/tensor, or the OPTIONAL
+  sentinel) or nested sub-specs, walked by visit_spec into scoped names like
+  encoder/layer_3/self_attention/linear_0/weight; validate() collects unset
+  attributes and normalizes types, optimize() runs _alias_variables dedup then
+  _quantize (quantizable when a sibling <name>_scale exists). Leaf specs
+  (LayerNormSpec, LinearSpec, EmbeddingsSpec, Conv1DSpec) mirror enums to C++
+  headers. Converters implement the one abstract _load, and in transformers.py
+  the ModelLoader/register_loader pattern moves weights via small set_*
+  helpers (set_layer_norm, set_linear, set_embeddings) by direct attribute
+  assignment. The serialized name string drives C++ construction through
+  register_model in model_factory.cc, and the doc ends with the three-step
+  checklist for adding an architecture (specs, converters, C++ loader).
+semantic_id: "y14iwo-Ot20S4f1dTtlLvKM8oWuRxqsBCtVrm4CMw94qD-0OY6cp0g-4eg1tq5UYlis0-8vwnY5-5Rz9hvTvow"
+---
 
 Sourced from:
 

@@ -1,4 +1,21 @@
-# Conversions, `as_type` reinterpretation, and pack/unpack
+---
+title: "Conversions, `as_type` reinterpretation, and pack/unpack"
+summary: >-
+  Covers MSL value conversions, bit reinterpretation, and pack/unpack per the
+  Metal Shading Language Specification (sections 2.23-2.24, 8.6, 6.15, 2.21):
+  static_cast/constructor conversions round float-to-integer toward zero
+  (truncation) with no saturation and map float NaN to 0, so round-to-nearest
+  needs an explicit rint before the cast and overflow is undefined unless you
+  clamp() first. as_type<T>(x) reinterprets bits between same-size types only
+  and operates on values, so reinterpreting memory (reading 4 packed int8 as
+  char4) needs an address-space pointer cast with caller-guaranteed alignment.
+  The metal_pack snorm helpers bake in a 1/127 factor and are deliberately
+  unused by the int8 path, while Metal 4.1's general packed-numeric templates
+  are the future int4 route. This ties to CT2's ct2_quantize_s8 (rint before
+  (char) cast, no saturating cast since scale=127/amax bounds |v|<=127) and
+  the char4/int4-vectorized GEMM inner loop.
+semantic_id: "yly48gyeqn3zwS1dw1EJvYc8t-uTgquxDhV4G7S8xtY4HekGR6fpXi94Xk03rK9KVGgk28TrjZ5e_AwzhPl_pA"
+---
 
 Source (Apple): Metal Shading Language Specification, §2.23–2.24 (conversions, `as_type`),
 §8.6 (float↔int conversion rules), §6.15 (pack/unpack), §2.21 (packed numeric types,

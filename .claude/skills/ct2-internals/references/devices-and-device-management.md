@@ -1,4 +1,22 @@
-# Devices & device management
+---
+title: "Devices & device management"
+summary: >-
+  Walks src/devices.cc and devices.h — the whole Device enum (CPU, CUDA,
+  METAL) and the functions resolving, setting, and synchronizing devices.
+  Covers str_to_device (with auto preferring CUDA then Metal then CPU),
+  device_to_str with the device:index form, get_device_count (always 1 for
+  CPU), and the template-specialized get/set_device_index where CUDA index is
+  thread-global CUDA state (why it must be set per worker thread) while CPU
+  and Metal pin to 0; the runtime wrappers use DEVICE_DISPATCH with a Metal
+  early-return before the macro so no primitives<Device::METAL> is
+  instantiated. Explains ScopedDeviceSetter RAII, how device:index threads
+  through ModelLoader copy_to and per-worker ReplicaWorker::initialize, the
+  synchronize_device (full barrier) vs synchronize_stream (current-stream)
+  semantics where both collapse to metal::synchronize() on Metal,
+  destroy_context teardown, and the tensor-parallel MPI/NCCL rank globals
+  living in the same file.
+semantic_id: "yh6Y5ovuk-zWgz19wvk7PaMAo2uZiyshClXyGpS14OYKCekB_68pn6cwel11678SgA4s-s5xjY5e4SSvh21foQ"
+---
 
 The `Device` enum and the small set of functions that resolve, set, and synchronize devices. Short file — `src/devices.cc` is the whole story.
 

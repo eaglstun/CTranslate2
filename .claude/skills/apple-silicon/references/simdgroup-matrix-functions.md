@@ -1,4 +1,21 @@
-# SIMD-group matrix functions (WMMA-style 8×8 matmul)
+---
+title: "SIMD-group matrix functions (WMMA-style 8×8 matmul)"
+summary: >-
+  Covers MSL SIMD-group matrix functions (the WMMA-style tensor-core
+  primitive) from the Metal Shading Language Specification sections 2.4 and
+  6.8: the <metal_simdgroup_matrix> header, cooperative-per-SIMD-group
+  execution under uniform control flow, simdgroup_load/simdgroup_store with
+  elements_per_row stride and matrix_origin, and simdgroup_multiply_accumulate
+  (d = a*b + c). The ground-truth fact driving the int8 design decision is
+  that the supported types are exhaustively floating-point 8x8 only —
+  simdgroup_half8x8, simdgroup_bfloat8x8 (Metal 3.1+), simdgroup_float8x8 —
+  with NO integer variant, so int8xint8-to-int32 cannot be expressed as WMMA
+  on Apple GPUs, which is why ct2_gemm_s8 is hand-tiled through threadgroup
+  memory. Notes the single shared accumulator type (no mixed-precision
+  fp16-in/fp32-out form) and that these primitives remain candidates if an
+  fp16/fp32 GEMM ever moves off MPS or a fused-attention kernel is attempted.
+semantic_id: "yhwQ5o-uun2Tw-1dS9ELHYNwreuTirKlDldyGZSH5M4-P2kHV66vWy81ag0vy6UKnC2k-9XziY5-9ayDzqRvpA"
+---
 
 Source (Apple): Metal Shading Language Specification, §2.4 (types) and §6.8 (functions) (v4.1,
 2026-06-04). PDF: <https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf>

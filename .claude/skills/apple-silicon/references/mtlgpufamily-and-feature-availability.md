@@ -1,4 +1,23 @@
-# MTLGPUFamily and feature availability checks
+---
+title: "MTLGPUFamily and feature availability checks"
+summary: >-
+  Covers MTLGPUFamily capability tiers and runtime feature detection via
+  MTLDevice.supportsFamily(_:), mapping the cumulative apple1-apple10 cases to
+  silicon (apple7=A14/M1, apple8=M2, apple9=A17/M3/M4) so every Apple Silicon
+  Mac is at least apple7, plus the cross-vendor common/mac2 and version-
+  umbrella metal3/metal4 tiers. Details the capability checks a compute
+  backend cares about: SIMD-group reductions and simdgroup_matrix gated on
+  apple7, bfloat as an MSL 3.1 language feature gated on the Metal version
+  umbrella rather than a supportsBfloat API, and maxBufferLength (256 MB
+  documented minimum) bounding a single weight blob or KV cache. The load-
+  bearing finding is that the CT2 Metal backend currently checks nothing
+  (MetalContext just calls MTLCreateSystemDefaultDevice with zero
+  supportsFamily hits), so it lays out the exact hardening asserts a
+  production pass would add in MetalContext for ct2_gemv_s8's simd_sum,
+  allocator buffer-size checks, and a future bfloat path, all untriggered
+  until a non-M4 machine runs the backend.
+semantic_id: "2h880o2vu03Awe19Tt0LPQdEhWOTyqsgClfqPIT30NyyCf025K-tH494fhx3r68LDC80y8z7lY5O9SyFRrR_pA"
+---
 
 Sources: https://developer.apple.com/documentation/metal/mtlgpufamily,
 https://developer.apple.com/documentation/metal/mtldevice/supportsfamily(_:),

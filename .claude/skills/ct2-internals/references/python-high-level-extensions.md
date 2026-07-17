@@ -1,4 +1,22 @@
-# Python high-level extensions (extensions.py)
+---
+title: "Python high-level extensions (extensions.py)"
+summary: >-
+  The pure-Python conveniences monkey-patched onto the compiled
+  Translator/Generator in python/ctranslate2/extensions.py, answering which
+  methods are Python vs C++ pybind11 bindings. register_extensions setattrs
+  exactly seven methods: translate_iterable, score_iterable,
+  generate_iterable, generate_tokens (both classes), and
+  async_generate_tokens. Details the generate_tokens callback-to-queue-to-
+  generator bridge: it forces asynchronous=True and beam_size=1 (hence
+  streaming is greedy-only), the C++ worker thread pushes
+  GenerationStepResults onto a queue.Queue, a daemon thread drains
+  AsyncResults for exceptions, and GeneratorExit sets generator_closed so the
+  next callback returns True to stop decoding gracefully. Also covers
+  _process_iterable's 16x read-ahead prefetch and _batch_iterator's examples-
+  vs-tokens batching, and settles that batch/file/load methods are C++
+  bindings.
+semantic_id: "yRywo4vro22S03lpZulflKcoI-uRT6shCldkCZS0ps_qKbmO5c-NXqc4ui0t5o8bhm0kus_57Y5e_c2fB7z8ow"
+---
 
 The pure-Python conveniences monkey-patched onto the compiled `Translator`/`Generator`
 classes — the file that answers "is this feature C++ or Python?". Everything listed

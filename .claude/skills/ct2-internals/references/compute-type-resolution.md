@@ -1,4 +1,23 @@
-# Compute-type resolution
+---
+title: "Compute-type resolution"
+summary: >-
+  Traces how a requested ComputeType string (auto, int8, int8_float16,
+  float16, etc.) becomes the effective per-weight dtypes a loaded model uses
+  via resolve_compute_type in src/types.cc. Every model tracks three types —
+  saved (inferred from serialized weights), requested, and effective — and
+  resolution begins with the four mayiuse_bfloat16/float16/int16/int8 device-
+  capability queries (on CPU backed by cpu::has_gemm_backend walking
+  MKL/DNNL/Accelerate/OpenBLAS/Ruy in priority order). It tabulates the per-
+  requested-type fallback chains, notably that plain int8 expands per the
+  saved model's float dtype and throws rather than silently un-quantizing,
+  that DEFAULT recurses on the saved type so any model loads anywhere, and
+  that compute_type_to_data_type produces the (weight_dtype, float_dtype) pair
+  converting quantizable weight variables. For Metal specifically the branch
+  makes mayiuse_int8/float16 return true while AUTO deliberately pins to
+  FLOAT32 so int8 stays an explicit opt-in; also covers the Python
+  get_supported_compute_types surface.
+semantic_id: "yho41ovuu22ygaVdyl1LMac4p2uTwqMpDhd2G9S15tQ6B80U7a-NWC0xas09y6cSBiwk88_zjd5e_Q2TDPxu4Q"
+---
 
 How a requested compute type (`"auto"`, `"int8"`, `"int8_float16"`, `"float16"`, …) becomes
 the effective per-weight dtypes a loaded model actually uses.

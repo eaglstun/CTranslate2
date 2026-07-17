@@ -1,4 +1,23 @@
-# MPSMatrixMultiplication
+---
+title: "MPSMatrixMultiplication"
+summary: >-
+  API reference for MPSMatrixMultiplication, the Metal Performance Shaders
+  GEMM computing C = alpha*op(A)*op(B) + beta*C over MPSMatrix operands (each
+  wrapping an MTLBuffer plus a row-major MPSMatrixDescriptor with
+  rows/columns/rowBytes/dataType). It documents the two initializers (basic
+  alpha=1/beta=0 and full-control with
+  transposeLeft/transposeRight/alpha/beta), the
+  encode(commandBuffer:leftMatrix:rightMatrix:resultMatrix:) call that
+  supplies operands at encode time (so one shape-configured MM object is
+  reusable), and origin/batchSize properties. For the CT2 Metal backend,
+  src/metal/gemm.mm implements fp32 and fp16 metal::gemm and
+  gemm_batch_strided on top of it: MPS being row-major like StorageView means
+  operands map directly with no cuBLAS-style a/b swap, one MM object is cached
+  per distinct {m,n,k,transposeA,transposeB,alpha,beta,dtype} key (a ~35% e2e
+  win), int8/int16 stay off MPS, and the first call pays a ~493ms one-time
+  pipeline warmup.
+semantic_id: "yhiQ5omOq-3DseldRt0JvadgJyuTqaohDl_ivNS9xv4CDV8Gua-vXy9xToV3r6waIC8gu837zY5-_ZzjRrBtoQ"
+---
 
 `MPSMatrixMultiplication` is a Metal Performance Shaders kernel that computes a general matrix multiply (GEMM) on the GPU:
 

@@ -1,4 +1,20 @@
-# MTLResourceOptions — the buffer-creation bitmask, in detail
+---
+title: "MTLResourceOptions — the buffer-creation bitmask, in detail"
+summary: >-
+  The MTLResourceOptions buffer-creation bitmask reference: one storage mode
+  (Shared, Private, Memoryless textures-only, Managed legacy-x86) plus one CPU
+  cache mode (defaultCache vs writeCombined) plus one hazard tracking mode
+  (.default, tracked, untracked), and the three makeBuffer variants (zero-
+  cleared, bytes-copy, and bytesNoCopy zero-copy with its page-aligned/whole-
+  pages/single-VM-region/deallocator constraints). Documents that CT2 uses
+  exactly one combination everywhere via MetalAllocator::allocate in
+  src/metal/allocator.mm: StorageModeShared plus default cache plus default
+  (tracked) hazard mode, which is what lets the whole backend run with zero
+  fences. Explains why bytesNoCopy is unused, why writeCombined would be a bug
+  (CPU-reference fallback ops read buffer contents), and why
+  Private/Memoryless are unusable by design.
+semantic_id: "yx0w1wjPq23TE_1Nw81pPIMgJWuTwqsjClfyGZStxt6ADXkH9e8tXk94Pg1Xqo8ajC8Emu37xY5-_a3XTv5-pQ"
+---
 
 Sources: https://developer.apple.com/documentation/metal/mtlresourceoptions,
 https://developer.apple.com/documentation/metal/mtlstoragemode,

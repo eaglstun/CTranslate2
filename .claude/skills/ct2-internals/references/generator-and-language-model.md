@@ -1,4 +1,21 @@
-# Generator & language models (decoder-only generate/score/forward surface)
+---
+title: "Generator & language models (decoder-only generate/score/forward surface)"
+summary: >-
+  Maps the decoder-only language-model runtime: the
+  LanguageModel/SequenceGeneratorReplica/DecoderReplica class tree (adding
+  vocabulary and a shared DecoderStateCache), the async-only Generator pool
+  surface (generate_batch_async, score_batch_async, forward_batch_async with
+  batch_id restoration), and the absence of a C++ generate_tokens versus the
+  Python streaming path. It details DecoderReplica::run_generation's prompt
+  handling: options mapping, static-prompt forward-once-then-copy_state
+  (memoized in DecoderStateCache when cache_static_prompt), per-example
+  common-prefix prefill in one batch forward, then decode(). Scoring is a non-
+  iterative teacher-forced forward plus LogSoftMax and Gather with no decode
+  loop. For Metal it notes run_generation straddles the prefill regime (GEMM-
+  heavy, Metal wins ~2.6x) and the tiny-op decode regime, with KV cache
+  staying device-resident; qwen_driver.py is the canonical consumer.
+semantic_id: "Txy64wnqs22TwWlNQuNLnac4p-qSw7sBClViOVa8RnZqT9smza-JXq84fg01729bBm00-s_7zY5evwyTR7h95Q"
+---
 
 CT2-architecture reference: how a decoder-only LM runs — the `Generator` pool surface,
 the `SequenceGeneratorReplica`/`DecoderReplica` class tree, prompt prefill (static

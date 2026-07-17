@@ -1,4 +1,23 @@
-# Allocators & caching
+---
+title: "Allocators & caching"
+summary: >-
+  Explains how device memory is allocated behind get_allocator() and handed to
+  StorageView. The Allocator interface (allocator.h) is deliberately pointer-
+  based and typeless (allocate returns a raw void*, free, and an optional
+  clear_cache), which is exactly what unified memory exploits. The runtime
+  get_allocator(Device) dispatches over per-device template specializations
+  except Device::METAL, which early-returns before DEVICE_DISPATCH to avoid
+  instantiating primitives<Device::METAL>. CPU uses a 64-byte-aligned
+  posix_memalign allocator (or an MKL variant); CUDA picks between cub
+  CachingDeviceAllocator (bin growth 4/min 3/max 12, 200MB cap, one per
+  thread) and cudaMallocAsync via the CT2_CUDA_ALLOCATOR env var. StorageView
+  owns a buffer iff it allocated it (owns_data ⇔ _allocator != nullptr), the
+  allocator never tracks lifetimes, and ReplicaPool::clear_cache walks
+  workers. The Metal allocator returns the contents pointer of a Shared
+  MTLBuffer with an address-ordered side table mapping pointers back to
+  buffers, no ARC and no clear_cache override.
+semantic_id: "yx4w9olvk23Tk6VdwtkrHQcQpWuzyasCShNwGpC1Ys4LKX0GZ-9kGo90ek1V764LgA8suu5bzY5-Nae_Tuxv4Q"
+---
 
 How device memory is allocated, cached, and handed to `StorageView`.
 

@@ -1,4 +1,22 @@
-# Autorelease pools in long C++ loops (the Whisper 9 GB SIGKILL)
+---
+title: "Autorelease pools in long C++ loops (the Whisper 9 GB SIGKILL)"
+summary: >-
+  Diagnoses the Whisper fp16 9 GB SIGKILL as an undrained autorelease pool:
+  Metal/MPS convenience constructors ([queue commandBuffer],
+  computeCommandEncoder, MPSMatrixDescriptor matrixDescriptorWithRows:) return
+  autoreleased +0 objects that pile up as wired memory when a C++ worker-
+  thread decode loop with no run loop and no @autoreleasepool never pops the
+  pool, growing RSS unboundedly while heap and allocator stats stay flat. The
+  fix (commit 868d12d3) brackets every op with a thread-local
+  NSAutoreleasePool pushed in new_command_buffer() and drained in
+  commit_command_buffer() in src/metal/device.mm (compiled without ARC),
+  retaining the committed buffer into g_last_committed so it survives the
+  drain; Whisper-small dropped from 9.07 GB climbing to 2.06 GB flat. The
+  standing rule: any Metal path bypassing that command-buffer pair must wrap
+  itself in a pool, and the diagnostic signature is steady total-RSS climb
+  with flat malloc heap.
+semantic_id: "yxg49gr_o23Skz1txtstv4UJozORhquhChdjGJSFxt4uDvkG568JHqcwWE0Gq4cSAg8sss9TnZ5ufW0PxLxrpQ"
+---
 
 **The project-proven memory lesson:** Metal/MPS Objective-C objects returned at +0
 (autoreleased) accumulate in the enclosing autorelease pool. A long-running C++ loop —

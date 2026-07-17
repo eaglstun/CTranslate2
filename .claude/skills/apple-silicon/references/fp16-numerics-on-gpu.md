@@ -1,4 +1,19 @@
-# fp16 numerics on the GPU (the half-precision survival card)
+---
+title: "fp16 numerics on the GPU (the half-precision survival card)"
+summary: >-
+  Half-precision (fp16) numerics survival guide for Metal kernels: half is
+  IEEE binary16 with max finite 65504, min normal ~6.1e-5, ~3 decimal digits,
+  integers exact only to 2048, so long-row sums or exp(x>11.09) overflow to
+  Inf and then NaN. The load-bearing case study is the Gemma2 pad-collapse
+  bug, fixed by ct2_tanh_safe clamping tanh's argument to [-15,15] because
+  Metal's tanh computes (exp(2x)-1)/(exp(2x)+1) and overflows where std::tanh
+  saturates. States the backend's governing rule (store half, compute float)
+  with the specific _half kernels that widen-load, accumulate in float, and
+  round once at store (ct2_softmax_half, ct2_rms_norm_half,
+  ct2_layer_norm_half), plus literal suffixes and promotion rules, ties-to-
+  even store rounding, and why bfloat's wider range is deliberately unused.
+semantic_id: "yhsw1g-_s22TwaV9SvE7NJdooeuRyuszDld2GpSV1NwOTvkWx-8p360xegw_740arA8o287zxZ5O9ayjjryuoQ"
+---
 
 Sources: MSL spec §2.1 (scalar types: `half` "must conform to the IEEE 754 binary16
 storage format"; `bfloat` Metal 3.1+), §2.24 (implicit conversions + conversion

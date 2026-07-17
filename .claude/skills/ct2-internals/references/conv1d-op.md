@@ -1,4 +1,20 @@
-# The Conv1D Op
+---
+title: "The Conv1D Op"
+summary: >-
+  Documents the engine's single convolution, the Conv1D op: its interface
+  (stride/padding/dilation/groups, fused activation, optional qscale), shapes
+  with the out_time formula, and its three backend strategies. The CPU default
+  is im2col_transposed plus GEMM (weight times patches-transposed so per-row
+  input quantization stays legal, dilation unsupported), versus a DNNL direct-
+  convolution path that rejects qscale; CUDA uses cuDNN (IMPLICIT_GEMM) when
+  available else the same im2col+GEMM. The key dtype fact: exactly one backend
+  runs int8 conv, the non-DNNL CPU im2col path, and a load-time guard in
+  Model::set_compute_type forces conv weights to float on CUDA, Metal, and
+  DNNL builds. Conv1D is audio-only (Whisper encoder stem, wav2vec2); Metal
+  has no conv kernel and uses an fp16-to-fp32 upcast island around the CPU
+  reference.
+semantic_id: "yhww5ouqs22Xwe19SPEpPJMwo-PTgqslCldym4S14NYqnXkGt-epWw82fpV_6u9LJHgses1ynY5-9ay7hvwtpQ"
+---
 
 The one convolution in the engine: interface, the three backend strategies
 (im2col+GEMM, DNNL direct, cuDNN), its dtype story — including the quantization

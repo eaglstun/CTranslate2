@@ -1,4 +1,21 @@
-# Storage and Synchronization on Apple GPUs
+---
+title: "Storage and Synchronization on Apple GPUs"
+summary: >-
+  Explains Apple unified-memory storage modes (Shared: system memory, CPU+GPU,
+  default, zero-copy contents pointer; Private: GPU-only; Memoryless: on-GPU
+  tile memory, textures only) and CPU/GPU synchronization patterns (triple
+  buffering with a pool of buffer instances, dispatch-semaphore throttling,
+  completion handlers, immutable buffers, and asynchronous command-buffer
+  commit observed via waitUntilCompleted/addCompletedHandler/status). For the
+  CT2 Metal backend it establishes that the entire design rests on Shared
+  storage so pointer-based CPU kernels run on Metal-resident data
+  (allocator.mm always allocates Shared, never Private/Memoryless); command
+  buffers commit asynchronously with a single global g_last_committed handle
+  that metal::flush() waits on before any CPU access. The load-bearing lesson:
+  that handle must be global not thread-local, because Conv1D's parallel_for
+  issues GEMMs on worker threads that would otherwise never flush.
+semantic_id: "zl1xxgvus-3Sg719Qt1rFochp2uT2quhDlf3kJS14s6KKXkH__8vGk94fk1F6r4ZpC0smszy_Z5-dazvRuxPpQ"
+---
 
 Two related concerns when sharing data between the CPU and an Apple GPU: how a resource is stored (which processor can touch its memory), and how to coordinate read/write timing so neither processor reads garbage or stalls.
 

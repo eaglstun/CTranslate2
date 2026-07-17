@@ -1,4 +1,22 @@
-# MPSNDArray — the modern n-D MPS API (and its quantized matmul)
+---
+title: "MPSNDArray — the modern n-D MPS API (and its quantized matmul)"
+summary: >-
+  Documents MPSNDArray, the modern up-to-16-dimensional successor to
+  MPSMatrix, and critically its quantized matmul: MPSNDArrayDescriptor (the
+  shape: slowest-first vs dimensionSizes: fastest-first factory gotcha),
+  buffer aliasing via initWithBuffer:offset:descriptor: (macOS 15+ only, no
+  zero-copy before that), MPSNDArrayMatrixMultiplication with native batch
+  broadcasting, and MPSNDArrayQuantizedMatrixMultiplication with its
+  Affine/LUT quantization schemes and int8/int4/int2 MPSDataType storage (all
+  macOS 15+). The load-bearing conclusion is that MPS does ship a native
+  quantized matmul since macOS 15 — so the premise MPS is float-only holds
+  only for the MPSMatrix family — but the backend uses none of it (GEMM rides
+  MPSMatrixMultiplication, int8 the hand-tiled ct2_gemm_s8), and it was
+  deliberately not benchmarked because Metal-4 MPP matmul2d already ties MPS
+  fp16 while staying int32-exact, plus MPS documents nothing about its
+  accumulator exactness.
+semantic_id: "yBwUpowPu32S8ettT_0Jvac0N2eTqSohDtfjvZTXws4anbkH5a-pXY9wXg12rowJzH0ku9z7zY5uNUTBjrRvpw"
+---
 
 Sources: https://developer.apple.com/documentation/metalperformanceshaders/mpsndarray,
 https://developer.apple.com/documentation/metalperformanceshaders/mpsndarraymatrixmultiplication,
