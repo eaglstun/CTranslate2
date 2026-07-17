@@ -12,6 +12,7 @@ summary: >-
   round once at store (ct2_softmax_half, ct2_rms_norm_half,
   ct2_layer_norm_half), plus literal suffixes and promotion rules, ties-to-
   even store rounding, and why bfloat's wider range is deliberately unused.
+semantic_id: "yhsw1g-_s22TwaV9SvE7NJdooeuRyuszDld2GpSV1NwOTvkWx-8p360xegw_740arA8o287zxZ5O9ayjjryuoQ"
 ---
 
 Sources: MSL spec §2.1 (scalar types: `half` "must conform to the IEEE 754 binary16

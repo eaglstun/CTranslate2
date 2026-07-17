@@ -14,6 +14,7 @@ summary: >-
   debugging. Closes with a triage order for garbage output on Metal (stale
   read, error'd buffer, non-faulting OOB caught by MTL_SHADER_VALIDATION,
   numeric NaN).
+semantic_id: "yh6g1gsvo-2Wg719QMkpPaPJ6SOTy6qhChdqCJDvwv4oG_0G5OctHA_6Wh3Fy68agC88483RpY5G2S2nRvZOoA"
 ---
 
 What a command buffer's lifecycle looks like, how the GPU reports runtime failures, and

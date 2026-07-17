@@ -13,6 +13,7 @@ summary: >-
   catch — the Gemma2 tanh NaN was numeric, requiring CPU-ref bisection
   instead, since MTL_SHADER_VALIDATION_NAN_INF only applies to render-pipeline
   vertex interpolants.
+semantic_id: "zl6w1gnOu20Dwf190N0bHKfsoaOTm6uhChVyj9ScwN4aq20EZfetmA8wbp0k66cL0Cso2t37lY5O_Y3vRvxvoA"
 ---
 
 Sources (Apple Developer Documentation, fetched via DocC JSON, 2026-06-11):

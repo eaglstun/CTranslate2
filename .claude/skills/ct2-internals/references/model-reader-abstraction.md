@@ -18,6 +18,7 @@ summary: >-
   building a ModelMemoryReader, contains_model, and the Metal note that reader
   choice is device-orthogonal (bytes land in host memory then move to
   Device::METAL) with a ~2x peak-RSS cost during load.
+semantic_id: "SRwh9g2qo23Tkf1ZBvEtPQcop2qSiqoBClVuiqz-4t6rC7gV9as8Wi9wfg0tyo5Zrm00uc3z3Y5e_y-xx7Rqow"
 ---
 
 How `Model::load` gets its bytes: the small `ModelReader` interface that decouples

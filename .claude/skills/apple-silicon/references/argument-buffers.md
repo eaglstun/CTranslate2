@@ -12,6 +12,7 @@ summary: >-
   not use them and does not need to (kernels bind at most ~6 buffers), and
   they would only matter paired with an indirect-command-buffer decode-
   batching redesign — measure first.
+semantic_id: "zx4w1gmvqu3Tg-19BvkLPQMkJWuTy6qBChc2mJS_4t4qCHkOVcct3QX8H11f7KYYvA8sAMzp9Z5K_Qyvxvx_oQ"
 ---
 
 Sources: https://developer.apple.com/documentation/metal/mtlargumentencoder,

@@ -17,6 +17,7 @@ summary: >-
   native alternative for the fp16 m=1 decode path currently riding the
   degenerate MPSMatrixMultiplication, and sketches a fair A/B against the
   current matrix kernel and the int8 GEMV floor.
+semantic_id: "yhwQ9o8eu32CwetVTvEJvSd2q2fTi6olCldivNi95t5qH70OIa-tVy98Xp1xr6waDE0su-77045-NYzhDrBvpA"
 ---
 
 Source: https://developer.apple.com/documentation/metalperformanceshaders/mpsmatrixvectormultiplication

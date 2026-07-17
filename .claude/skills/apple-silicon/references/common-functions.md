@@ -12,6 +12,7 @@ summary: >-
   clamps the tanh argument to [-15,15] before the call (clamping the argument,
   not the NaN result), and notes ct2_quantize_s8_impl deliberately does not
   clamp to plus/minus 127.
+semantic_id: "yl6w1ozrq-3WgWj9wuEJPZMgJ2uTzqshClfkGpzt5twGP1kGba8tVg80Wh19zz9Kim0su8X5hYZOva-vhvhthA"
 ---
 
 Source (Apple): Metal Shading Language Specification, §6.3 (v4.1, 2026-06-04).

@@ -13,6 +13,7 @@ summary: >-
   today's CPU-side time_ms() wall-clock method, directly separating encode
   from execute since the backend commits one buffer per op and already tracks
   g_last_committed.
+semantic_id: "yhy4xguvqu2xob19UtB5FDfoo6OTw6uyDhd0mJQ14s4aDVsG7KevGQ99W5l_664aom8su87zrY5W9ZTvxrwuoQ"
 ---
 
 Sources (Apple Developer Documentation, fetched via DocC JSON, 2026-06-11):

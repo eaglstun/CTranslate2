@@ -13,6 +13,7 @@ summary: >-
   cheaper lever is allocating variables on Device::METAL first and reading
   straight into contents, eliminating the staging StorageView; MTLIO becomes
   interesting only if CT2 ever ships compressed weight files.
+semantic_id: "yl-w5gkvo93SgX19Q_0pPAcYKyuTyqsxCtfyEID94s4eGcEGrK95WA_1_h2v76YbjG8Eusz7jY5u9IyjxnQvpA"
 ---
 
 Sources: https://developer.apple.com/documentation/metal/mtliocommandqueue,

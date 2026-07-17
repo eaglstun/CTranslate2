@@ -16,6 +16,7 @@ summary: >-
   projection via update_output_layer/select_weights, gathering selected rows
   into _partial buffers with -1e10 bias on padding rows. On Metal the
   projection is the dominant decode-step GEMM driving the small-m GEMV win.
+semantic_id: "yhmy4g1Csm2Tge1txv0JvCc8p2_TjrolSlRqG9S95t4sL_gG56-pXi85bp376-QOKG8Eu8VblYx65Qy_jvDvpQ"
 ---
 
 The two bookends of every forward pass: token ids → vectors (`Embeddings`, a Gather) and

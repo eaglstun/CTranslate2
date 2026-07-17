@@ -13,6 +13,7 @@ summary: >-
   fused multi-op encoder is the only lever that would unlock it, but that re-
   serializes CPU/GPU overlap — the same idea that lost 23% on prefill when
   command-buffer reuse was tried.
+semantic_id: "yh4gxgnPo23Q0S19RuspHIVII2uTyqsBClXmC5a9wtYaHXsF76cpX4-4XF1ly8Y6Qissst_zzY5WtezrRrRs4A"
 ---
 
 Sources: https://developer.apple.com/documentation/metal/mtlcommandbuffer/makecomputecommandencoder(dispatchtype:),

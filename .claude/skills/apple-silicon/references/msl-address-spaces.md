@@ -14,6 +14,7 @@ summary: >-
   constant T& via setBytes, tuning constants like CT2_GEMM_S8_BM are program-
   scope constant, GEMM tiles are threadgroup, and char4 element
   reinterpretation within a space is legal.
+semantic_id: "yxwQ5o2Og33S0-39w9kLPoUwr2uTyqNBTlX2GrSX4t4iG_kD96cvWq9gek1nr6cIAi-s29z7wYZ-9Y91x_QrIQ"
 ---
 
 Source (Apple): Metal Shading Language Specification, §4–4.4.1, §4.8 (v4.1, 2026-06-04).

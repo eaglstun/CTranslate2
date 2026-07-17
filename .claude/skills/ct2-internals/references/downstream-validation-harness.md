@@ -13,6 +13,7 @@ summary: >-
   int8's occasional argmax flips are absorbed. The worked 2026-06-11 int8 run
   passed 4/4, and the rig caught the Whisper int8 conv-weight-quantization
   load crash fixed by the model.cc conv-float guard.
+semantic_id: "yx2w8g3qs02Twe1twv0pnadsp2uzyoujChRiupKvxN4oi3kG7a85Xo25eo075-UbjCsk0s9zlY5O7Yz_xrhOoA"
 ---
 
 End-to-end validation against the four real consumers of this library (whisperX,

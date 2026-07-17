@@ -14,6 +14,7 @@ summary: >-
   RNGs so outputs are not cross-device reproducible. On Metal, sampling runs
   the CPU reference over unified memory after a synchronize flush, matching
   CPU determinism exactly.
+semantic_id: "Shywxghvqm2Sg719UtE5FSVoI6-bgqo6Chd3GZy0RtYqBfkOLb8tWg044l1_pwd4Ai8smsw7zR5-9Qyzxvz5pQ"
 ---
 
 CT2-architecture reference: how a row of (log-)scores becomes a token id. The decode loop

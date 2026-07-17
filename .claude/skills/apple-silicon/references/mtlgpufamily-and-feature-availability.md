@@ -16,6 +16,7 @@ summary: >-
   production pass would add in MetalContext for ct2_gemv_s8's simd_sum,
   allocator buffer-size checks, and a future bfloat path, all untriggered
   until a non-M4 machine runs the backend.
+semantic_id: "2h880o2vu03Awe19Tt0LPQdEhWOTyqsgClfqPIT30NyyCf025K-tH494fhx3r68LDC80y8z7lY5O9SyFRrR_pA"
 ---
 
 Sources: https://developer.apple.com/documentation/metal/mtlgpufamily,

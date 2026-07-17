@@ -13,6 +13,7 @@ summary: >-
   at conversion unlike QKV. Includes shapes (d_ff inner), the
   FeedForwardSpec(glu=) converter mappings (llama gate/up/down proj, T5
   gated), and notes GLU means three GEMMs per layer.
+semantic_id: "yx7j8g_OkmXR4f39RuELnac4peuTzqOBChUyDrYN5NwoFHkHTaetHgc7egUtj-0epD0E2s5zlY5-rIzPBvzs4A"
 ---
 
 CT2-architecture reference: `layers::FeedForwardNetwork` — the one transformer sublayer

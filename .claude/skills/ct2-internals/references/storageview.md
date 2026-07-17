@@ -21,6 +21,7 @@ summary: >-
   contents pointer (unified memory) satisfies the same pointer-based contract,
   with allocation routed to the real Metal allocator via early-returns in
   allocator.cc/devices.cc.
+semantic_id: "yx4w1whOom3TEX1NQ9VpvIMYp2vbzqthThVyE4z85s4GK_UXd-dtWoVwas11voYZhA0suu_5zY5-vYyrTvxvoQ"
 ---
 
 Source:

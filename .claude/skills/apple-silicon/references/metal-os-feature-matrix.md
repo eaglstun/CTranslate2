@@ -13,6 +13,7 @@ summary: >-
   availability checks, and the newest language dependency actually used is
   Metal-2-era SIMD-group reductions, so the implicit M1/macOS-11 floor is
   untested (only run on M4 Max).
+semantic_id: "yhw4zo2Ou13Tw-1VxuULvYc8u2uTn6shDldqvJT9wMQqHXkGwa4rUg10fh2v7587jC8U28z7lYZOtSzzRjh_pA"
 ---
 
 Sources: each row cites either an existing reference in this skill (which carries the

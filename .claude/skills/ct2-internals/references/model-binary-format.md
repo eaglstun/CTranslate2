@@ -18,6 +18,7 @@ summary: >-
   replaced by the survivor's name, sharing a shared_ptr at load), and notes
   quantization is baked in by the writer with the loader twinning the same
   127/amax logic.
+semantic_id: "zBowx43ir22Sw-15RtlJPac3oyvTwqsjCpX0m9z_xs4JD1gVd-8tWq04Hg1Ntp4Rii0k-936zY5-tQ2zxrx_oQ"
 ---
 
 The serialized model directory the C++ loader reads and the Python converters write.

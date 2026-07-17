@@ -16,6 +16,7 @@ summary: >-
   decoder/projection/weight resolves to the same StorageView as the embedding.
   Structural options (GLU, rms_norm, GQA, parallel_residual, sandwich norms)
   manifest as weight-variable presence/shape, not scalar attributes.
+semantic_id: "Sx6jwo-Ku23bwX18Rm1pvSc4oyqTjq4HCpViG4St4v4uCjkGxa-tVg-ofh0dp_ceoi8o2s7wjYx-qQ3_Tvz_5Q"
 ---
 
 CT2-architecture reference: how a serialized Transformer model becomes a constructed

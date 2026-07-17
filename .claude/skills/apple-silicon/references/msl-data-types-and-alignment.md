@@ -11,6 +11,7 @@ summary: >-
   accumulate in float because half's 11-bit significand can't survive a
   256-wide sum, simdgroup_matrix has no int8 element type (why int8 GEMM is
   hand-tiled not WMMA), and scalar params are 4-byte types passed by setBytes.
+semantic_id: "yhww4o-Ou33Twe1dz8kLvYc4p0uT2rGhDlVmGPyX5twcHfkPS66tXS99Kh0_664IBE0s28z7AY5-_I-VzvQvpA"
 ---
 
 Source (Apple): Metal Shading Language Specification, §2.1–2.5 (v4.1, 2026-06-04).

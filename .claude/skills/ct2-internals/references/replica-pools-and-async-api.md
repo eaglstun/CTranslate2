@@ -16,6 +16,7 @@ summary: >-
   separate API. Notes pool lifecycle (detach_models/set_models, clear_cache)
   and that on single-device Metal all replicas share one const Model so int8
   weights are resident once regardless of inter_threads.
+semantic_id: "Sxyywolrt22T0X19VktJHac4J-uTxosBCtV5CYycwszuDlkO5a_tXi84Xk0vq89apGssut_zzZxa_Syrhnzo4w"
 ---
 
 The top of the engine stack: how `Translator`/`Generator`/`Encoder`/`Whisper` are all the

@@ -14,6 +14,7 @@ summary: >-
   that metal::flush() waits on before any CPU access. The load-bearing lesson:
   that handle must be global not thread-local, because Conv1D's parallel_for
   issues GEMMs on worker threads that would otherwise never flush.
+semantic_id: "zl1xxgvus-3Sg719Qt1rFochp2uT2quhDlf3kJS14s6KKXkH__8vGk94fk1F6r4ZpC0smszy_Z5-dazvRuxPpQ"
 ---
 
 Two related concerns when sharing data between the CPU and an Apple GPU: how a resource is stored (which processor can touch its memory), and how to coordinate read/write timing so neither processor reads garbage or stalls.

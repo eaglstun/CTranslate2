@@ -13,6 +13,7 @@ summary: >-
   unified-memory buffers without instantiating primitives<Device::METAL> at
   ~50 sites; a real GPU kernel is reached only by targeted operator()-level
   routing checking x.device()==METAL and returning before generic dispatch.
+semantic_id: "yxqYwgmrkm2Wsaz9QllpHLUgoWuTyqElCpXkGpTnw94WLUkD9-svHw2wal11y68KICis8sbwjY56haS_h7U9pQ"
 ---
 
 How CTranslate2 ops are structured and how they dispatch on device + dtype at runtime.

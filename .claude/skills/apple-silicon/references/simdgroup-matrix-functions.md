@@ -14,6 +14,7 @@ summary: >-
   memory. Notes the single shared accumulator type (no mixed-precision
   fp16-in/fp32-out form) and that these primitives remain candidates if an
   fp16/fp32 GEMM ever moves off MPS or a fused-attention kernel is attempted.
+semantic_id: "yhwQ5o-uun2Tw-1dS9ELHYNwreuTirKlDldyGZSH5M4-P2kHV66vWy81ag0vy6UKnC2k-9XziY5-9ayDzqRvpA"
 ---
 
 Source (Apple): Metal Shading Language Specification, §2.4 (types) and §6.8 (functions) (v4.1,

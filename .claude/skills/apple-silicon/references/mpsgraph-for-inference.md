@@ -14,6 +14,7 @@ summary: >-
   structurally mismatched because CT2 itself is the imperative graph executor;
   the only realistic experiment is wrapping one cached weight-stationary
   quantized matmul.
+semantic_id: "yx0w5o8vu-2S8-1Nx80LtCcwp2uTzq8lCtf7i9T_wvoiCXwGZK-tXY-4Wplvr5QvjG8ku93xzY5ONQ3zxLRvpQ"
 ---
 
 Source: https://developer.apple.com/documentation/metalperformanceshadersgraph/mpsgraph

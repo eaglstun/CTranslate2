@@ -14,6 +14,7 @@ summary: >-
   are the future int4 route. This ties to CT2's ct2_quantize_s8 (rint before
   (char) cast, no saturating cast since scale=127/amax bounds |v|<=127) and
   the char4/int4-vectorized GEMM inner loop.
+semantic_id: "yly48gyeqn3zwS1dw1EJvYc8t-uTgquxDhV4G7S8xtY4HekGR6fpXi94Xk03rK9KVGgk28TrjZ5e_AwzhPl_pA"
 ---
 
 Source (Apple): Metal Shading Language Specification, §2.23–2.24 (conversions, `as_type`),

@@ -14,6 +14,7 @@ summary: >-
   at m=1 sustaining ~280 GB/s and hitting 0.49 ms versus fp16's 0.84 ms
   (1.7x). Notes int8 still trails fp16 ~15% e2e per token due to added
   quantize/dequant launches, and the m=3 deep-accumulator exactness oracle.
+semantic_id: "yhkw5o-uu32Sw-FdStwpHYc0r-8TzropCB02OtS1ws42v_0HR64rWy00aB0i76YajGkE28x7z45-teyDjny9pA"
 ---
 
 Source: `src/metal/kernels/kernels_msl.h` (kernel `ct2_gemv_s8`, lines ~831–869),

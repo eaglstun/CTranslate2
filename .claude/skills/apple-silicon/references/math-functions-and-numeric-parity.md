@@ -13,6 +13,7 @@ summary: >-
   The parity lever is setting MTLMathModeSafe or metal::precise:: in
   ensure_library, since src/metal/device.mm compiles the kernel library with
   default fast math.
+semantic_id: "yhiwxoyqqm3Tw_39TvArvaVoJy-Ty6MhDkXzGpyf0vQuHekDxa8rXyc4elw_i58Kim0Em8z7wY5-tO7Dhrx_pg"
 ---
 
 Source: Metal Shading Language Specification (vendored at

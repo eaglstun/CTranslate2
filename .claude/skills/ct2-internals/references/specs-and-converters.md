@@ -17,6 +17,7 @@ summary: >-
   assignment. The serialized name string drives C++ construction through
   register_model in model_factory.cc, and the doc ends with the three-step
   checklist for adding an architecture (specs, converters, C++ loader).
+semantic_id: "y14iwo-Ot20S4f1dTtlLvKM8oWuRxqsBCtVrm4CMw94qD-0OY6cp0g-4eg1tq5UYlis0-8vwnY5-5Rz9hvTvow"
 ---
 
 Sourced from:

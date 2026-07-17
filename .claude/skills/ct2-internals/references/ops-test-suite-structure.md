@@ -15,6 +15,7 @@ summary: >-
   tolerance, the tiny aren-transliteration test models with i16/i8 quantized
   variants feeding ModelVariantTest, and a five-step recipe for a device-
   covering op test.
+semantic_id: "zhg41o7vmm2Xgf1pQnkpPaEwo-uRiqMiClXyGpS1w94YB-kO56ctjg-yeh0mr58KgG0o-tfwlY5etYS1Rq5_4Q"
 ---
 
 How `tests/` is organized, how one test body runs on CPU/CUDA/METAL, and the tolerance

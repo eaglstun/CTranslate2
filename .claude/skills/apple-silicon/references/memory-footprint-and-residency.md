@@ -15,6 +15,7 @@ summary: >-
   cache (allocator.mm makes a fresh newBufferWithLength per request) and
   suggests preflight against recommendedMaxWorkingSetSize plus ru_maxrss as
   the measurement default.
+semantic_id: "yxwx5ho_l13zwa1dSs1JNEMYNSNRyKqgClXjm5zVwkoKC_0W7a4hDo91_s1troc6DC8k-t7b25ZupQbbzvxvhQ"
 ---
 
 Sources (Apple Developer Documentation, fetched via DocC JSON, 2026-06-11):

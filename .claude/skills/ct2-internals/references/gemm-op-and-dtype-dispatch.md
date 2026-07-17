@@ -15,6 +15,7 @@ summary: >-
   no shift compensation. Also explains a_shift_compensation: MKL's s8-to-u8
   shift-by-128 trick and its per-column compute_u8_compensation, which signed-
   int8 backends (cuBLAS, Metal, CUDA) skip entirely.
+semantic_id: "ShqQ5osPum2W0e1dTlgpHacwr-uT2qIhChfwu9S1xsQyFUkXr-9vEA8wapXvz6YapGwk-877jY569bTjDrhdoQ"
 ---
 
 How `ops::Gemm` resolves dtype → implementation, what the integer-GEMM alpha/beta

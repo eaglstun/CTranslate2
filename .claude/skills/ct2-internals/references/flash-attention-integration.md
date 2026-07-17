@@ -14,6 +14,7 @@ summary: >-
   lengths mask. It explicitly does not support cross-attention, CPU/non-CUDA,
   fp32/int8, or ALiBi (wired but nullptr-disabled), so Metal attention stays
   on the composed path — flash is CUDA-only by construction.
+semantic_id: "yh6w9g2Ps23T4a190NgrPaMko2vTyjEjWhdyGpTVYs4MWVkGZ4-N388w-h0syoQapi0kus76h45OfKUPj6Q9pQ"
 ---
 
 CT2-architecture reference: how the vendored Flash Attention 2 CUDA kernels integrate —

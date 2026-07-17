@@ -13,6 +13,7 @@ summary: >-
   CUDA wrapper swaps A and B. The int8 MSL kernel ct2_gemm_s8 resolves all
   four transpose combinations at tile-load time while ct2_gemv_s8 and the
   dequant epilogue are Dense-layout-only, enforced by host routing.
+semantic_id: "yhiQ7ovOq22Swe19T9EpvYcwr2uT2qohTpXwmvSXxtYiDeEXb6_MUgcwSpR3ju4apGwgus37hY5-9YzjDuBvoQ"
 ---
 
 Sources: repo code read 2026-06-11 (`src/ops/gemm.cc`, `src/layers/common.cc`,

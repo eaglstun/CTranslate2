@@ -16,6 +16,7 @@ summary: >-
   per distinct {m,n,k,transposeA,transposeB,alpha,beta,dtype} key (a ~35% e2e
   win), int8/int16 stay off MPS, and the first call pays a ~493ms one-time
   pipeline warmup.
+semantic_id: "yhiQ5omOq-3DseldRt0JvadgJyuTqaohDl_ivNS9xv4CDV8Gua-vXy9xToV3r6waIC8gu837zY5-_ZzjRrBtoQ"
 ---
 
 `MPSMatrixMultiplication` is a Metal Performance Shaders kernel that computes a general matrix multiply (GEMM) on the GPU:

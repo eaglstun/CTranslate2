@@ -15,6 +15,7 @@ summary: >-
   and exact; AWQ ({scope}/weight_zero) is a separate asymmetric scheme. Metal
   routes all three kernels with the fused epilogue and also accepts fp16
   endpoints.
+semantic_id: "yl4wxo6Gm33ywylNxn0JvacUr-uTwi8nDhd1G9SV1uYYQWkX5b-pWq04egy_rlw6oG0k2856zY569Ry_Rrp9pQ"
 ---
 
 CT2's int8 scheme (symmetric, per-row, no zero-point) and the two ops that implement it

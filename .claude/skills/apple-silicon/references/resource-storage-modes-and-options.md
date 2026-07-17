@@ -13,6 +13,7 @@ summary: >-
   fences. Explains why bytesNoCopy is unused, why writeCombined would be a bug
   (CPU-reference fallback ops read buffer contents), and why
   Private/Memoryless are unusable by design.
+semantic_id: "yx0w1wjPq23TE_1Nw81pPIMgJWuTwqsjClfyGZStxt6ADXkH9e8tXk94Pg1Xqo8ajC8Emu37xY5-_a3XTv5-pQ"
 ---
 
 Sources: https://developer.apple.com/documentation/metal/mtlresourceoptions,

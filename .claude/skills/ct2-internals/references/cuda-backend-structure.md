@@ -17,6 +17,7 @@ summary: >-
   operator()-level targeted routing, and lists the three properties Metal
   mirrored: signed int8 no shift compensation, int32 accumulation with integer
   alpha/beta, and dequantize-after as a separate fused epilogue.
+semantic_id: "yhqyxo9uu-3Twe18UnFpHbcwo0OT3i8hChXymtS15v4KLeEG76cPGAe0fl33zp8aJCwsut_zzY5y5Y3rznx9oQ"
 ---
 
 The CUDA backend as the reference implementation for any new GPU backend — what lives

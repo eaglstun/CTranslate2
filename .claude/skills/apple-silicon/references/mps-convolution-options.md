@@ -13,6 +13,7 @@ summary: >-
   src/models/model.cc is_conv guard. The consumer is the Whisper/Wav2Vec2 two-
   Conv1D encoder stem (per-encode, not per-token); the decision rule is
   prototype the custom MSL kernel first.
+semantic_id: "yhwQ5guuv22S4e11SskLvAcoN2uTiq-nCpcnmoSl4t6qj3gG9--tXU-6epFj768TTCos29Ty2Y5OvI7_jrZupA"
 ---
 
 Sources: https://developer.apple.com/documentation/metalperformanceshaders/mpscnnconvolution,

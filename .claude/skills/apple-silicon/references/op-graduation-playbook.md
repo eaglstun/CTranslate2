@@ -12,6 +12,7 @@ summary: >-
   to avoid reading stale GPU data). It catalogs MSL landmines (no erf, lazy
   library compilation, use 1/sqrt not rsqrt, bind every buffer, host scalars
   by value) and states sampling/Conv1D aren't worth a kernel.
+semantic_id: "zlyQxouus-3Tg_19Quk7PIc4q2uT6qsxDldwG5S94v4KDGkHt-8vDw2wWxVXr48QzC0k2sfxhY5e_Y3357VvoA"
 ---
 
 How to correctly move a CTranslate2 op from the CPU-reference binding onto a real Metal

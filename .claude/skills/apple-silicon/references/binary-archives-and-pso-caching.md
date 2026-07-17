@@ -13,6 +13,7 @@ summary: >-
   don't survive OS updates without AIR recompile. Verdict: nothing to win; if
   first-run latency matters, warm the MPS GEMM instead. Touches
   src/metal/device.mm ensure_library and the PSO cache.
+semantic_id: "2xwy1gu_u-3WoelNUtULPIcrheuTj6sRDtUzvpTdwu6KBV0Gtb4tWg943h0PrI8YhC4mus3rzY5q9SznRvB_oQ"
 ---
 
 Sources: https://developer.apple.com/documentation/metal/mtlbinaryarchive,

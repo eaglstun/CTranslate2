@@ -13,6 +13,7 @@ summary: >-
   threadgroup owns its output tile), so adding an atomic is a design change; a
   split-k int8 GEMM could safely use atomic_fetch_add on int32 partials while
   a float split-k would not be bit-exact.
+semantic_id: "yhm85o7uo33Sg6z9w_1pvYUgN2vTi6MhDlf2GZSfweQqDXkHXKcvXi94SB1_p48Kgi0Eks_7hZ5utW2jBvxroA"
 ---
 
 Source (Apple): Metal Shading Language Specification, §2.6 (atomic types) and §6.16

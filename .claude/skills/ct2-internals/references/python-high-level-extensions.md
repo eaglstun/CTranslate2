@@ -15,6 +15,7 @@ summary: >-
   _process_iterable's 16x read-ahead prefetch and _batch_iterator's examples-
   vs-tokens batching, and settles that batch/file/load methods are C++
   bindings.
+semantic_id: "yRywo4vro22S03lpZulflKcoI-uRT6shCldkCZS0ps_qKbmO5c-NXqc4ui0t5o8bhm0kus_57Y5e_c2fB7z8ow"
 ---
 
 The pure-Python conveniences monkey-patched onto the compiled `Translator`/`Generator`

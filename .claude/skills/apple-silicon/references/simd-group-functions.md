@@ -15,6 +15,7 @@ summary: >-
   because these kernels are memory-bound, so the SIMD version only added
   barriers and a cross-group bounce; don't re-chase it without fusing the
   reduction into an adjacent op.
+semantic_id: "yhwU5onqom3Tw-39S30pHYVgo2-TyqulCk-mOZSn5N4uHemHX6erXw85eF17iwUahCEs291zjR5-9a6TxjT_pA"
 ---
 
 Source (Apple): Metal Shading Language Specification, §6.10.2–6.10.3 (v4.1, 2026-06-04).

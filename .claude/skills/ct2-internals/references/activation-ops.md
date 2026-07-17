@@ -13,6 +13,7 @@ summary: >-
   maps HF activation names per model family (BERT/Whisper erf-GELU, Gemma2
   GELUTanh+GeGLU, llama Swish) and notes the Metal tanh-overflow NaN clamp to
   [-15,15] that fixed the Gemma2 pad-collapse bug.
+semantic_id: "y17S9ovnmm2T0-l9xvkrHIcAo2mTyqsxDxf0Dpid4NYiAXgX_L8rHwU7WgUvy3d7pC0s-876jY5-5Zy_BrLtoQ"
 ---
 
 `ActivationType`, the concrete activation ops it maps to, the exact formulas, and the three

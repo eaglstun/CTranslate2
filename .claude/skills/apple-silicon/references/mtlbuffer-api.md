@@ -15,6 +15,7 @@ summary: >-
   mmap-weights opportunity, the explicit %4 offset alignment checks gating
   int8 GEMV, and that no buffer sets label so GPU captures show anonymous
   buffers.
+semantic_id: "zh0w1wgvq23T0etNx8wrvIOgpSuTiaujClfzGpbX4s4KDX0GZactGQ-xfkV3r48KDCskusz7zY5-_Q3jTr5voQ"
 ---
 
 Sources (Apple Developer Documentation, fetched via DocC JSON, 2026-06-11):

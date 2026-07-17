@@ -13,6 +13,7 @@ summary: >-
   saturating helpers, clamp, and mulhi/madhi are irrelevant to CT2's float-
   side dequant and bit-exact contract, tying back to ct2_gemm_s8 and
   ct2_gemv_s8 in kernels_msl.h.
+semantic_id: "yhowxo4vq32zw-39z9UJvYcYJ2uTyqMlDgVmOPSX5t4-HWkGR60vVy8xHh19rxwanIkkk837hY5-9e2hBrg9oA"
 ---
 
 Source (Apple): Metal Shading Language Specification, §6.4, Table 6.2 (v4.1, 2026-06-04).

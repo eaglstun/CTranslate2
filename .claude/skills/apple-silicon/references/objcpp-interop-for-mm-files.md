@@ -14,6 +14,7 @@ summary: >-
   autoreleased +0), bridge-cast reference, and two silent-failure rules —
   messaging nil is a no-op returning zero, and NSError** out-params signal
   failure via the return value not the error object.
+semantic_id: "ihoz5o8urm2X07t9Q3krPYE4J-ORyqsxDlNwnpCdxv4aHVgH57YrW6_4Xk0uq4wYbisk-sz5jY5-ve2Tjr7tpg"
 ---
 
 How this repo actually mixes Objective-C and C++ in `src/metal/`, plus the language

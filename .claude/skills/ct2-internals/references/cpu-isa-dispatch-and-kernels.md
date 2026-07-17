@@ -13,6 +13,7 @@ summary: >-
   get_gemm_backend priority ladder (MKL/DNNL/Accelerate/OpenBLAS/Ruy). For
   Metal: Apple Silicon builds get NEON+GENERIC, and CPU-reference ops on
   Metal-resident data run these NEON kernels.
+semantic_id: "2lo45ouusm3Sg619SskpHA88oWnTwqsjChf3m5zF5tQSaXkE5Y-NX6-8XlQnqr0qwC0s2s76hY5qpb7zBrR9pA"
 ---
 
 How one binary carries several ISA variants of the CPU inner loops (AVX/AVX2/AVX512/NEON) and picks one at runtime.

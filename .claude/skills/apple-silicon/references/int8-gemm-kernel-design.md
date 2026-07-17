@@ -15,6 +15,7 @@ summary: >-
   alpha. The tiled kernel is ALU-bound ~2.4 T-MAC/s (structurally ~3-5x slower
   than MPS fp16) and is now the fallback since the Metal-4 MPP matmul2d path
   ties MPS fp16, but int8 still wins peak RSS (-42%).
+semantic_id: "yhkQ5o-em33Sw-1dSvkrnYMwr2uTmqIpCheyudS3xN4CP-kHR66rVi80bhVnj4w6zC0k2s37IZ5u9c3TjOztpA"
 ---
 
 Source: `src/metal/kernels/kernels_msl.h` (kernel `ct2_gemm_s8`, lines ~744–829),

@@ -14,6 +14,7 @@ summary: >-
   in finalize_hypothesis_score, and hard vs biased (prefix_bias_beta) prefix
   modes. The shrinking-m batch dimension and on-GPU Gather cache reorder are
   the Metal-relevant hooks.
+semantic_id: "yx628gnrs22awT1NwMgpnYcqoS-TyYuqCh1mu4ykw1ZqL9kex75F3o-4ftleo4cKBC0s-sb5jY56vezDRvB4oQ"
 ---
 
 CT2-architecture reference: the token-generation driver in `src/decoding.cc` — what a

@@ -13,6 +13,7 @@ summary: >-
   DNNL builds. Conv1D is audio-only (Whisper encoder stem, wav2vec2); Metal
   has no conv kernel and uses an fp16-to-fp32 upcast island around the CPU
   reference.
+semantic_id: "yhww5ouqs22Xwe19SPEpPJMwo-PTgqslCldym4S14NYqnXkGt-epWw82fpV_6u9LJHgses1ynY5-9ay7hvwtpQ"
 ---
 
 The one convolution in the engine: interface, the three backend strategies

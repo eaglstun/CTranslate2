@@ -13,6 +13,7 @@ summary: >-
   has no positional mechanism of its own. Metal note: RoPE has a native kernel
   with scaling variants upstream of it, while additive/ALiBi/relative-bias
   additions run the CPU reference over unified memory.
+semantic_id: "il6mxglrm23Twz19R-0LXCc4o2-Ty6sDCpZ2G9zv5s42K3kHb6etX404Wk0_i49Tsi8sc9z7h456_Q2LBLhvpQ"
 ---
 
 CT2-architecture reference: the position-encoding family. `attention-and-kv-cache.md`

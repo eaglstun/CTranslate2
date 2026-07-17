@@ -16,6 +16,7 @@ summary: >-
   makes mayiuse_int8/float16 return true while AUTO deliberately pins to
   FLOAT32 so int8 stays an explicit opt-in; also covers the Python
   get_supported_compute_types surface.
+semantic_id: "yho41ovuu22ygaVdyl1LMac4p2uTwqMpDhd2G9S15tQ6B80U7a-NWC0xas09y6cSBiwk88_zjd5e_Q2TDPxu4Q"
 ---
 
 How a requested compute type (`"auto"`, `"int8"`, `"int8_float16"`, `"float16"`, …) becomes

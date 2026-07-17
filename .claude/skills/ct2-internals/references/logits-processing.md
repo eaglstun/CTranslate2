@@ -15,6 +15,7 @@ summary: >-
   read-only apply_first processor, and ApplyTimestampRules does real per-step
   LogSoftMax tensor math. On Metal, DisableTokens takes the non-CPU
   indexed_fill branch and ApplyTimestampRules upcasts fp16 log-probs to fp32.
+semantic_id: "yxy45gnrom2b8a1dzMkrnbcuIWuTwosDDhewGxyvRlYOr3kGr4-tXo8w2o0u461aiC2s0sxyrQ5-vdzXjrz9pQ"
 ---
 
 CT2-architecture reference: the logit-manipulation machinery that runs between the

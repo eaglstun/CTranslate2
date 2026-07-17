@@ -12,6 +12,7 @@ summary: >-
   ct2_strided_copy_bytes kernel keeping KV-cache append off the CPU, Gather
   has a kernel for the axis==batch_dims case, but Transpose and Tile have no
   Metal routing and run the CPU reference on unified memory.
+semantic_id: "yxyy5grKmm-T0S1NxP0qnIc6qWuThqszCBVlG-y9xuYmjckFba-tWo25eo09r8daJC0s-s3ZhY5-vZ3_Bvg9oQ"
 ---
 
 The data-movement family the decode loop lives on: Concat, Split, Transpose, Tile, Slide,

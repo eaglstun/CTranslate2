@@ -11,6 +11,7 @@ summary: >-
   exist (no CT2_USE_EXPERIMENTAL_PACKED_GEMM, no CT2_CPU_BACKEND). Crucially
   the Metal backend has zero env vars — only MSL threadgroup-size constants —
   and the removed CT2_NO_MPS_ACT bisection switch should not be cited as live.
+semantic_id: "yhyA9gmmu22SQ-1dQsFrPIc8oiPTgq8jDhc2G9S15N4iDW0W5vstGx96WxVl76VblW0k28xznY5u5Zz7hfYvoA"
 ---
 
 The operational debugging card: spdlog wiring, what each `CT2_VERBOSE` level prints, and

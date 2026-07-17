@@ -12,6 +12,7 @@ summary: >-
   structural fact: simdgroup_matrix is half/bfloat/float only with no int8
   WMMA, so int8 wins only in bandwidth-bound decode GEMV, never on ALU
   throughput, unlike CUDA dp4a/tensor cores.
+semantic_id: "yj8wxg-eu02Swe19XtULHUcwreqTyqilChU2mpS34N46P-kH0acpCg80fg1v640YpCkk-tzS_45-9QzzzvQfpQ"
 ---
 
 Sources: Apple DocC article "Tailor your apps for Apple GPUs and tile-based deferred

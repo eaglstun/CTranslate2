@@ -14,6 +14,7 @@ summary: >-
   backend, and a blit would only help by keeping a large contiguous device-to-
   device copy (KV-cache reorg, beam reordering) on the GPU timeline instead of
   forcing a mid-pipeline CPU read.
+semantic_id: "yl9w9gmOu-3S4fl9U9wJHKdgp2uT1auhCld2HoT14s4KDdkG9_ctGY9-Htln464orC0k2sz5zY5uva3nRvQvhQ"
 ---
 
 Sources: https://developer.apple.com/documentation/metal/mtlblitcommandencoder,

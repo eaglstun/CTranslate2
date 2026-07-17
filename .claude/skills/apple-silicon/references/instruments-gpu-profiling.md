@@ -13,6 +13,7 @@ summary: >-
   os_signpost_id_generate. It honestly flags that Instruments was not actually
   run while writing the card; descriptions of trace contents come from Apple
   docs and must be verified in the UI on first use.
+semantic_id: "zhy45o3vs223g719UNspNIdUowORy6snChU0GpSl5N46D2kG5e-r1A-6Whkt6586oA8s289xnZZW8Yznx_gvpQ"
 ---
 
 The repo's benchmark harness (`benchmarking-and-profiling.md`) measures _wall time from

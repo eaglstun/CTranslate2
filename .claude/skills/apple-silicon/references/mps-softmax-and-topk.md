@@ -12,6 +12,7 @@ summary: >-
   CPU-reference) is the real graduation opportunity, gated by the k<=16 limit:
   greedy and beam sizes fit but k=40-style top-k sampling does not. Lays out
   the four-step graduation path including the UInt32-to-int32 index shim.
+semantic_id: "wByQ5gmru22Sw-3dztkLvCdmJ2uTirs1ChfmmJStwP4MD_kGRa-t34807g1_r60IjmUkm8z52Y5u_YTxjrRvpQ"
 ---
 
 Sources: https://developer.apple.com/documentation/metalperformanceshaders/mpsmatrixsoftmax,

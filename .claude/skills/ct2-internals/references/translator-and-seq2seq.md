@@ -15,6 +15,7 @@ summary: >-
   shared score_sequences teacher-forced forward. For Metal, encode is the
   prefill regime that wins while beam decode is the tiny-op regime;
   nllb_driver.py is the canonical consumer.
+semantic_id: "yV6Q4gmrl22TwW1dwvFpvQUoo2uTz7sjClVgG4StwkZiH0kXbaeIXq94W4l4q8Y6pi0I-c_7zY5-vYy7hvBtpQ"
 ---
 
 CT2-architecture reference: the encoder-decoder runtime path — `Translator` pool →

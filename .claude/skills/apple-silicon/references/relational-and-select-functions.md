@@ -15,6 +15,7 @@ summary: >-
   ct2_tanh_safe. Distinguishes componentwise all/any from the cross-lane
   simd_all/simd_any votes, and notes no relational function is currently
   called in kernels_msl.h, making this a debugging-session card.
+semantic_id: "yhg0xg0ur-2T0ex5TtkJFYksNyvTyiMRDldqGpSeUtQqH3EHZL8rXg84el0sr68ajC8sms37hY5e_C6Pxugmow"
 ---
 
 Source (Apple): Metal Shading Language Specification, §6.5 (v4.1, 2026-06-04); fast-math

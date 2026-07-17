@@ -13,6 +13,7 @@ summary: >-
   exact, compiles via newLibraryWithSource, but requires 2 cooperating SIMD-
   groups (not Apple's 4) and exact-type dispatch. It is the documented
   successor to the hand-tiled ct2_gemm_s8.
+semantic_id: "ylo0wo2Oq33Dw-l9R8QJPAc4NSuTyCIhLlf0nZTV5t4KHX0GxaarXa10bh9sj-4aDC0kw8zzjYZu9QWhzLx_pQ"
 ---
 
 Sources: Apple DocC JSON (fetched 2026-06-11):

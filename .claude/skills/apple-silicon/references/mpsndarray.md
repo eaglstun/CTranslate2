@@ -15,6 +15,7 @@ summary: >-
   deliberately not benchmarked because Metal-4 MPP matmul2d already ties MPS
   fp16 while staying int32-exact, plus MPS documents nothing about its
   accumulator exactness.
+semantic_id: "yBwUpowPu32S8ettT_0Jvac0N2eTqSohDtfjvZTXws4anbkH5a-pXY9wXg12rowJzH0ku9z7zY5uNUTBjrRvpw"
 ---
 
 Sources: https://developer.apple.com/documentation/metalperformanceshaders/mpsndarray,

@@ -18,6 +18,7 @@ summary: >-
   set_decoder's per-layer q/k/v fuse_linear and gate/up/down mapping with
   delattr+gc.collect to keep peak RSS at one model), and notes adding a llama-
   family variant is often one new subclassed @register_loader class.
+semantic_id: "S17y9wu-su3T4X19RvnLnSc8pyuSxKoDClVtHo68xt4qKWgEYb8tWg25eg0t740Rrm0k-837jY5uvQybxrzvsw"
 ---
 
 The internal architecture of `python/ctranslate2/converters/transformers.py` — the

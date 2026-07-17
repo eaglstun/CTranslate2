@@ -12,6 +12,7 @@ summary: >-
   then-MAC loop (removing the second barrier is the classic bug), the
   256-thread tree reductions barrier per halving step, early-exit guards must
   be uniform per group, and ct2_gemv_s8 folds via simd_sum barrier-free.
+semantic_id: "zh8Q5ovuom3T0zx9S_lpH6Uwg2uTx6slDlUymMS_xOYqGfkD36ep3694Wk19y6capm8E-91zjZ5-9a_TR_TvpA"
 ---
 
 Source (Apple): Metal Shading Language Specification, §6.10.1 + §4.4.1 (v4.1, 2026-06-04).

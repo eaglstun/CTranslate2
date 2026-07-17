@@ -14,6 +14,7 @@ summary: >-
   profiling exposed the elementwise Add op exploding 27x in fp16. Its
   discipline rules are always-Release-always-warm, isolate the decode/prefill
   regime, and pick the right probe for the question.
+semantic_id: "yp4gxg2uum2TAfl9wPkZPKNwl6ORx68jDlX-OJa1xv4qBekGja-oVy-zfo0k648aqGc8c8V6nZ5W8ayvxjj8oQ"
 ---
 
 Every number in `METAL_BENCHMARKS.md` — and every conclusion in

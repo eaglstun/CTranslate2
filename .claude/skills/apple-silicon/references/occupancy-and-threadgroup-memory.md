@@ -13,6 +13,7 @@ summary: >-
   softmax/norm/quantize reductions use ~1-2 KB with 256-thread groups, and
   ct2_gemv_s8 uses zero threadgroup memory by design. Ends with a low-
   occupancy triage checklist.
+semantic_id: "ykwRxguvk33Sk-1tQv0LPYdapWPTy6slCpW3GpSH4M4OL28W96ctnI1-fl1viwY6oC8s-8xTjZ5u9YyTxvUupQ"
 ---
 
 What bounds how many threads/threadgroups actually run concurrently, and the properties

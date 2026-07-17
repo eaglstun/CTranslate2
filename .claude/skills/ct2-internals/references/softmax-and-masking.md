@@ -13,6 +13,7 @@ summary: >-
   materializing exponentials) and the key fact that the 1/sqrt(d) query scale
   is folded into the QK^T MatMul alpha, not into SoftMax. On Metal, fp32/fp16
   route to metal::softmax with the masked contract holding bit-for-bit.
+semantic_id: "yho49g-vom2Tk23dzt0rvadyoyuTzqonChWynJSPxN4GD_kHRa8t349wah0-q6UIhC0gksz5nY5-9ZW3jrStpw"
 ---
 
 The SoftMax/LogSoftMax op: last-dim semantics, the optional lengths mask (how padding is

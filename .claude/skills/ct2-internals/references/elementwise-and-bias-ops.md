@@ -14,6 +14,7 @@ summary: >-
   graduated (fused bias+residual+activation) while Sub/Min/Max fall to the CPU
   reference; wiring one GPU Add kernel gave 27x on that op and flipped fp16
   prefill to a win.
+semantic_id: "yl404glPmm3Twb1tRvkJnCcko2uTy6cjChf-GrT_0t86DXkGz-ctHg9-WA1ty4UKJC8s28z5hY5K5Y3_hrh9pQ"
 ---
 
 The binary elementwise family (Add, Sub, Mul, Min/Max) and BiasAdd: what broadcasting CT2

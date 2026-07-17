@@ -13,6 +13,7 @@ summary: >-
   exists, sets epsilon defaults (1e-5 with beta, 1e-6 without), and exposes a
   fused add_norm. Notes the Metal-only fused
   ct2_add_rms_norm/ct2_add_layer_norm kernels measured 1.2-1.9x faster.
+semantic_id: "yhiiwo-rqm3SE__tTmFrvaEip2-Ti64jCoXqGpyP9PYmH3kD56uJViU7egW_g91aoG0gm8xyxa5-9IzpBrRtpw"
 ---
 
 The two normalization ops: constructor params, gamma/beta vs gamma-only, the general

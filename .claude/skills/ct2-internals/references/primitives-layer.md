@@ -16,6 +16,7 @@ summary: >-
   Crucially there is no primitives<Device::METAL>: METAL_DEVICE_CASE binds
   D=CPU so generic dispatch runs CPU primitives on Metal-resident pointers,
   while GPU compute enters via separate metal:: entry points.
+semantic_id: "Shw6wo-us22Swa1dwnEpPKM0o2vTzqGBSlX6G5SX4swHLHkGZ5MpHw2weg0_740KxC2k-9z5hY5upY-XhKz9pQ"
 ---
 
 The "basic vector/matrix functions over raw arrays" level of the engine — below ops, above ISA kernels. CLAUDE.md names it; this documents it.

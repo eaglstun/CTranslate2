@@ -13,6 +13,7 @@ summary: >-
   SwiGLU gate+up, pre-quant fusion, and how the chosen scheme becomes the
   saved compute type read back by infer_compute_type. Metal note: an int8
   model converted once runs unchanged on CPU and Metal.
+semantic_id: "yx6who7umm2zwSltxv0JvKc4p2qTwq6lDhd9G9T_xtYyCXgG76eJWg85eh0foi04gC0k2837jY5ytQy3xrhvpQ"
 ---
 
 What converters do to weights BEYOND mapping them onto the spec tree

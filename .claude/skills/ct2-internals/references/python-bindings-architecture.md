@@ -19,6 +19,7 @@ summary: >-
   rebuild and a wheel rebuild, with rpath/CTRANSLATE2_ROOT and the downstream
   install_name_tool rig), which bites hardest for Metal kernel changes hidden
   in the dylib.
+semantic_id: "yxqx0o2qs-22gy1tRnUrvKcho-vTxatBChVmG5Ttx3aMLXgXocc9nye4-lk9rg8hJikk-sf5jY56tYUvxjx9sw"
 ---
 
 How `python/cpp/*.cc` wraps the C++ engine into the `ctranslate2` package: module layout,

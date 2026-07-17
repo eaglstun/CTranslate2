@@ -14,6 +14,7 @@ summary: >-
   consumers tokenize in Python so the backend never sees strings, and an
   active vmap re-Gathers the output projection per batch, defeating cached MPS
   GEMM descriptors.
+semantic_id: "zRyU953rpy2Tw21JxuEPtLcso_nTTqshClUhS5S0tlciDXgUB-8tX685eok9qodaiC0MsM_7jY5etZ2Sh7D9pg"
 ---
 
 What the engine knows about text: an indexed token list and an optional target-vocab

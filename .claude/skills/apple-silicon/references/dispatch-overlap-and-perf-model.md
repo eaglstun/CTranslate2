@@ -16,6 +16,7 @@ summary: >-
   (~35%), and GPU fp16 Add for residuals (27x on that op). Also flags
   Concat/Split GPU graduation as correctness-only and lists open levers like
   .metallib, fp16 RMSNorm, and fused attention.
+semantic_id: "yjk4xg-uu-2bAb19RN0pFKc4JWOTgqslClf-GpSdxnY6CnkG568LSwf5Whxj6a84JGsks87z3Z5-9aSrxrxuow"
 ---
 
 **This is the canonical home for the Metal backend's performance reasoning.**

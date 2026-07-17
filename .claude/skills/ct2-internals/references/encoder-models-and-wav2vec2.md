@@ -18,6 +18,7 @@ summary: >-
   depthwise-conv module, Swish/ReLU activations) plus downsampling adapter
   layers. Flags that the wav2vec2 family is the only non-Whisper Conv1D user,
   hitting the Metal CPU-reference/fp32-upcast island.
+semantic_id: "S1xw8gnKt23S4619RugLvDc8o2vRxqsCCtTiGpacwN6mHVwt7_utX286Xl0Mqu0Kgi0sUsXyzY5-rQzfDnB_pA"
 ---
 
 CT2-architecture reference: the encoder-only surface — the `Encoder` pool for BERT-style

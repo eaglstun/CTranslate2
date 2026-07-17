@@ -15,6 +15,7 @@ summary: >-
   conv weights un-dequantized until Metal was added to the guard, fixed by one
   line, since Conv1D on Metal runs the float32 CPU reference over unified
   memory.
+semantic_id: "y16w9ouuu022wG1tRlkpPKc5pyvTwqotChVzm4z94t4iD_gM9-95yg-4eh197odSBj8k-876_Y5a_Cy_xv1upQ"
 ---
 
 The model-load weight pipeline in `src/models/model.cc`: binary read → variable index →

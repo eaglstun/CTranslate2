@@ -17,6 +17,7 @@ summary: >-
   that on Metal the per-scope sync becomes a full metal::synchronize()
   destroying async-commit overlap, so trust the ranking not the magnitudes;
   profiling is C++/CLI only, not bound in Python.
+semantic_id: "ylyy5wmrou2XkfldQvlJnaUkpyOTiqonChN0W5S9R94qDfMW56-NXw9yHk0ty-87iCUsm85yjQ56_IyvRvzsJw"
 ---
 
 The integrated profiler behind `--log_profiling`: a compile-time-gated, RAII scoped-timer

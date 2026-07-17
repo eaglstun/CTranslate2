@@ -17,6 +17,7 @@ summary: >-
   gather between steps), cache shapes and dtype (output_type, fp16 for
   int8_float16 models since int8 touches only weights), DecoderStateCache for
   static_prompt caching, and that no Metal-specific state code is needed.
+semantic_id: "yx8w9ojKr22bcy1dwNRpPIcepyuTzasCChVmD-SV5sYOD1kF_6fkSq04fokXr8YeBi4Issf5jY5evSTrTvg9oQ"
 ---
 
 CT2-architecture reference: `DecoderState` — the string→tensor map that carries the KV

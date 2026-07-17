@@ -14,6 +14,7 @@ summary: >-
   lines. Placement is pure CPU-side orchestration deciding call order and is
   orthogonal to Metal; only last-axis affine norms hit the GPU kernel, with
   general-axis or no-affine norms falling to the CPU reference.
+semantic_id: "Sx6xwgyKmm3Qgf1tTmlrtaUopSuTzacnCpWyG4S89npuDkkHz6YtFg872pV-jeUwpGkkk974hYZ-qSzbRrR_Yw"
 ---
 
 CT2-architecture reference (not an Apple/Metal topic — but the norms work spans both,

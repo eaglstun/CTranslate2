@@ -14,6 +14,7 @@ summary: >-
   classification, reduce points, getNRanks-divided head geometry) and notes it
   is entirely dead code on Metal, where parallelism means replicas, not
   sharding.
+semantic_id: "ylw24govq22Uw_ldRv0LFaUgpyuTyrunDhfzmpTd5u-qTckGaacp20eYek1vq-QKBC8s2tzzpY4-9A-nzrz-pQ"
 ---
 
 CT2-architecture reference, survey level: the multi-GPU tensor-parallel mode — what

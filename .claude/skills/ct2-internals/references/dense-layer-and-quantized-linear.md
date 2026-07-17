@@ -13,6 +13,7 @@ summary: >-
   else path is one Gemm. The doc's proof of the layering is that the entire
   int8-Metal project changed this file zero lines — all Metal int8 work landed
   in the quantize/dequantize/gemm op routing and src/metal/.
+semantic_id: "yh4ixo-Pu22SQfxNRl0pvac8p6uTz64hCpV6m_CdwuYiAfkPpaeLUocwOhwPrsQahC0k2sx7lY569RyihuxtoQ"
 ---
 
 How `layers::Dense` decides between plain GEMM and the quantize→gemm→dequantize pipeline,

@@ -13,6 +13,7 @@ summary: >-
   replica ThreadPool mechanics cover backpressure at max_queued_batches,
   worker lifecycle, the idle() synchronize_stream hook (metal::synchronize on
   Metal), and Linux-only core pinning.
+semantic_id: "yhywwoovs-3SkbldVvFvMKEBp0OTi6uhClXzGJSU4uzLTXkE94eHHg94ek1vqo8ZJC4k2szzzZ4a_Wb7Bnz-ow"
 ---
 
 CPU-side threading: the two parallel runtimes, `parallel_for`, and how `inter_threads`/`intra_threads` flow from the public API down to the loops. Practical focus: which knob does what, where it's enforced.

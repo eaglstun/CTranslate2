@@ -15,6 +15,7 @@ summary: >-
   dependencies while g_last_committed/metal::flush() handles CPU-GPU. It names
   the triggers that would make them load-bearing: a second command queue,
   untracked MTLHeap resources, or finer-grained mid-stream CPU waits.
+semantic_id: "yh384gqqo-3Tg319Qp0pnoegI2ubz6sHDtXymoq_wkxOCHkO5a8vHA3yXR17h6YYhi-Mlszz1cZe7YXnRrRu4Q"
 ---
 
 Sources: https://developer.apple.com/documentation/metal/mtlfence,

@@ -15,6 +15,7 @@ summary: >-
   standing rule: any Metal path bypassing that command-buffer pair must wrap
   itself in a pool, and the diagnostic signature is steady total-RSS climb
   with flat malloc heap.
+semantic_id: "yxg49gr_o23Skz1txtstv4UJozORhquhChdjGJSFxt4uDvkG568JHqcwWE0Gq4cSAg8sss9TnZ5ufW0PxLxrpQ"
 ---
 
 **The project-proven memory lesson:** Metal/MPS Objective-C objects returned at +0

@@ -16,6 +16,7 @@ summary: >-
   ensure_library() with default options and caches pipelines in a name-keyed
   map; function constants are the clean lever for int8 GEMM tile-size
   variants.
+semantic_id: "yhyw14muu03U0elNSvULPIc4L-OTzqmhCtdyGpSf486oTV0WtKevXg92fx83r74JCi8kutzrlYZ69ay3Rvl9pQ"
 ---
 
 Sources (Apple Developer Documentation, fetched via DocC JSON, 2026-06-11):

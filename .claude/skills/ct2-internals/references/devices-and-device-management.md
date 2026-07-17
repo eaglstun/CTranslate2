@@ -15,6 +15,7 @@ summary: >-
   semantics where both collapse to metal::synchronize() on Metal,
   destroy_context teardown, and the tensor-parallel MPI/NCCL rank globals
   living in the same file.
+semantic_id: "yh6Y5ovuk-zWgz19wvk7PaMAo2uZiyshClXyGpS14OYKCekB_68pn6cwel11678SgA4s-s5xjY5e4SSvh21foQ"
 ---
 
 The `Device` enum and the small set of functions that resolve, set, and synchronize devices. Short file — `src/devices.cc` is the whole story.

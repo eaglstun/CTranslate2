@@ -13,6 +13,7 @@ summary: >-
   which removes padding around position-independent FFN/projection regions via
   ops::Gather index maps, gated by allow_padding_removal (CPU always, GPU only
   when compute_type is not FLOAT16), so Metal fp16 runs keep padded shapes.
+semantic_id: "yx644wvqo32Sw7x9hth_nYcoonuTxKuzDhV9mvS9Zs5uLrmO16cpXy84fskSx49oBw088sz5zY56vaS3BrLtoQ"
 ---
 
 CT2-architecture reference: how user inputs become efficiently-shaped batches and how

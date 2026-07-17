@@ -18,6 +18,7 @@ summary: >-
   Metal the conv stem is a CPU-reference island needing the conv-weight float
   guard, and ApplyTimestampRules carries the file's one CT2_WITH_METAL
   fp16->fp32 upcast branch.
+semantic_id: "yxyy8omKt23Tgb1dQukrvCcuJ-PRzrspCldgGpS8wl5qK9kEjb8sX484Wo0u6-ZapG0s8t7ylY5-_YyTjnBtpw"
 ---
 
 CT2-architecture reference: the Whisper model surface — `encode` / `generate` /

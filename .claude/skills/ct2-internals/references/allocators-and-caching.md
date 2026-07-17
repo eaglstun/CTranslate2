@@ -16,6 +16,7 @@ summary: >-
   workers. The Metal allocator returns the contents pointer of a Shared
   MTLBuffer with an address-ordered side table mapping pointers back to
   buffers, no ARC and no clear_cache override.
+semantic_id: "yx4w9olvk23Tk6VdwtkrHQcQpWuzyasCShNwGpC1Ys4LKX0GZ-9kGo90ek1V764LgA8suu5bzY5-Nae_Tuxv4Q"
 ---
 
 How device memory is allocated, cached, and handed to `StorageView`.

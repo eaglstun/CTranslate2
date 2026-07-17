@@ -13,6 +13,7 @@ summary: >-
   steps 1-4 but compiles MSL at runtime lazily via newLibraryWithSource, hand
   kernels use dispatchThreads (hence no OOB guards), and every referenced
   buffer must be bound (the dummy-buffer gotcha).
+semantic_id: "yByQxguus-3Wk-19SvkpPKdoqWsTyqupCpXyOpS_4t4qTHkGla8vFY32eR1vj48aQC8s8szzxZ5etSzjBvU7oQ"
 ---
 
 Sources (Apple Developer Documentation):

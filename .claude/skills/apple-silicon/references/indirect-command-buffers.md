@@ -14,6 +14,7 @@ summary: >-
   did (−6% bs8 decode, −23% prefill from killed CPU/GPU overlap), shapes
   change every decode step, and MPS GEMMs can't participate; the honest first
   step is indirect dispatch plus op fusion, not ICBs.
+semantic_id: "yh0xxglvqm3Uk219xukpnYMgrXvTy6uZDpdiEpT35taqOXkG56ctXw08esXv7w47pAcgsu3x5Y5-9W__TrQrpA"
 ---
 
 Sources (Apple DocC JSON, fetched 2026-06-11):

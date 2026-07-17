@@ -15,6 +15,7 @@ summary: >-
   three-plus runs recording spread, and --out /dev/null; there is no
   generation or Whisper CLI, so those changes need a Python driver or gtest
   micro-benchmarks.
+semantic_id: "yxqa1wnrl22Vwa1tRv1tnIUuK3uTwoMnClf0G9b950xqj0kHd--MX4062l1N6o8aqC0o88_zrYZ-veyfxrQ9pQ"
 ---
 
 The one CLI client — `cli/translator.cc`, built as `ct2-translator`

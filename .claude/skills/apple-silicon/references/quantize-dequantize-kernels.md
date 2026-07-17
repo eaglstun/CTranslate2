@@ -16,6 +16,7 @@ summary: >-
   the 256-thread host/kernel coupling, and the dummy-bias buffer binding at
   index 3; these launches are the per-Dense overhead keeping int8 decode ~15%
   behind fp16.
+semantic_id: "yh0Qxo6Gm33yw-FdxvkJvac4r2uTyrYnThf0G_S11sYCD_kHZ6-5Wq00elyuzkQ6rE0k2sx6rY569czzxno9IQ"
 ---
 
 Source: `src/metal/kernels/kernels_msl.h` (kernels `ct2_quantize_s8_{float,half}`

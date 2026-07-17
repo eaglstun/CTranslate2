@@ -17,6 +17,7 @@ summary: >-
   combine, output GEMM) at m=batch, which is the structural reason Metal
   decode is API-overhead-bound; also flags Concat/Split GPU graduation as
   parity-verified but e2e-neutral.
+semantic_id: "y1qy8gjKu22Qwy1tQOxrnKc8ozuTwasDCxd2Hoy1xkYOJdkHZ6-pH405Ot0cr8cYZi0Mus_7hY5-va2Hjvg9pQ"
 ---
 
 CT2-architecture reference: how `MultiHeadAttention` projects, reshapes, rotates, and

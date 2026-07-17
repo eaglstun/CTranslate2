@@ -14,6 +14,7 @@ summary: >-
   loop. For Metal it notes run_generation straddles the prefill regime (GEMM-
   heavy, Metal wins ~2.6x) and the tiny-op decode regime, with KV cache
   staying device-resident; qwen_driver.py is the canonical consumer.
+semantic_id: "Txy64wnqs22TwWlNQuNLnac4p-qSw7sBClViOVa8RnZqT9smza-JXq84fg01729bBm00-s_7zY5evwyTR7h95Q"
 ---
 
 CT2-architecture reference: how a decoder-only LM runs — the `Generator` pool surface,
