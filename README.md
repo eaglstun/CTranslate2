@@ -126,6 +126,15 @@ Executed with 4 threads on a [_c5.2xlarge_](https://aws.amazon.com/ec2/instance-
 
 Executed with CUDA 11 on a [_g5.xlarge_](https://aws.amazon.com/ec2/instance-types/g5/) Amazon EC2 instance equipped with a NVIDIA A10G GPU (driver version: 510.47.03).
 
+#### Apple Metal — choosing a `compute_type`
+
+On the Metal backend the fastest `compute_type` depends on the **model architecture**, not a single global default. The deciding factor is whether the model's hot ops have fused FP16 GPU kernels: if they do, FP16 activations stay on the GPU and win; if not, they pay an FP16↔FP32 conversion tax. Measured on an Apple M4 Max (full tables and methodology in [`METAL_BENCHMARKS.md`](METAL_BENCHMARKS.md)):
+
+- **Decoder-only LLMs** (e.g. Qwen2.5) → **`float16`**, in _every_ regime. Its hot path (fused SDPA, RMSNorm, RoPE) is FP16-native, so FP16 wins both decode (up to ~3.6× vs the Accelerate CPU backend) and prefill (up to ~3.6×), and its lead grows with prompt length. `int8` is the _slowest_ Metal option here.
+- **Encoder-decoder translation** (OPUS-MT, NLLB, M2M) → **`int8`** for decode / small batch, **`float32`** for large-batch prefill. These models route more ops through the CPU reference, so the FP16-activation types (`float16`, `int8_float16`) are a _pessimization_ — avoid them.
+
+Rule of thumb: **LLM → `float16`; classic encoder-decoder → `int8` (decode) or `float32` (prefill).**
+
 ## Contributing
 
 CTranslate2 is a community-driven project. We welcome contributions of all kinds:

@@ -65,6 +65,151 @@ objects (~35% on top of batching), which a measurement pinpointed (see Analysis)
 still dramatically slower than the CPU on this tiny model — its ops are too small to amortize
 any GPU API cost — but the gap roughly halved.
 
+## Real translation model — OPUS-MT en→de (2026-07-20, current build)
+
+A real ~75M-param Marian encoder-decoder (`Helsinki-NLP/opus-mt-en-de`), converted with
+`ct2-transformers-converter` and run through the **Python bindings** (`device="metal"`),
+not the gtest rig. This is the current build — fused decode attention, MPS-GEMM cache, async
+commits all present — so unlike the historical transliteration row above, **Metal now wins**.
+
+- **Machine:** Apple M4 Max (40-core GPU), 64 GB, macOS 26.5.2
+- **Package:** ctranslate2 4.8.1 (whisperX venv, linked to the `~/.local/ct2-metal` dylib)
+- **Method:** beam=5, en→de, batch of repeated sentences; median of 5 timed passes after
+  2 warm-ups. int8 / int8_float16 quantized at load from the fp32 model. Harness:
+  `EasyNMT/ct2-bench/bench.py`.
+
+Throughput in generated tok/s (higher is better), speedup vs CPU-fp32 (Accelerate) in
+parens. CPU int8 is unavailable on the Accelerate build (no efficient int8 kernel) — it
+`ValueError`s cleanly, as expected.
+
+| batch | CPU fp32 | Metal fp32       | Metal fp16   | Metal int8       | Metal int8_fp16 |
+| ----- | -------- | ---------------- | ------------ | ---------------- | --------------- |
+| 1     | 163      | 203 (1.25×)      | 183 (1.12×)  | **217 (1.33×)**  | 184 (1.13×)     |
+| 8     | 796      | 1037 (1.30×)     | 854 (1.07×)  | **1183 (1.49×)** | 771 (0.97×)     |
+| 32    | 1680     | 2463 (1.47×)     | 1638 (0.98×) | 2493 (1.48×)     | 1512 (0.90×)    |
+| 64    | 2010     | 3137 (**1.56×**) | 2039 (1.01×) | 2781 (1.38×)     | 1816 (0.90×)    |
+
+**Read:** every Metal fp32/int8 config beats the CPU; the winner _depends on batch_, and
+there's a clean crossover:
+
+- **int8 (fp32 accumulation) is the small-batch champion** — 1.33× at bs=1, **1.49× at bs=8**,
+  beating even Metal fp32. Decode-bound, skinny-matmul regime: int8 wins by shrinking memory
+  traffic (the same "int8 GEMV beats fp16 on decode" effect seen on Qwen).
+- **fp32 is the large-batch champion** — 1.56× at bs=64, where the GEMMs are fat enough that
+  raw MPS fp32 throughput takes over and int8 (1.38×) falls behind.
+- **Crossover ≈ batch 32** — int8 (1.48×) and fp32 (1.47×) tie.
+- **fp16 activations are the consistent loser.** Both plain fp16 _and_ int8_float16 sag to
+  ~0.90× at large batch — the int8 weights don't rescue int8_float16; the fp16 **activation**
+  path is the poison. On a model this small the fp16 GEMM savings are tiny and get eaten by
+  fp16↔fp32 conversion churn around the many small non-GEMM / CPU-reference ops. Mirror image
+  of the Qwen/Whisper wins, where fp16 has real compute to save.
+
+**Takeaway for small encoder-decoder translation models on Metal: `int8` for decode /
+small-batch, `float32` for large-batch prefill, and never an fp16-activation compute type
+(`float16` / `int8_float16`) — those are pessimizations here.**
+
+## Bigger translation model — NLLB-200 distilled 600M en→de (2026-07-20)
+
+Same rig and method as OPUS-MT above, ~8× the parameters (`facebook/nllb-200-distilled-600M`,
+600M-param multilingual enc-dec; NLLB needs an explicit `eng_Latn`→`deu_Latn` target prefix —
+harness `EasyNMT/ct2-bench/bench_nllb.py`). Output verified correct German before timing.
+Run counts: bs 1/8 = 5 runs/2 warmup, bs 32 = 4/1, bs 64 = 3/1; all spreads < 5%.
+
+Throughput in generated tok/s, speedup vs CPU-fp32 in parens:
+
+| batch | CPU fp32 | Metal fp32      | Metal fp16  | Metal int8      | Metal int8_fp16 |
+| ----- | -------- | --------------- | ----------- | --------------- | --------------- |
+| 1     | 27       | **89 (3.26×)**  | 87 (3.21×)  | 79 (2.89×)      | 69 (2.54×)      |
+| 8     | 143      | 278 (1.94×)     | 254 (1.77×) | **361 (2.52×)** | 269 (1.88×)     |
+| 32    | 289      | 587 (2.03×)     | 438 (1.52×) | **633 (2.19×)** | 414 (1.43×)     |
+| 64    | 318      | **696 (2.19×)** | 479 (1.51×) | 683 (2.15×)     | 440 (1.38×)     |
+
+**Read:** the OPUS-MT rules of thumb _shift_ with model size — this is the more important
+finding than any single number:
+
+- **Metal wins much harder on the bigger model.** bs=1 Metal fp32 is **3.26×** here vs 1.25×
+  on OPUS-MT. A 600M model's decode GEMV is fat enough that the GPU dominates even
+  single-stream — no more squeaking past the CPU.
+- **int8's sweet spot moved from bs=1 to mid-batch.** On OPUS-MT int8 owned bs=1; here it
+  _lags_ at bs=1 (2.89×, since the bigger decode GEMV lets fp32/fp16 throughput win and int8's
+  quant overhead isn't amortized) and instead wins the **mid-batch band — bs=8 a clear 2.52×**,
+  narrowing to a tie with fp32 by bs=64.
+- **fp16-activation types still lose, but the penalty now _grows with batch_** instead of being
+  flat: fp16 ties fp32 at bs=1 (no batched activations to churn) then falls to 1.51× vs 2.19×
+  at bs=64 — a clean fingerprint of fp16↔fp32 activation-conversion cost scaling with
+  activation volume. int8_float16 is the worst config at every batch ≥ 8.
+
+**Combined takeaway (OPUS-MT + NLLB): pick the Metal compute type by _both_ model size and
+batch.** Small model → `int8` for decode. Big model → `float32` is the safe default, with
+`int8` a real win in the mid-batch serving band (bs≈8–32). fp16-activation types
+(`float16` / `int8_float16`) are never the right choice on either — the fp16 GEMM savings
+don't cover the activation-conversion churn at translation-model scale.
+
+## Decoder-only LLM — Qwen2.5-0.5B-Instruct decode (2026-07-20) — the pattern INVERTS
+
+Same rig; decoder-only, so `ctranslate2.Generator`. Forced exactly 128 greedy tokens
+(`min_length == max_length` suppresses early EOS) so every config does identical decode work;
+report decode tok/s. **All configs load one fp32 model and quantize at load via `compute_type`**
+— note the `--quantization float16` converter flag silently produced a float32 file for Qwen
+(byte-identical to the fp32 dir; it worked correctly for OPUS-MT/NLLB), so load-time
+quantization is the trustworthy path here. Harness: `EasyNMT/ct2-bench/bench_qwen.py`. Output
+verified coherent before timing. Run counts: bs 1 = 5/2, bs 8/32 = 3/1; spreads < 5%.
+
+Throughput in decode tok/s, speedup vs CPU-fp32 in parens:
+
+| batch | CPU fp32 | Metal fp32  | Metal fp16       | Metal int8  | Metal int8_fp16 |
+| ----- | -------- | ----------- | ---------------- | ----------- | --------------- |
+| 1     | 78       | 92 (1.17×)  | **96 (1.23×)**   | 83 (1.06×)  | 86 (1.10×)      |
+| 8     | 174      | 453 (2.60×) | **629 (3.62×)**  | 356 (2.05×) | 398 (2.29×)     |
+| 32    | 472      | 847 (1.79×) | **1210 (2.56×)** | 787 (1.67×) | 1111 (2.36×)    |
+
+**Read: the translation-model ranking flips completely.** On the enc-dec translation models
+fp16-activation types were pessimizations and int8 won decode. On decoder-only Qwen:
+
+- **fp16 wins at every batch** (1.23× / 3.62× / 2.56×) — the champion, not the poison.
+- **int8 is now the _worst_ option** (1.06× / 2.05× / 1.67×) — the exact mirror of translation.
+- **int8_float16 beats plain int8** — fp16 activations _help_ here, opposite of translation.
+
+**Why the inversion — it points back at what the backend was tuned for.** Qwen is the model
+the Metal path was optimized around: its hot decode ops — the fused single-launch SDPA (M16),
+RMSNorm, RoPE — are all **fp16-native GPU kernels**, so fp16 activations stay on-device and pay
+no conversion tax; fp16 then wins purely by halving weight/activation memory traffic in the
+GEMV-bound decode loop. The Marian/M2M translation models route more ops through the
+CPU-reference path, so _there_ fp16 activations trigger the fp16↔fp32 churn that sinks them.
+Same backend, opposite verdict, decided entirely by **which ops have fused fp16 kernels.**
+
+> **Nuance vs the int8 work:** this end-to-end result (fp16 > int8 on Qwen decode) refines the
+> earlier _kernel-level_ finding that "int8 GEMV beats fp16 on decode" — true in isolation, but
+> the full decode loop with its surrounding fused-fp16 ops lands on fp16. Different measurement,
+> both correct.
+
+### Qwen prefill — fp16 wins the GEMM-bound regime too
+
+Prefill (long prompt, generate exactly 1 token; throughput = prompt*tokens·batch / sec) is the
+compute-bound counterpart to decode — the regime where the \_translation* models flipped to
+`float32`. On Qwen it does not flip: **fp16 wins prefill as well, and its lead grows with prompt
+length.** Harness: `bench_qwen_prefill.py`, 5 runs / 2 warmup, spreads < 5%.
+
+| workload           | CPU fp32 | Metal fp32   | Metal fp16       | Metal int8   | Metal int8_fp16 |
+| ------------------ | -------- | ------------ | ---------------- | ------------ | --------------- |
+| prefill 512, bs=1  | 2558     | 5915 (2.31×) | **7159 (2.80×)** | 5634 (2.20×) | 6456 (2.52×)    |
+| prefill 512, bs=8  | 2921     | 7323 (2.51×) | **9466 (3.24×)** | 7143 (2.45×) | 8404 (2.88×)    |
+| prefill 1024, bs=1 | 2258     | 6232 (2.76×) | **8078 (3.58×)** | 6022 (2.67×) | 7319 (3.24×)    |
+
+Ranking is identical to decode — **fp16 > int8_fp16 > fp32 > int8** — fp16-activation on top,
+weight precision secondary. The fp16 lead _widening_ with prompt length (2.80× → 3.58× as the
+prompt goes 512 → 1024) is the tell: as prefill gets more GEMM-bound, the fp16-native fused
+kernels pull _further_ ahead of fp32, not closer. **For a decoder-only LLM there is no regime —
+decode or prefill — where you'd pick anything but `float16`.** This is the sharp contrast with
+the enc-dec translation models, whose prefill flips to `float32`.
+
+**Master takeaway across all three models: there is no global-best Metal compute type — it is
+set by model _architecture_ first, then size and batch.** Decoder-only LLM → `float16` (both
+decode _and_ prefill).
+Small enc-dec translation → `int8` (decode) / `float32` (big batch). Large enc-dec → `float32`
+default, `int8` mid-batch. The deciding factor is whether a model's hot ops have fused fp16
+GPU kernels (LLM: yes → fp16 wins; classic enc-dec: partly → fp16 activations churn).
+
 ## Analysis
 
 **The kernels are fast (see the GEMM table); the per-op overhead on a tiny model is not.**
