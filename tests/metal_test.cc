@@ -1334,6 +1334,47 @@ TEST_F(MetalTest, DISABLED_BenchmarkLLM) {
   }
 }
 
+// Focused gate for CT2_MPS_GEMV: batch-1 autoregressive decode keeps every Dense
+// projection at m=1. A longer forced decode amplifies that path while one model load and
+// warmup stay outside the timed region. Run this test in separate processes with the env
+// switch unset/set; unlike BenchmarkLLM it deliberately excludes CPU and batch-8 controls.
+TEST_F(MetalTest, DISABLED_BenchmarkLLMMpsGemv) {
+  const char* model_env = std::getenv("CT2_LLM_MODEL");
+  if (!model_env)
+    GTEST_SKIP() << "Set CT2_LLM_MODEL to a converted decoder-only model directory";
+
+  const std::vector<std::string> content =
+      {"ing", "ion", "ent", "ate", "ation", "ort", "ame", "ist", "ers", "ass", "int", "urn"};
+  std::vector<std::string> prompt;
+  prompt.reserve(32);
+  for (size_t i = 0; i < 32; ++i)
+    prompt.push_back(content[i % content.size()]);
+
+  GenerationOptions options;
+  options.beam_size = 1;
+  options.sampling_topk = 1;
+  options.max_length = 128;
+  options.min_length = 128;
+  options.include_prompt_in_result = false;
+
+  std::cout << "\n=== Qwen batch-1 decode, prompt=32, decode=128 ===\n";
+  for (const ComputeType compute_type : {ComputeType::FLOAT32, ComputeType::FLOAT16}) {
+    auto model = models::Model::load(model_env, Device::METAL, 0, compute_type);
+    Generator generator(model);
+    const std::vector<std::vector<std::string>> batch = {prompt};
+    auto wait = [&] {
+      auto futures = generator.generate_batch_async(batch, options);
+      for (auto& future : futures)
+        future.get();
+    };
+
+    wait();
+    const double ms = time_ms(5, wait);
+    std::cout << "  METAL " << (compute_type == ComputeType::FLOAT16 ? "fp16" : "fp32")
+              << ": " << ms << " ms, " << (128.0 / (ms / 1000.0)) << " tok/s\n";
+  }
+}
+
 // CPU-vs-Metal DECODE-PARITY gate for a real decoder-only LLM. This exercises the
 // autoregressive Generator path — rotary at nonzero positions, KV-cache append/read, the
 // per-step decode loop — which the tiny transliteration EndToEnd test does NOT cover

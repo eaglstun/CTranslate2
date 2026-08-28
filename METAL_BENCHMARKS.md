@@ -289,8 +289,8 @@ Measured 2026-08-28, M4 Max, Release build. `MPSMatrixVectorMultiplication` is a
 dedicated alternative to expressing decode's `1×K · K×N` projections as a degenerate
 `MPSMatrixMultiplication`. The implementation caches the GEMV object by
 `{rows, columns, transpose, alpha, beta}` and preserves the per-op async commit model.
-It is opt-in with `CT2_MPS_GEMV=1` until a converted decoder-only model is available for
-an end-to-end gate.
+It is opt-in with `CT2_MPS_GEMV=1`; the decoder-only model gate below did not justify
+making it the default.
 
 The benchmark reports the best of four repetitions in one process. Values below are
 flush-per-iteration milliseconds from two complete benchmark invocations; ranges show
@@ -311,10 +311,26 @@ were near parity (~1.17–1.21 ms), so no fp32 vocabulary claim is made.
 
 The included translation benchmark (batch 32, three separate warm processes) moved by
 median from **32.13→30.42 ms fp32** and **30.25→29.07 ms fp16** with the route enabled.
-That is encouraging but is not a substitute for the Qwen decode/prefill A/B: the route
-stays environment-gated until that model-level test is run. Direct fp32/fp16 parity,
-both matrix orientations, and nonzero alpha/beta are covered by
+That encouraging result did not survive a real decoder-only model gate.
+
+`MetalTest.DISABLED_BenchmarkLLMMpsGemv` loads Qwen2.5-0.5B once per precision, warms it,
+then averages five forced 128-token batch-1 decodes. Two alternating baseline/GEMV
+process pairs gave:
+
+| Qwen decode | baseline range | MPS GEMV range | best-of-two result |
+| ----------- | -------------- | -------------- | ------------------ |
+| fp32        | 3465.59–3715.32 ms | 3462.84–3615.11 ms | **parity** (−0.08%) |
+| fp16        | 2614.33–2683.85 ms | 2661.07–2811.27 ms | **1.8% slower** |
+
+**Decision:** keep the route opt-in and deprioritized. The isolated 7–32% projection
+wins are too small a share of the full decode loop to improve throughput, and fp16—the
+preferred Qwen compute type—regresses slightly. This is another example of why a kernel
+microbenchmark is a filter, not the promotion gate.
+
+Direct fp32/fp16 parity, both matrix orientations, and nonzero alpha/beta are covered by
 `MetalTest.MpsGemvMatchesHostReference`; all 31 Metal tests pass with the route enabled.
+The real Qwen greedy-decode parity gate also matches CPU for all 24/24 tokens in fp32 and
+fp16 with `CT2_MPS_GEMV=1`.
 
 ## Op fusion: residual-Add + norm (`DISABLED_BenchmarkAddRMSNorm`)
 
