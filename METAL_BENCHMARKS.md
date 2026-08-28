@@ -332,6 +332,26 @@ Direct fp32/fp16 parity, both matrix orientations, and nonzero alpha/beta are co
 The real Qwen greedy-decode parity gate also matches CPU for all 24/24 tokens in fp32 and
 fp16 with `CT2_MPS_GEMV=1`.
 
+### Rejected follow-up: combine the two KV-cache Concat copies
+
+The Qwen fp16 decode profile put `Concat` at 10.9%, and each two-input Metal Concat
+encoded the old-cache and new-token copies in separate command buffers. Two implementations
+were tested on 2026-08-28 and removed:
+
+- One branch-selecting byte kernel copying both inputs in a single grid regressed the
+  focused 128-token decode substantially; per-byte division/source selection erased the
+  launch saving.
+- Two existing strided-copy dispatches in one encoder preserved the efficient copy kernel
+  but still failed the model gate: fp32 was flat and fp16 regressed. As with whole-step
+  command-buffer reuse, combining commits interfered with the scheduling/overlap that the
+  current per-copy path gets for free.
+
+Both variants passed all six Metal Concat parity cases, including empty inputs and all
+three concat axes. The failure was throughput, not correctness. Do not retry command-buffer
+coalescing here; a future cache win needs a layout that can append in place without copying
+the old history (for example a capacity-strided or paged cache), which is a state-layout
+change rather than a Concat-kernel tweak.
+
 ## Op fusion: residual-Add + norm (`DISABLED_BenchmarkAddRMSNorm`)
 
 The first **positive** Metal perf lever (the SIMD-group-reduction rewrite was measured dead
