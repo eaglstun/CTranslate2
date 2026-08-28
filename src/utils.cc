@@ -75,11 +75,20 @@ namespace ctranslate2 {
   }
 
   static inline size_t get_default_num_threads() {
+#if defined(__APPLE__) && defined(CT2_ARM64_BUILD) && !defined(_OPENMP) && defined(CT2_WITH_RUY)
+    // The Apple Silicon wheels use the custom thread pool together with Ruy. For
+    // short, sequential translation workloads, their synchronization overhead can
+    // outweigh the work and substantially increase CPU usage without reducing
+    // latency. Keep the automatic setting serial; users can still request more
+    // threads explicitly or with OMP_NUM_THREADS.
+    return 1;
+#else
     constexpr size_t default_num_threads = 4;
     const size_t max_num_threads = std::thread::hardware_concurrency();
     if (max_num_threads == 0)
       return default_num_threads;
     return std::min(default_num_threads, max_num_threads);
+#endif
   }
 
   void set_num_threads(size_t num_threads) {

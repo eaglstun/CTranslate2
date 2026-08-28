@@ -4,6 +4,7 @@
 
 ### Fixes and improvements
 
+* Reduce the default CPU thread count on Apple Silicon Ruy builds without OpenMP to avoid excessive CPU usage on small translation workloads (#2063)
 * Fix out-of-bounds reads in StorageView index validation (#2073) by [@jordimas](https://github.com/jordimas), reported by Nathan Keys (Halo Forge Labs)
 
 ## [v4.8.1](https://github.com/OpenNMT/CTranslate2/releases/tag/v4.8.1) (2026-07-03)
