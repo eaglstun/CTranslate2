@@ -11,4 +11,4 @@ python/dist/
 .cache
 docs/build/
 docs/python/
-.claude/skills/apple-silicon/sources/Metal-Shading-Language-Specification.pdf
+.agents/skills/apple-silicon/sources/Metal-Shading-Language-Specification.pdf
