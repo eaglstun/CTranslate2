@@ -15,6 +15,7 @@ add_executable(ctranslate2_test
   primitives_test.cc
   translator_test.cc
   metal_test.cc
+  utils_test.cc
   test_utils.cc
   test.cc)
 target_include_directories(ctranslate2_test PRIVATE
