@@ -199,7 +199,7 @@ inline void ct2_sdpa_impl(device const T* q_buf,
                           device const T* v_buf,
                           device T* out,
                           device const int* lengths,
-                          uint num_keys, uint depth, uint rows_per_bh,
+                          uint num_keys, uint kv_stride, uint depth, uint rows_per_bh,
                           float scale, uint has_lengths,
                           uint row, uint simd_lane, uint simd_group,
                           threadgroup float* tg_m,
@@ -207,8 +207,8 @@ inline void ct2_sdpa_impl(device const T* q_buf,
                           threadgroup float* tg_acc) {
   const uint bh = row / rows_per_bh;
   device const T* q_row = q_buf + (ulong)row * depth;
-  device const T* k_base = k_buf + (ulong)bh * num_keys * depth;
-  device const T* v_base = v_buf + (ulong)bh * num_keys * depth;
+  device const T* k_base = k_buf + (ulong)bh * kv_stride;
+  device const T* v_base = v_buf + (ulong)bh * kv_stride;
   device T* out_row = out + (ulong)row * depth;
 
   uint len = num_keys;
@@ -293,13 +293,14 @@ kernel void ct2_sdpa_float(device const float* q      [[buffer(0)]],
                            constant uint& rows_per_bh  [[buffer(7)]],
                            constant float& scale       [[buffer(8)]],
                            constant uint& has_lengths  [[buffer(9)]],
+                           constant uint& kv_stride    [[buffer(10)]],
                            uint row [[threadgroup_position_in_grid]],
                            uint simd_lane [[thread_index_in_simdgroup]],
                            uint simd_group [[simdgroup_index_in_threadgroup]]) {
   threadgroup float tg_m[CT2_SDPA_SG];
   threadgroup float tg_l[CT2_SDPA_SG];
   threadgroup float tg_acc[CT2_SDPA_SG * CT2_SDPA_MAX_D];
-  ct2_sdpa_impl<float>(q, k, v, out, lengths, num_keys, depth, rows_per_bh, scale,
+  ct2_sdpa_impl<float>(q, k, v, out, lengths, num_keys, kv_stride, depth, rows_per_bh, scale,
                        has_lengths, row, simd_lane, simd_group, tg_m, tg_l, tg_acc);
 }
 
@@ -313,14 +314,74 @@ kernel void ct2_sdpa_half(device const half* q       [[buffer(0)]],
                           constant uint& rows_per_bh  [[buffer(7)]],
                           constant float& scale       [[buffer(8)]],
                           constant uint& has_lengths  [[buffer(9)]],
+                          constant uint& kv_stride    [[buffer(10)]],
                           uint row [[threadgroup_position_in_grid]],
                           uint simd_lane [[thread_index_in_simdgroup]],
                           uint simd_group [[simdgroup_index_in_threadgroup]]) {
   threadgroup float tg_m[CT2_SDPA_SG];
   threadgroup float tg_l[CT2_SDPA_SG];
   threadgroup float tg_acc[CT2_SDPA_SG * CT2_SDPA_MAX_D];
-  ct2_sdpa_impl<half>(q, k, v, out, lengths, num_keys, depth, rows_per_bh, scale,
+  ct2_sdpa_impl<half>(q, k, v, out, lengths, num_keys, kv_stride, depth, rows_per_bh, scale,
                       has_lengths, row, simd_lane, simd_group, tg_m, tg_l, tg_acc);
+}
+
+// ---- Capacity-strided KV cache append ----  the cache layout is
+// [batch, heads, capacity, depth_bytes]. Only [0, logical_length) is live. The common
+// kernel writes just the new suffix in place; the grow kernel copies the live prefix and
+// appends the suffix into a larger allocation. K and V share one dispatch.
+kernel void ct2_kv_cache_append_bytes(device const uchar* old_k [[buffer(0)]],
+                                      device const uchar* old_v [[buffer(1)]],
+                                      device const uchar* new_k [[buffer(2)]],
+                                      device const uchar* new_v [[buffer(3)]],
+                                      device uchar* cache_k     [[buffer(4)]],
+                                      device uchar* cache_v     [[buffer(5)]],
+                                      constant uint& cache_len  [[buffer(6)]],
+                                      constant uint& append_len [[buffer(7)]],
+                                      constant uint& old_cap    [[buffer(8)]],
+                                      constant uint& new_cap    [[buffer(9)]],
+                                      constant uint& row_bytes  [[buffer(10)]],
+                                      uint2 g [[thread_position_in_grid]]) {
+  const ulong one_tensor = (ulong)append_len * row_bytes;
+  const uint kv = g.y;
+  const ulong local = g.x;
+  const uint bh = uint(local / one_tensor);
+  const ulong within = local - (ulong)bh * one_tensor;
+  const uchar value = kv == 0u ? new_k[local] : new_v[local];
+  const ulong dst = ((ulong)bh * new_cap + cache_len) * row_bytes + within;
+  if (kv == 0u) cache_k[dst] = value;
+  else          cache_v[dst] = value;
+}
+
+kernel void ct2_kv_cache_grow_bytes(device const uchar* old_k [[buffer(0)]],
+                                    device const uchar* old_v [[buffer(1)]],
+                                    device const uchar* new_k [[buffer(2)]],
+                                    device const uchar* new_v [[buffer(3)]],
+                                    device uchar* cache_k     [[buffer(4)]],
+                                    device uchar* cache_v     [[buffer(5)]],
+                                    constant uint& cache_len  [[buffer(6)]],
+                                    constant uint& append_len [[buffer(7)]],
+                                    constant uint& old_cap    [[buffer(8)]],
+                                    constant uint& new_cap    [[buffer(9)]],
+                                    constant uint& row_bytes  [[buffer(10)]],
+                                    uint2 g [[thread_position_in_grid]]) {
+  const uint total_len = cache_len + append_len;
+  const ulong one_tensor = (ulong)total_len * row_bytes;
+  const uint kv = g.y;
+  const ulong local = g.x;
+  const uint bh = uint(local / one_tensor);
+  const ulong within = local - (ulong)bh * one_tensor;
+  const uint t = uint(within / row_bytes);
+  const uint d = uint(within - (ulong)t * row_bytes);
+  const ulong dst = ((ulong)bh * new_cap + t) * row_bytes + d;
+  if (t < cache_len) {
+    const ulong src = ((ulong)bh * old_cap + t) * row_bytes + d;
+    if (kv == 0u) cache_k[dst] = old_k[src];
+    else          cache_v[dst] = old_v[src];
+  } else {
+    const ulong src = ((ulong)bh * append_len + (t - cache_len)) * row_bytes + d;
+    if (kv == 0u) cache_k[dst] = new_k[src];
+    else          cache_v[dst] = new_v[src];
+  }
 }
 
 // ---- Normalizations (one threadgroup per row, fixed power-of-two reduction) ----

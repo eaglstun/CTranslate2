@@ -35,11 +35,15 @@ Variadic `(const std::vector<const StorageView*>& inputs, StorageView& output)`.
 axis allowed; output shape = inputs' shape with `dim(axis)` summed (`concat.cc:12-29`). All
 inputs must share rank and non-axis dims (asserted).
 
-**Load-bearing site: the KV cache.** Each decode step appends one timestep:
+**Load-bearing fallback site: the KV cache.** The generic path appends one timestep:
 `ops::Concat concat_op(_cache_time_dim)` then `concat_op({&tmp, &keys_proj}, *cached_keys)`
 (`src/layers/attention.cc:538-543`) — the cache is _re-materialized_ every step (the old cache
 moves into a scratch view, then old+new are concatenated). Also merges decoder self K/V with
 encoder memory K/V along time (`attention.cc:740-742`).
+
+Supported fused Metal decode shapes bypass this fallback with a capacity-strided cache and
+`metal::kv_cache_append`; see `attention-and-kv-cache.md`. Concat remains active for all
+other backends and attention variants.
 
 ## Split — `Split(axis [, sizes], no_copy)`
 

@@ -1,6 +1,6 @@
 # Apple Metal Backend — Progress & Roadmap
 
-Status as of 2026-07-07. This document tracks the in-progress Apple Metal GPU backend
+Status as of 2026-08-28. This document tracks the in-progress Apple Metal GPU backend
 (`Device::METAL`, built with `-DWITH_METAL=ON`) for CTranslate2.
 
 ## TL;DR
@@ -433,6 +433,31 @@ prefill transposes now native). Suite 104/106 (2 pre-existing Conv1D skips). Ful
 tables and the deprioritized-lever list in `METAL_BENCHMARKS.md`;
 `METAL_WHISPER_NEXT_STEPS.md` records the investigation.
 
+### ✅ M18 — capacity-strided KV cache: true append-in-place (2026-08-28)
+
+The ordinary decoder cache no longer rematerializes its full history with `Concat` on
+every supported Metal decode step. Once a call enters the fused-SDPA regime, K/V storage
+uses physical `[batch, heads, capacity, depth]` rows with a logical length carried by the
+decoder offset. Capacity starts at 64 and doubles geometrically. Most steps issue one
+`ct2_kv_cache_append_bytes` launch that writes only the new K and V rows; capacity
+boundaries use one `ct2_kv_cache_grow_bytes` launch to copy the live prefix and append the
+suffix together. Fused SDPA accepts a K/V batch-head stride distinct from logical key
+length, so unused capacity needs no packing copy.
+
+The route is deliberately scoped to the existing fused-SDPA contract (Metal fp32/fp16,
+rank-4 self-attention, q_len ≤ 8, d_head ≤ 256, no relative bias/ALiBi/attention output,
+and no sliding window). CPU, CUDA, FlashAttention, merged MQA, sliding-window attention,
+and unsupported Metal calls keep the contiguous Concat path. If a caller changes modes
+after a capacity-strided cache was created, it is compacted before falling back.
+`CT2_NO_METAL_KV_CACHE=1` disables the route for A/B testing.
+
+Qwen2.5-0.5B batch-1 prompt-32/decode-128 (five timed iterations, same binary, two
+matched disabled/enabled pairs) improved fp32 by **10.6–10.9%** and fp16 by
+**4.7–8.5%**. Real-model greedy parity remained 24/24 tokens against CPU in both
+precisions. Append, grow, compact-to-contiguous, and capacity-strided SDPA have direct
+parity tests; all 33 Metal tests pass. The full 303-test suite has the same single
+pre-existing Accelerate-build failure in quantized grouped Conv1D.
+
 ## What runs where today
 
 | Operation                                                                  | Metal execution                                                                                                                             |
@@ -455,6 +480,7 @@ tables and the deprioritized-lever list in `METAL_BENCHMARKS.md`;
 | TopK / TopPMask (float32 and float16)                                      | **GPU** — custom kernels, bit-parity with CPU (size caps fall back to CPU reference)                                                        |
 | GumbelMax / Multinomial sampling (float32 and float16)                     | **GPU** — host-seeded kernels (`set_random_seed`-reproducible); Multinomial at sample_size 1                                                |
 | Decode attention: q·K^T → softmax → ·V (float32 and float16)               | **GPU** — fused single-launch SDPA kernel at q_len ≤ 8 (greedy/beam decode, short prefill); larger q_len uses MPS GEMM + softmax kernel     |
+| Decoder KV-cache append (fused-SDPA shapes)                                | **GPU** — capacity-strided in-place K/V append; geometric grow at capacity boundaries (`CT2_NO_METAL_KV_CACHE=1` disables)                  |
 | Everything else (general-axis LayerNorm/BiasAdd, conv, int Mul, …)         | CPU reference over unified memory (correct, float32 only)                                                                                   |
 | fp16 for ungraduated ops                                                   | Not yet — CPU reference is float32-only, so a full fp16 model needs those ops graduated to half kernels first                               |
 | bf16 compute                                                               | Not yet                                                                                                                                     |
@@ -468,8 +494,7 @@ add `if (device == Device::METAL)` routing in the op, verify parity against the 
 reference via the existing suite.
 
 - Remaining elementwise variants (sub/min/max/scalar-add) used in decoding
-- Next decode-fusion candidates (post-M16 profile order): the projection GEMM epilogues,
-  KV-cache `Concat` append, RMSNorm, Rotary
+- Next decode-fusion candidates: the projection GEMM epilogues, RMSNorm, and Rotary
 
 ### fp16 — foundation done, full-model fp16 remaining
 

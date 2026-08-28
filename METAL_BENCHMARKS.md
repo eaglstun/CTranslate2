@@ -296,13 +296,13 @@ The benchmark reports the best of four repetitions in one process. Values below 
 flush-per-iteration milliseconds from two complete benchmark invocations; ranges show
 the two minima rather than hiding machine variance.
 
-| Dense shape (m=1) | fp16 GEMM | fp16 GEMV | fp32 GEMM | fp32 GEMV |
-| ----------------- | --------- | --------- | --------- | --------- |
+| Dense shape (m=1) | fp16 GEMM   | fp16 GEMV       | fp32 GEMM   | fp32 GEMV       |
+| ----------------- | ----------- | --------------- | ----------- | --------------- |
 | n=896, k=896      | 0.146–0.156 | **0.129–0.134** | 0.133–0.142 | **0.102–0.107** |
 | n=2688, k=896     | 0.126–0.135 | **0.113–0.118** | 0.129–0.140 | **0.118–0.125** |
 | n=4864, k=896     | 0.135–0.138 | **0.112–0.122** | 0.150–0.172 | **0.126–0.137** |
 | n=896, k=4864     | 0.137–0.147 | **0.110–0.112** | 0.148–0.179 | **0.123–0.124** |
-| n=151936, k=896   | 0.686–0.689 | **0.638–0.657** | noisy | noisy |
+| n=151936, k=896   | 0.686–0.689 | **0.638–0.657** | noisy       | noisy           |
 
 **Read:** the dedicated kernel is a repeatable win on the per-layer projection shapes,
 roughly 7–32% in this probe. The vocabulary projection is much closer; its fp32
@@ -317,10 +317,10 @@ That encouraging result did not survive a real decoder-only model gate.
 then averages five forced 128-token batch-1 decodes. Two alternating baseline/GEMV
 process pairs gave:
 
-| Qwen decode | baseline range | MPS GEMV range | best-of-two result |
-| ----------- | -------------- | -------------- | ------------------ |
+| Qwen decode | baseline range     | MPS GEMV range     | best-of-two result  |
+| ----------- | ------------------ | ------------------ | ------------------- |
 | fp32        | 3465.59–3715.32 ms | 3462.84–3615.11 ms | **parity** (−0.08%) |
-| fp16        | 2614.33–2683.85 ms | 2661.07–2811.27 ms | **1.8% slower** |
+| fp16        | 2614.33–2683.85 ms | 2661.07–2811.27 ms | **1.8% slower**     |
 
 **Decision:** keep the route opt-in and deprioritized. The isolated 7–32% projection
 wins are too small a share of the full decode loop to improve throughput, and fp16—the
@@ -351,6 +351,30 @@ three concat axes. The failure was throughput, not correctness. Do not retry com
 coalescing here; a future cache win needs a layout that can append in place without copying
 the old history (for example a capacity-strided or paged cache), which is a state-layout
 change rather than a Concat-kernel tweak.
+
+### Implemented follow-up: capacity-strided append-in-place
+
+That state-layout change was implemented on 2026-08-28 for the fused Metal decode path.
+The cache is physically `[batch, heads, capacity, depth]`, begins at 64 timesteps, and
+doubles geometrically. Logical length comes from the decoder offset. A common step writes
+only the new K/V suffix with one byte-copy kernel; a growth step copies the live prefix and
+appends the suffix into the new allocation in one launch. Fused SDPA consumes an explicit
+K/V batch-head stride, so unused capacity never needs to be packed. Unsupported attention
+modes retain the contiguous Concat path, with a compact-to-contiguous transition if a
+caller switches modes. `CT2_NO_METAL_KV_CACHE=1` is the A/B escape hatch.
+
+Focused Qwen2.5-0.5B batch-1 decode (prompt 32, forced 128 tokens, warmup then average of
+five; same binary, two alternating cache-enabled/cache-disabled process pairs):
+
+| compute | Concat-cache range | capacity-strided range | matched-pair improvement |
+| ------- | ------------------ | ---------------------- | ------------------------ |
+| fp32    | 3300.17–3612.89 ms | **2951.25–3218.07 ms** | **10.6–10.9%**           |
+| fp16    | 2291.38–2425.06 ms | **2095.58–2310.78 ms** | **4.7–8.5%**             |
+
+The real-model correctness gate matched CPU for all 24/24 greedy tokens in fp32 and fp16.
+Primitive coverage verifies in-place append, grow, compact-to-contiguous, and SDPA over a
+capacity stride. All 33 Metal tests pass; the full suite remains 299 passed / 3 skipped /
+1 pre-existing CPU quantized-grouped-Conv1D failure.
 
 ## Op fusion: residual-Add + norm (`DISABLED_BenchmarkAddRMSNorm`)
 
@@ -596,8 +620,8 @@ Decode-bound regime (prompt 32, generate 32) — tok/s, higher is better:
   launches. Prefill itself (q_len > 8) stays on MPS GEMM, which wins compute-bound shapes.
 - The doc's old "fewer, bigger ops per step (e.g. a fused attention kernel)" prediction
   (Analysis, lever list) is hereby confirmed measured. Remaining decode budget after the
-  fusion: Gemm/Dense (the projections + lm_head), Concat (KV-cache append), RMSNorm,
-  Rotary, Add — the next fusion candidates if more decode speed is wanted.
+  attention and cache work: Gemm/Dense (the projections + lm_head), RMSNorm, Rotary, and
+  Add — the next fusion candidates if more decode speed is wanted.
 
 ## Whisper beam-search decode: two kernels close an 8× gap (2026-07-17)
 

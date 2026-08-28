@@ -85,6 +85,7 @@ namespace ctranslate2 {
                      dim_t num_rows,
                      dim_t rows_per_bh,
                      dim_t num_keys,
+                     dim_t kv_stride,
                      dim_t depth,
                      float scale) {
         if (num_rows == 0 || depth == 0)
@@ -110,6 +111,7 @@ namespace ctranslate2 {
         [encoder setBuffer:out_buffer.buffer offset:out_buffer.offset atIndex:3];
         [encoder setBuffer:len_buffer.buffer offset:len_buffer.offset atIndex:4];
         const uint32_t num_keys_u = static_cast<uint32_t>(num_keys);
+        const uint32_t kv_stride_u = static_cast<uint32_t>(kv_stride);
         const uint32_t depth_u = static_cast<uint32_t>(depth);
         const uint32_t rows_per_bh_u = static_cast<uint32_t>(rows_per_bh);
         [encoder setBytes:&num_keys_u length:sizeof(num_keys_u) atIndex:5];
@@ -117,6 +119,7 @@ namespace ctranslate2 {
         [encoder setBytes:&rows_per_bh_u length:sizeof(rows_per_bh_u) atIndex:7];
         [encoder setBytes:&scale length:sizeof(scale) atIndex:8];
         [encoder setBytes:&has_lengths length:sizeof(has_lengths) atIndex:9];
+        [encoder setBytes:&kv_stride_u length:sizeof(kv_stride_u) atIndex:10];
 
         // One threadgroup per score row; the kernel assumes exactly CT2_SDPA_SG SIMD-groups.
         const MTLSize grid = MTLSizeMake(static_cast<NSUInteger>(num_rows), 1, 1);
@@ -130,16 +133,89 @@ namespace ctranslate2 {
 
     void sdpa(const float* queries, const float* keys, const float* values,
               const int32_t* lengths, float* output,
-              dim_t num_rows, dim_t rows_per_bh, dim_t num_keys, dim_t depth, float scale) {
+              dim_t num_rows, dim_t rows_per_bh, dim_t num_keys, dim_t kv_stride,
+              dim_t depth, float scale) {
       sdpa_impl("ct2_sdpa_float", queries, keys, values, lengths, output,
-                num_rows, rows_per_bh, num_keys, depth, scale);
+                num_rows, rows_per_bh, num_keys, kv_stride, depth, scale);
     }
 
     void sdpa(const float16_t* queries, const float16_t* keys, const float16_t* values,
               const int32_t* lengths, float16_t* output,
-              dim_t num_rows, dim_t rows_per_bh, dim_t num_keys, dim_t depth, float scale) {
+              dim_t num_rows, dim_t rows_per_bh, dim_t num_keys, dim_t kv_stride,
+              dim_t depth, float scale) {
       sdpa_impl("ct2_sdpa_half", queries, keys, values, lengths, output,
-                num_rows, rows_per_bh, num_keys, depth, scale);
+                num_rows, rows_per_bh, num_keys, kv_stride, depth, scale);
+    }
+
+    namespace {
+      void kv_cache_dispatch(const char* pipeline_name,
+                             const void* old_keys, const void* old_values,
+                             const void* keys, const void* values,
+                             void* cached_keys, void* cached_values,
+                             dim_t batch_heads, dim_t cache_length, dim_t append_length,
+                             dim_t old_capacity, dim_t new_capacity, dim_t row_size_bytes,
+                             bool grow) {
+        if (batch_heads == 0 || row_size_bytes == 0 || (!grow && append_length == 0)
+            || (grow && cache_length + append_length == 0))
+          return;
+
+        const BufferRange old_k = grow ? buffer_and_offset(old_keys)
+                                       : buffer_and_offset(cached_keys);
+        const BufferRange old_v = grow ? buffer_and_offset(old_values)
+                                       : buffer_and_offset(cached_values);
+        const BufferRange new_k = append_length ? buffer_and_offset(keys) : old_k;
+        const BufferRange new_v = append_length ? buffer_and_offset(values) : old_v;
+        const BufferRange dst_k = buffer_and_offset(cached_keys);
+        const BufferRange dst_v = buffer_and_offset(cached_values);
+
+        id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
+        id<MTLCommandBuffer> command_buffer = new_command_buffer();
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        [encoder setComputePipelineState:pso];
+        [encoder setBuffer:old_k.buffer offset:old_k.offset atIndex:0];
+        [encoder setBuffer:old_v.buffer offset:old_v.offset atIndex:1];
+        [encoder setBuffer:new_k.buffer offset:new_k.offset atIndex:2];
+        [encoder setBuffer:new_v.buffer offset:new_v.offset atIndex:3];
+        [encoder setBuffer:dst_k.buffer offset:dst_k.offset atIndex:4];
+        [encoder setBuffer:dst_v.buffer offset:dst_v.offset atIndex:5];
+        const uint32_t cache_length_u = static_cast<uint32_t>(cache_length);
+        const uint32_t append_length_u = static_cast<uint32_t>(append_length);
+        const uint32_t old_capacity_u = static_cast<uint32_t>(old_capacity);
+        const uint32_t new_capacity_u = static_cast<uint32_t>(new_capacity);
+        const uint32_t row_size_u = static_cast<uint32_t>(row_size_bytes);
+        [encoder setBytes:&cache_length_u length:sizeof(cache_length_u) atIndex:6];
+        [encoder setBytes:&append_length_u length:sizeof(append_length_u) atIndex:7];
+        [encoder setBytes:&old_capacity_u length:sizeof(old_capacity_u) atIndex:8];
+        [encoder setBytes:&new_capacity_u length:sizeof(new_capacity_u) atIndex:9];
+        [encoder setBytes:&row_size_u length:sizeof(row_size_u) atIndex:10];
+
+        const dim_t rows = grow ? cache_length + append_length : append_length;
+        const NSUInteger bytes = static_cast<NSUInteger>(batch_heads * rows * row_size_bytes);
+        NSUInteger tg = std::min<NSUInteger>(pso.maxTotalThreadsPerThreadgroup, bytes);
+        [encoder dispatchThreads:MTLSizeMake(bytes, 2, 1)
+              threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+        [encoder endEncoding];
+        commit_command_buffer(command_buffer);
+      }
+    }
+
+    void kv_cache_append(const void* keys, const void* values,
+                         void* cached_keys, void* cached_values,
+                         dim_t batch_heads, dim_t cache_length, dim_t append_length,
+                         dim_t capacity, dim_t row_size_bytes) {
+      kv_cache_dispatch("ct2_kv_cache_append_bytes", nullptr, nullptr, keys, values,
+                        cached_keys, cached_values, batch_heads, cache_length, append_length,
+                        capacity, capacity, row_size_bytes, false);
+    }
+
+    void kv_cache_grow(const void* old_keys, const void* old_values,
+                       const void* keys, const void* values,
+                       void* cached_keys, void* cached_values,
+                       dim_t batch_heads, dim_t cache_length, dim_t append_length,
+                       dim_t old_capacity, dim_t new_capacity, dim_t row_size_bytes) {
+      kv_cache_dispatch("ct2_kv_cache_grow_bytes", old_keys, old_values, keys, values,
+                        cached_keys, cached_values, batch_heads, cache_length, append_length,
+                        old_capacity, new_capacity, row_size_bytes, true);
     }
 
     // Must match CT2_NORM_TG in kernels_msl.h.

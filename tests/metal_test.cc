@@ -494,7 +494,7 @@ void run_sdpa_case(dim_t batch, dim_t heads, dim_t q_len, dim_t num_keys, dim_t 
     StorageView out({batch, heads, q_len, depth}, DataType::FLOAT32, Device::METAL);
     metal::sdpa(q_gpu.data<float>(), k_gpu.data<float>(), v_gpu.data<float>(),
                 len_gpu ? len_gpu->data<int32_t>() : nullptr, out.data<float>(),
-                num_rows, q_len, num_keys, depth, scale);
+                num_rows, q_len, num_keys, num_keys * depth, depth, scale);
     metal::synchronize();
     expect_storage_eq(out.to(Device::CPU), ref, 1e-5);
   }
@@ -510,7 +510,7 @@ void run_sdpa_case(dim_t batch, dim_t heads, dim_t q_len, dim_t num_keys, dim_t 
     StorageView out({batch, heads, q_len, depth}, DataType::FLOAT16, Device::METAL);
     metal::sdpa(q_gpu.data<float16_t>(), k_gpu.data<float16_t>(), v_gpu.data<float16_t>(),
                 len_gpu ? len_gpu->data<int32_t>() : nullptr, out.data<float16_t>(),
-                num_rows, q_len, num_keys, depth, scale);
+                num_rows, q_len, num_keys, num_keys * depth, depth, scale);
     metal::synchronize();
     expect_storage_eq(out.to_float32().to(Device::CPU), ref, 2e-2);
   }
@@ -536,6 +536,110 @@ TEST_F(MetalTest, SdpaFusedMaskedAndBeamParity) {
   const std::vector<int32_t> lengths = {57, 31, 1, 0, 44, 57,     // batch 0, 3 heads x 2 rows
                                         2, 57, 19, 3, 57, 5};     // batch 1
   run_sdpa_case(2, 3, 2, 57, 64, &lengths, 55);
+}
+
+TEST_F(MetalTest, KvCacheAppendAndGrow) {
+  const dim_t batch_heads = 2;
+  const dim_t depth = 3;
+  const dim_t capacity = 4;
+  const std::vector<float> k0 = {1, 2, 3, 4, 5, 6,
+                                 7, 8, 9, 10, 11, 12};
+  const std::vector<float> v0 = {101, 102, 103, 104, 105, 106,
+                                 107, 108, 109, 110, 111, 112};
+  StorageView new_k({batch_heads, 2, depth}, k0, Device::METAL);
+  StorageView new_v({batch_heads, 2, depth}, v0, Device::METAL);
+  StorageView cache_k({batch_heads, capacity, depth}, DataType::FLOAT32, Device::METAL);
+  StorageView cache_v({batch_heads, capacity, depth}, DataType::FLOAT32, Device::METAL);
+
+  metal::kv_cache_append(new_k.buffer(), new_v.buffer(), cache_k.buffer(), cache_v.buffer(),
+                         batch_heads, 0, 2, capacity, depth * sizeof(float));
+
+  const std::vector<float> k1 = {13, 14, 15, 16, 17, 18};
+  const std::vector<float> v1 = {113, 114, 115, 116, 117, 118};
+  StorageView append_k({batch_heads, 1, depth}, k1, Device::METAL);
+  StorageView append_v({batch_heads, 1, depth}, v1, Device::METAL);
+  metal::kv_cache_append(append_k.buffer(), append_v.buffer(), cache_k.buffer(), cache_v.buffer(),
+                         batch_heads, 2, 1, capacity, depth * sizeof(float));
+
+  const dim_t grown_capacity = 8;
+  const std::vector<float> k2 = {19, 20, 21, 22, 23, 24,
+                                 25, 26, 27, 28, 29, 30};
+  const std::vector<float> v2 = {119, 120, 121, 122, 123, 124,
+                                 125, 126, 127, 128, 129, 130};
+  StorageView grow_k({batch_heads, 2, depth}, k2, Device::METAL);
+  StorageView grow_v({batch_heads, 2, depth}, v2, Device::METAL);
+  StorageView grown_k({batch_heads, grown_capacity, depth}, DataType::FLOAT32, Device::METAL);
+  StorageView grown_v({batch_heads, grown_capacity, depth}, DataType::FLOAT32, Device::METAL);
+  metal::kv_cache_grow(cache_k.buffer(), cache_v.buffer(), grow_k.buffer(), grow_v.buffer(),
+                       grown_k.buffer(), grown_v.buffer(), batch_heads, 3, 2,
+                       capacity, grown_capacity, depth * sizeof(float));
+  metal::synchronize();
+
+  const auto actual_k = grown_k.to(Device::CPU).to_vector<float>();
+  const auto actual_v = grown_v.to(Device::CPU).to_vector<float>();
+  const std::vector<float> expected_k = {1, 2, 3, 4, 5, 6, 13, 14, 15, 19, 20, 21, 22, 23, 24,
+                                         7, 8, 9, 10, 11, 12, 16, 17, 18, 25, 26, 27, 28, 29, 30};
+  const std::vector<float> expected_v = {101, 102, 103, 104, 105, 106, 113, 114, 115,
+                                         119, 120, 121, 122, 123, 124,
+                                         107, 108, 109, 110, 111, 112, 116, 117, 118,
+                                         125, 126, 127, 128, 129, 130};
+  for (dim_t bh = 0; bh < batch_heads; ++bh) {
+    const dim_t actual_offset = bh * grown_capacity * depth;
+    const dim_t expected_offset = bh * 5 * depth;
+    EXPECT_TRUE(std::equal(expected_k.begin() + expected_offset,
+                           expected_k.begin() + expected_offset + 5 * depth,
+                           actual_k.begin() + actual_offset));
+    EXPECT_TRUE(std::equal(expected_v.begin() + expected_offset,
+                           expected_v.begin() + expected_offset + 5 * depth,
+                           actual_v.begin() + actual_offset));
+  }
+
+  // The attention layer uses this append_length=0 form when a caller switches from the
+  // fused decode path to an unsupported mode (e.g. requests attention weights).
+  StorageView compact_k({batch_heads, 5, depth}, DataType::FLOAT32, Device::METAL);
+  StorageView compact_v({batch_heads, 5, depth}, DataType::FLOAT32, Device::METAL);
+  metal::kv_cache_grow(grown_k.buffer(), grown_v.buffer(), nullptr, nullptr,
+                       compact_k.buffer(), compact_v.buffer(), batch_heads, 5, 0,
+                       grown_capacity, 5, depth * sizeof(float));
+  metal::synchronize();
+  EXPECT_EQ(compact_k.to(Device::CPU).to_vector<float>(), expected_k);
+  EXPECT_EQ(compact_v.to(Device::CPU).to_vector<float>(), expected_v);
+}
+
+TEST_F(MetalTest, SdpaFusedCapacityStrideParity) {
+  const dim_t batch = 2;
+  const dim_t heads = 2;
+  const dim_t num_keys = 5;
+  const dim_t capacity = 8;
+  const dim_t depth = 16;
+  std::mt19937 rng(77);
+  std::uniform_real_distribution<float> dist(-1.f, 1.f);
+  std::vector<float> q_host(batch * heads * depth);
+  std::vector<float> k_host(batch * heads * num_keys * depth);
+  std::vector<float> v_host(k_host.size());
+  for (auto& x : q_host) x = dist(rng);
+  for (auto& x : k_host) x = dist(rng);
+  for (auto& x : v_host) x = dist(rng);
+
+  const StorageView q_cpu({batch, heads, 1, depth}, q_host, Device::CPU);
+  const StorageView k_cpu({batch, heads, num_keys, depth}, k_host, Device::CPU);
+  const StorageView v_cpu({batch, heads, num_keys, depth}, v_host, Device::CPU);
+  const float scale = 1.f / std::sqrt(static_cast<float>(depth));
+  StorageView ref(DataType::FLOAT32, Device::CPU);
+  sdpa_reference_cpu(q_cpu, k_cpu, v_cpu, nullptr, scale, ref);
+
+  StorageView q = q_cpu.to(Device::METAL);
+  StorageView k = k_cpu.to(Device::METAL);
+  StorageView v = v_cpu.to(Device::METAL);
+  StorageView cache_k({batch, heads, capacity, depth}, DataType::FLOAT32, Device::METAL);
+  StorageView cache_v({batch, heads, capacity, depth}, DataType::FLOAT32, Device::METAL);
+  metal::kv_cache_append(k.buffer(), v.buffer(), cache_k.buffer(), cache_v.buffer(),
+                         batch * heads, 0, num_keys, capacity, depth * sizeof(float));
+  StorageView out({batch, heads, 1, depth}, DataType::FLOAT32, Device::METAL);
+  metal::sdpa(q.data<float>(), cache_k.data<float>(), cache_v.data<float>(), nullptr,
+              out.data<float>(), batch * heads, 1, num_keys, capacity * depth, depth, scale);
+  metal::synchronize();
+  expect_storage_eq(out.to(Device::CPU), ref, 1e-5);
 }
 
 // Metal multinomial draws its uniforms from the CT2 host generator, so the same seed
