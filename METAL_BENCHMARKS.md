@@ -283,6 +283,39 @@ model is the worst case for any GPU backend — its ops are too small to amortiz
 API cost, which is why CPU (no GPU API in the path) still wins by ~90× even after the ~2×
 speedup.
 
+## Experimental float GEMV at m=1 (`DISABLED_BenchmarkMpsGemv`)
+
+Measured 2026-08-28, M4 Max, Release build. `MPSMatrixVectorMultiplication` is a
+dedicated alternative to expressing decode's `1×K · K×N` projections as a degenerate
+`MPSMatrixMultiplication`. The implementation caches the GEMV object by
+`{rows, columns, transpose, alpha, beta}` and preserves the per-op async commit model.
+It is opt-in with `CT2_MPS_GEMV=1` until a converted decoder-only model is available for
+an end-to-end gate.
+
+The benchmark reports the best of four repetitions in one process. Values below are
+flush-per-iteration milliseconds from two complete benchmark invocations; ranges show
+the two minima rather than hiding machine variance.
+
+| Dense shape (m=1) | fp16 GEMM | fp16 GEMV | fp32 GEMM | fp32 GEMV |
+| ----------------- | --------- | --------- | --------- | --------- |
+| n=896, k=896      | 0.146–0.156 | **0.129–0.134** | 0.133–0.142 | **0.102–0.107** |
+| n=2688, k=896     | 0.126–0.135 | **0.113–0.118** | 0.129–0.140 | **0.118–0.125** |
+| n=4864, k=896     | 0.135–0.138 | **0.112–0.122** | 0.150–0.172 | **0.126–0.137** |
+| n=896, k=4864     | 0.137–0.147 | **0.110–0.112** | 0.148–0.179 | **0.123–0.124** |
+| n=151936, k=896   | 0.686–0.689 | **0.638–0.657** | noisy | noisy |
+
+**Read:** the dedicated kernel is a repeatable win on the per-layer projection shapes,
+roughly 7–32% in this probe. The vocabulary projection is much closer; its fp32
+flush-per-iteration cell had a large outlier in one invocation, while batched timings
+were near parity (~1.17–1.21 ms), so no fp32 vocabulary claim is made.
+
+The included translation benchmark (batch 32, three separate warm processes) moved by
+median from **32.13→30.42 ms fp32** and **30.25→29.07 ms fp16** with the route enabled.
+That is encouraging but is not a substitute for the Qwen decode/prefill A/B: the route
+stays environment-gated until that model-level test is run. Direct fp32/fp16 parity,
+both matrix orientations, and nonzero alpha/beta are covered by
+`MetalTest.MpsGemvMatchesHostReference`; all 31 Metal tests pass with the route enabled.
+
 ## Op fusion: residual-Add + norm (`DISABLED_BenchmarkAddRMSNorm`)
 
 The first **positive** Metal perf lever (the SIMD-group-reduction rewrite was measured dead

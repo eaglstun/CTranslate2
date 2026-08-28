@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <vector>
@@ -140,6 +141,60 @@ TEST_F(MetalTest, Float16GemmMatchesFloat32) {
   EXPECT_EQ(c16.dtype(), DataType::FLOAT16);
 
   expect_storage_eq(c16.to_float32(), c32, 2e-2);
+}
+
+TEST_F(MetalTest, MpsGemvMatchesHostReference) {
+  const dim_t rows = 4;
+  const dim_t columns = 3;
+  const float alpha = 0.5f;
+  const float beta = 0.25f;
+  const std::vector<float> logical_matrix = {
+    1, 2, 3,
+    4, 5, 6,
+    7, 8, 9,
+    2, 4, 8,
+  };
+  const std::vector<float> x_values = {2, -1, 0.5f};
+  const std::vector<float> initial_y = {1, 2, 3, 4};
+  std::vector<float> expected(rows);
+  for (dim_t row = 0; row < rows; ++row) {
+    float dot = 0;
+    for (dim_t column = 0; column < columns; ++column)
+      dot += logical_matrix[row * columns + column] * x_values[column];
+    expected[row] = alpha * dot + beta * initial_y[row];
+  }
+
+  for (const bool transpose : {false, true}) {
+    std::vector<float> stored_matrix(logical_matrix.size());
+    if (transpose) {
+      for (dim_t row = 0; row < rows; ++row)
+        for (dim_t column = 0; column < columns; ++column)
+          stored_matrix[column * rows + row] = logical_matrix[row * columns + column];
+    } else {
+      stored_matrix = logical_matrix;
+    }
+
+    for (const DataType dtype : {DataType::FLOAT32, DataType::FLOAT16}) {
+      StorageView matrix = StorageView(transpose ? Shape{columns, rows} : Shape{rows, columns},
+                                       stored_matrix, Device::METAL).to(dtype);
+      StorageView x = StorageView({columns}, x_values, Device::METAL).to(dtype);
+      StorageView y = StorageView({rows}, initial_y, Device::METAL).to(dtype);
+      const dim_t ldm = transpose ? rows : columns;
+      if (dtype == DataType::FLOAT16)
+        metal::gemv(transpose, rows, columns, alpha,
+                    matrix.data<float16_t>(), ldm, x.data<float16_t>(), beta,
+                    y.data<float16_t>());
+      else
+        metal::gemv(transpose, rows, columns, alpha,
+                    matrix.data<float>(), ldm, x.data<float>(), beta, y.data<float>());
+
+      StorageView expected_view({rows}, expected);
+      if (dtype == DataType::FLOAT16)
+        expect_storage_eq(y.to_float32().to(Device::CPU), expected_view, 2e-2);
+      else
+        expect_storage_eq(y.to(Device::CPU), expected_view, 1e-5);
+    }
+  }
 }
 
 TEST_F(MetalTest, Float16SoftMaxMatchesFloat32) {
@@ -992,6 +1047,94 @@ TEST_F(MetalTest, DISABLED_BenchmarkGemmEncode) {
 
     std::cout << "  n=" << n << " fp16:  flush-per-iter " << per_iter
               << " ms,  batched-encode " << batched << " ms\n";
+  }
+}
+
+// A/B the current degenerate 1xK MPSMatrixMultiplication against the dedicated
+// MPSMatrixVectorMultiplication path on real Qwen2.5-0.5B decode shapes. Run with
+// CT2_MPS_GEMV unset so the GEMM column remains the baseline implementation.
+TEST_F(MetalTest, DISABLED_BenchmarkMpsGemv) {
+  if (std::getenv("CT2_MPS_GEMV"))
+    GTEST_SKIP() << "Unset CT2_MPS_GEMV for the direct GEMM-vs-GEMV A/B";
+
+  std::cout << "\n=== MPS GEMM vs GEMV at m=1 (ms/iter) ===\n";
+  struct Shape { dim_t n; dim_t k; int iters; };
+  for (const Shape shape : {Shape{896, 896, 100},
+                            Shape{2688, 896, 100},
+                            Shape{4864, 896, 50},
+                            Shape{896, 4864, 50},
+                            Shape{151936, 896, 10}}) {
+    for (const DataType dtype : {DataType::FLOAT16, DataType::FLOAT32}) {
+      StorageView matrix({shape.n, shape.k}, dtype, Device::METAL);
+      StorageView x({shape.k}, dtype, Device::METAL);
+      StorageView y({shape.n}, dtype, Device::METAL);
+      if (dtype == DataType::FLOAT16) {
+        std::fill(matrix.data<float16_t>(), matrix.data<float16_t>() + matrix.size(),
+                  static_cast<float16_t>(0.02f));
+        std::fill(x.data<float16_t>(), x.data<float16_t>() + x.size(),
+                  static_cast<float16_t>(0.01f));
+      } else {
+        std::fill(matrix.data<float>(), matrix.data<float>() + matrix.size(), 0.02f);
+        std::fill(x.data<float>(), x.data<float>() + x.size(), 0.01f);
+      }
+
+      auto gemm = [&] {
+        if (dtype == DataType::FLOAT16)
+          metal::gemm(false, true, 1, shape.n, shape.k, 1.f,
+                      x.data<float16_t>(), shape.k,
+                      matrix.data<float16_t>(), shape.k,
+                      0.f, y.data<float16_t>(), shape.n);
+        else
+          metal::gemm(false, true, 1, shape.n, shape.k, 1.f,
+                      x.data<float>(), shape.k, matrix.data<float>(), shape.k,
+                      0.f, y.data<float>(), shape.n);
+      };
+      auto gemv = [&] {
+        if (dtype == DataType::FLOAT16)
+          metal::gemv(false, shape.n, shape.k, 1.f,
+                      matrix.data<float16_t>(), shape.k, x.data<float16_t>(),
+                      0.f, y.data<float16_t>());
+        else
+          metal::gemv(false, shape.n, shape.k, 1.f,
+                      matrix.data<float>(), shape.k, x.data<float>(),
+                      0.f, y.data<float>());
+      };
+
+      auto flush_per_iter = [&](auto&& fn) {
+        return time_ms(shape.iters, [&] {
+          fn();
+          synchronize_device(Device::METAL, 0);
+        });
+      };
+      auto batched_encode = [&](auto&& fn) {
+        fn();
+        synchronize_device(Device::METAL, 0);
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < shape.iters; ++i)
+          fn();
+        synchronize_device(Device::METAL, 0);
+        const auto t1 = std::chrono::steady_clock::now();
+        return std::chrono::duration<double, std::milli>(t1 - t0).count() / shape.iters;
+      };
+
+      auto best_of_four = [&](auto&& measure) {
+        double best = std::numeric_limits<double>::max();
+        for (int repeat = 0; repeat < 4; ++repeat)
+          best = std::min(best, measure());
+        return best;
+      };
+
+      const double gemm_flush = best_of_four([&] { return flush_per_iter(gemm); });
+      const double gemv_flush = best_of_four([&] { return flush_per_iter(gemv); });
+      const double gemm_batched = best_of_four([&] { return batched_encode(gemm); });
+      const double gemv_batched = best_of_four([&] { return batched_encode(gemv); });
+      std::cout << "  n=" << shape.n << " k=" << shape.k << " "
+                << (dtype == DataType::FLOAT16 ? "fp16" : "fp32")
+                << ": GEMM " << gemm_flush << " / " << gemm_batched
+                << ", GEMV " << gemv_flush << " / " << gemv_batched
+                << "  (flush / batched)\n";
+    }
+    std::cout << "\n";
   }
 }
 

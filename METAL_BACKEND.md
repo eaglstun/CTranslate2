@@ -496,6 +496,10 @@ Remaining fp16 work:
 - Offline `.metallib` compilation (faster startup than `newLibraryWithSource`), located
   at runtime via `dladdr()` with a source-compile fallback.
 - Avoid the first-GEMM MPS pipeline warmup cost on the hot path.
+- **Experimental MPS GEMV for float decode:** `CT2_MPS_GEMV=1` routes contiguous
+  `m == 1` fp32/fp16 GEMMs through a cached `MPSMatrixVectorMultiplication`. Decode-shaped
+  microbenchmarks and the included translation model are positive; keep it opt-in until a
+  converted decoder-only model confirms the end-to-end result. See `METAL_BENCHMARKS.md`.
 
 ### Deferred / out of scope for now
 

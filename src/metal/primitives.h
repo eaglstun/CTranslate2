@@ -215,6 +215,17 @@ namespace ctranslate2 {
               float beta,
               float* c, dim_t ldc);
 
+    // Matrix-vector multiplication via MPSMatrixVectorMultiplication:
+    // y = alpha * op(matrix) * x + beta * y. `rows` and `columns` describe op(matrix),
+    // while `ldm` is the leading dimension of the stored (pre-transpose) matrix.
+    void gemv(bool transpose,
+              dim_t rows, dim_t columns,
+              float alpha,
+              const float* matrix, dim_t ldm,
+              const float* x,
+              float beta,
+              float* y);
+
     // Batched strided variant: batch_size independent m*k / k*n / m*n matrices laid out
     // contiguously with the given element strides, matching gemm_batch_strided.
     void gemm_batch_strided(bool transpose_a, bool transpose_b,
@@ -234,6 +245,14 @@ namespace ctranslate2 {
               const float16_t* b, dim_t ldb,
               float beta,
               float16_t* c, dim_t ldc);
+
+    void gemv(bool transpose,
+              dim_t rows, dim_t columns,
+              float alpha,
+              const float16_t* matrix, dim_t ldm,
+              const float16_t* x,
+              float beta,
+              float16_t* y);
 
     void gemm_batch_strided(bool transpose_a, bool transpose_b,
                             dim_t m, dim_t n, dim_t k,
