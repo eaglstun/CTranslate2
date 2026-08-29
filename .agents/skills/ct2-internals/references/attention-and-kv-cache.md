@@ -99,7 +99,7 @@ rows, and calls the `_rotary_op`. Scaling variants (Llama3, Su/longrope, linear)
 in `make_rotary_embeddings` (`attention_layer.cc:68`) and `initialize` (`:252`). Only K and
 Q are rotated — V never is.
 
-## The KV cache — grown one step per token (`Concat` on the time dim)
+## The KV cache — contiguous by default, capacity-strided on fused Metal decode
 
 This is the heart of the decode loop. `cached_keys`/`cached_values` are passed in by the
 decoder and **owned across steps**. Per step (`attention.cc:533-554`):
@@ -121,6 +121,16 @@ After the concat, `keys_proj`/`values_proj` `shallow_copy` the full cache
 single decode step does a `Concat` (cache grows by one row) plus the split/replicate/RoPE
 ops above — many tiny ops, each paying the per-op floor. That's the structural reason
 decode is overhead-bound; see the Metal bridge below.
+
+**Metal fused-SDPA exception (added 2026-08-28):** supported rank-4 decoder shapes use a
+physical `[batch, heads, capacity, depth]` cache. Logical length is the decoder `offset`
+plus the current append length; capacity begins at 64 and doubles. Most steps call
+`metal::kv_cache_append` to write only the new K/V rows, while growth boundaries call
+`metal::kv_cache_grow` to copy the live prefix and append the suffix in one launch. Fused
+SDPA receives the physical batch-head stride separately from logical key length. The
+contiguous Concat path remains the contract for CPU/CUDA, FlashAttention, merged MQA,
+sliding windows, relative bias/ALiBi, attention-output requests, and other unsupported
+Metal shapes. `CT2_NO_METAL_KV_CACHE=1` disables the specialized layout.
 
 ### Sliding-window attention
 
@@ -153,9 +163,10 @@ Metal-Gemma2 investigation flagged as the prime suspect (see the Metal-backend m
   a dozen-plus \_tiny* ops at `m = batch`. That's why Metal decode is API-overhead-bound and
   why the per-op floor dominates. The reasoning is in the **`apple-silicon`** skill,
   `dispatch-overlap-and-perf-model.md`.
-- The per-step **`Concat`/`Split`** were graduated to Metal GPU kernels to keep the cache
-  on-GPU — parity-verified but measured _neutral_ on e2e decode (it disproved the
-  "per-step flush dominates" hypothesis). Structure here; that perf conclusion there.
+- The generic **`Concat`/`Split`** path remains GPU-resident and parity-verified. For fused
+  Metal decode, capacity-strided append now avoids copying the old history and improved
+  Qwen2.5-0.5B batch-1 decode by 10.6–10.9% fp32 and 4.7–8.5% fp16 across two
+  same-binary matched A/B pairs.
 - RoPE has a Metal kernel with its own parity test (`tests/metal_test.cc`, the rotary
   case); the fp16 numeric tolerance for it is a `math-functions-and-numeric-parity.md`
   concern in the `apple-silicon` skill, not a structural one.

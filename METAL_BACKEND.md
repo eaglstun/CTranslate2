@@ -1,6 +1,6 @@
 # Apple Metal Backend — Progress & Roadmap
 
-Status as of 2026-07-07. This document tracks the in-progress Apple Metal GPU backend
+Status as of 2026-08-28. This document tracks the in-progress Apple Metal GPU backend
 (`Device::METAL`, built with `-DWITH_METAL=ON`) for CTranslate2.
 
 ## TL;DR
@@ -433,6 +433,31 @@ prefill transposes now native). Suite 104/106 (2 pre-existing Conv1D skips). Ful
 tables and the deprioritized-lever list in `METAL_BENCHMARKS.md`;
 `METAL_WHISPER_NEXT_STEPS.md` records the investigation.
 
+### ✅ M18 — capacity-strided KV cache: true append-in-place (2026-08-28)
+
+The ordinary decoder cache no longer rematerializes its full history with `Concat` on
+every supported Metal decode step. Once a call enters the fused-SDPA regime, K/V storage
+uses physical `[batch, heads, capacity, depth]` rows with a logical length carried by the
+decoder offset. Capacity starts at 64 and doubles geometrically. Most steps issue one
+`ct2_kv_cache_append_bytes` launch that writes only the new K and V rows; capacity
+boundaries use one `ct2_kv_cache_grow_bytes` launch to copy the live prefix and append the
+suffix together. Fused SDPA accepts a K/V batch-head stride distinct from logical key
+length, so unused capacity needs no packing copy.
+
+The route is deliberately scoped to the existing fused-SDPA contract (Metal fp32/fp16,
+rank-4 self-attention, q_len ≤ 8, d_head ≤ 256, no relative bias/ALiBi/attention output,
+and no sliding window). CPU, CUDA, FlashAttention, merged MQA, sliding-window attention,
+and unsupported Metal calls keep the contiguous Concat path. If a caller changes modes
+after a capacity-strided cache was created, it is compacted before falling back.
+`CT2_NO_METAL_KV_CACHE=1` disables the route for A/B testing.
+
+Qwen2.5-0.5B batch-1 prompt-32/decode-128 (five timed iterations, same binary, two
+matched disabled/enabled pairs) improved fp32 by **10.6–10.9%** and fp16 by
+**4.7–8.5%**. Real-model greedy parity remained 24/24 tokens against CPU in both
+precisions. Append, grow, compact-to-contiguous, and capacity-strided SDPA have direct
+parity tests; all 33 Metal tests pass. The full 303-test suite has the same single
+pre-existing Accelerate-build failure in quantized grouped Conv1D.
+
 ## What runs where today
 
 | Operation                                                                  | Metal execution                                                                                                                             |
@@ -455,39 +480,39 @@ tables and the deprioritized-lever list in `METAL_BENCHMARKS.md`;
 | TopK / TopPMask (float32 and float16)                                      | **GPU** — custom kernels, bit-parity with CPU (size caps fall back to CPU reference)                                                        |
 | GumbelMax / Multinomial sampling (float32 and float16)                     | **GPU** — host-seeded kernels (`set_random_seed`-reproducible); Multinomial at sample_size 1                                                |
 | Decode attention: q·K^T → softmax → ·V (float32 and float16)               | **GPU** — fused single-launch SDPA kernel at q_len ≤ 8 (greedy/beam decode, short prefill); larger q_len uses MPS GEMM + softmax kernel     |
-| Everything else (general-axis LayerNorm/BiasAdd, conv, int Mul, …)         | CPU reference over unified memory (correct, float32 only)                                                                                   |
-| fp16 for ungraduated ops                                                   | Not yet — CPU reference is float32-only, so a full fp16 model needs those ops graduated to half kernels first                               |
+| Decoder KV-cache append (fused-SDPA shapes)                                | **GPU** — capacity-strided in-place K/V append; geometric grow at capacity boundaries (`CT2_NO_METAL_KV_CACHE=1` disables)                  |
+| Everything else (general-axis LayerNorm/BiasAdd, conv, int Mul, …)         | CPU reference over unified memory; selected fp16 callers such as Conv1D use explicit float32 compatibility islands                          |
+| fp16 for ungraduated ops                                                   | Architecture-dependent — native half kernel or explicit fp16→fp32→fp16 island required; Qwen and Whisper full-model paths are proven        |
 | bf16 compute                                                               | Not yet                                                                                                                                     |
 
 ## What's left
 
-### Near term — graduate more ops to GPU kernels
+`METAL_NEXT_STEPS.md` is the single ranked backlog. The post-M18 decode profile is now
+complete: the leading float-path fusion candidate is QKV post-processing (Split + RoPE +
+capacity-cache append), while int8 is dominated by its Quantize/GEMM/Dequantize pipeline.
+The other high-value lane is classic encoder-decoder fp16: Qwen and Whisper are already
+proven end-to-end in fp16, but July OPUS-MT/NLLB measurements still show conversion churn
+from architecture-specific CPU-reference ops.
 
-Each follows the established pattern: write an MSL kernel, add a `metal::` entry point,
-add `if (device == Device::METAL)` routing in the op, verify parity against the CPU
-reference via the existing suite.
+### Coverage work
 
-- Remaining elementwise variants (sub/min/max/scalar-add) used in decoding
-- Next decode-fusion candidates (post-M16 profile order): the projection GEMM epilogues,
-  KV-cache `Concat` append, RMSNorm, Rotary
+Each newly graduated op follows the established pattern: write an MSL kernel, add a
+`metal::` entry point, route at the op boundary, and verify against the CPU reference.
+Current candidates include `Tile` for encoder-decoder beam search and the remaining
+elementwise/reduction variants (`Sub`, `Mean`, `Sum`, `MinMax`, scalar add), but profiling
+must select the order. Full-model fp16 is no longer globally blocked: it is green for Qwen
+and Whisper. The remaining issue is model-architecture coverage—an ungraduated op is
+float32-only unless it has an explicit fp16 compatibility island.
 
-### fp16 — foundation done, full-model fp16 remaining
+Still worth evaluating after a profile:
 
-Where Apple Silicon actually gets fast. The foundation shipped in M5: `mayiuse_float16`
-is true for Metal, and GEMM + softmax run in fp16. **A full fp16 model is still blocked**
-because the CPU-reference binding is float32-only — every op a model touches needs a half
-kernel. So full fp16 ≈ the "graduate more ops" list above, done with `half` kernels.
-Remaining fp16 work:
-
-- fp16 `half` kernels for the rest of the decoder path (norms, gather, rotary, bias/act).
-- Optionally a `Device::METAL`-aware `DEVICE_AND_FLOAT_DISPATCH` in `src/dispatch.h` (it
-  hardcodes `Device::CUDA` for fp16/bf16) if any fp16 op is routed through the generic
-  dispatch rather than at `operator()` level.
 - `get_preferred_size_multiple` `Device::METAL` branch in `src/types.cc` (padding hint;
   currently returns 1).
-- Consider enabling fp16 in the `AUTO` compute-type path once the full path supports it.
+- Enable fp16 in the `AUTO` compute-type path only when the supported architecture set and
+  fallback behavior are clear enough that auto-selection cannot turn a working model into
+  a runtime dtype error.
 
-### Performance work (after correctness)
+### Performance work
 
 - ~~Batch op encoding into fewer command buffers / reduce per-op synchronize.~~ — tried and
   reverted: per-thread command-buffer reuse (one commit per step) measured neutral-to-negative
@@ -496,6 +521,14 @@ Remaining fp16 work:
 - Offline `.metallib` compilation (faster startup than `newLibraryWithSource`), located
   at runtime via `dladdr()` with a source-compile fallback.
 - Avoid the first-GEMM MPS pipeline warmup cost on the hot path.
+- **Experimental MPS GEMV for float decode (deprioritized):** `CT2_MPS_GEMV=1` routes
+  contiguous `m == 1` fp32/fp16 GEMMs through a cached
+  `MPSMatrixVectorMultiplication`. Decode-shaped microbenchmarks are positive, but the
+  Qwen2.5-0.5B batch-1 gate measured fp32 at parity and fp16 1.8% slower, so this stays
+  opt-in rather than becoming the default. See `METAL_BENCHMARKS.md`.
+- ~~Re-profile after M18.~~ — done 2026-08-28. Split + RoPE + MultiHeadAttention
+  self-time is 17–21% of fp32/fp16 decode; the int8 Dense pipeline is 60–67%. See
+  `METAL_BENCHMARKS.md`. Prefer operation fusion that removes launches and memory passes.
 
 ### Deferred / out of scope for now
 
@@ -504,7 +537,7 @@ Remaining fp16 work:
   profile put the whole Whisper encoder at ~3% of a transcribe run, so a GPU Conv1D is
   low-value there)
 - AWQ int4 GEMM
-- bf16 (only on newer Apple GPUs)
+- Native bf16 implementation (scope hardware/OS support first; ranked backlog item 6)
 - NCCL / tensor parallelism (multi-GPU)
 
 ## Gotchas for contributors

@@ -199,7 +199,9 @@ namespace ctranslate2 {
                                       bool with_cache = false,
                                       dim_t beam_size = 1,
                                       Alibi* alibi = nullptr,
-                                      StorageView* position_bias = nullptr) {
+                                      StorageView* position_bias = nullptr,
+                                      dim_t logical_key_length = 0,
+                                      dim_t kv_stride = 0) {
       PROFILE("dot_product_attention");
 
 #ifdef CT2_WITH_METAL
@@ -220,6 +222,7 @@ namespace ctranslate2 {
           && queries.dim(0) == keys.dim(0)
           && queries.dim(1) == keys.dim(1)
           && queries.dim(3) == keys.dim(3)
+          && (logical_key_length == 0 || logical_key_length <= keys.dim(2))
           && values.shape() == keys.shape()
           && (queries.dtype() == DataType::FLOAT32 || queries.dtype() == DataType::FLOAT16)
           && keys.dtype() == queries.dtype()
@@ -235,22 +238,28 @@ namespace ctranslate2 {
                      == queries.dim(0) * queries.dim(1) * queries.dim(2)))) {
         const dim_t num_rows = queries.dim(0) * queries.dim(1) * queries.dim(2);
         const dim_t rows_per_bh = queries.dim(2);
-        const dim_t num_keys = keys.dim(2);
+        const dim_t num_keys = logical_key_length > 0 ? logical_key_length : keys.dim(2);
         const dim_t depth = queries.dim(3);
+        const dim_t key_value_stride = kv_stride > 0 ? kv_stride : keys.dim(2) * depth;
         const int32_t* lengths_data =
             values_lengths ? values_lengths->data<int32_t>() : nullptr;
         output.resize(queries.shape());
         if (queries.dtype() == DataType::FLOAT32)
           metal::sdpa(queries.data<float>(), keys.data<float>(), values.data<float>(),
                       lengths_data, output.data<float>(),
-                      num_rows, rows_per_bh, num_keys, depth, queries_scale);
+                      num_rows, rows_per_bh, num_keys, key_value_stride,
+                      depth, queries_scale);
         else
           metal::sdpa(queries.data<float16_t>(), keys.data<float16_t>(),
                       values.data<float16_t>(), lengths_data, output.data<float16_t>(),
-                      num_rows, rows_per_bh, num_keys, depth, queries_scale);
+                      num_rows, rows_per_bh, num_keys, key_value_stride,
+                      depth, queries_scale);
         return;
       }
 #endif
+
+      if (logical_key_length > 0)
+        throw std::logic_error("capacity-strided KV cache requires fused Metal SDPA");
 
       std::unique_ptr<const StorageView> relative_positions;
       if (relative_position_keys || relative_position_values || relative_asymmetric_position_keys) {
@@ -525,6 +534,9 @@ namespace ctranslate2 {
       dim_t beam_size = 1;
 
       bool prefilling = (_sliding_window > 0 && values_lengths);
+      dim_t logical_cache_length = 0;
+      dim_t kv_cache_stride = 0;
+      bool capacity_strided_cache = false;
 
       if (!_self_attention) {
 
@@ -588,7 +600,115 @@ namespace ctranslate2 {
           }
         }
 
-        if (cached_keys != nullptr) {
+#ifdef CT2_WITH_METAL
+        // A capacity-strided cache turns the per-token Concat into a true append. The
+        // physical shape is [batch, heads, capacity, depth], while offset carries the
+        // logical prefix length. The fused SDPA kernel accepts the physical stride and
+        // reads only logical_cache_length rows. Other attention variants keep the
+        // contiguous cache contract below.
+        static const bool metal_kv_cache_disabled =
+          std::getenv("CT2_NO_METAL_KV_CACHE") != nullptr;
+        static const bool metal_sdpa_disabled =
+          std::getenv("CT2_NO_METAL_SDPA") != nullptr;
+        const bool can_use_capacity_strided_cache =
+          cached_keys != nullptr
+          && !metal_kv_cache_disabled
+          && !metal_sdpa_disabled
+          && queries.device() == Device::METAL
+          && _sliding_window == 0
+          && !_merge_time_and_head_dims
+          && queries_proj.rank() == 4
+          && keys_proj.rank() == 4
+          && values_proj.shape() == keys_proj.shape()
+          && queries_proj.dim(2) <= 8
+          && queries_proj.dim(3) <= 256
+          && queries_proj.dim(0) == keys_proj.dim(0)
+          && queries_proj.dim(1) == keys_proj.dim(1)
+          && queries_proj.dim(3) == keys_proj.dim(3)
+          && (queries_proj.dtype() == DataType::FLOAT32
+              || queries_proj.dtype() == DataType::FLOAT16)
+          && keys_proj.dtype() == queries_proj.dtype()
+          && values_proj.dtype() == queries_proj.dtype()
+          && !_relative_position_keys
+          && !_relative_asymmetric_position_keys
+          && !_relative_position_values
+          && !_relative_attention_bias
+          && !_alibi
+          && !attention
+          && (!values_lengths
+              || (values_lengths->dtype() == DataType::INT32
+                  && values_lengths->device() == Device::METAL
+                  && values_lengths->size()
+                     == queries_proj.dim(0) * queries_proj.dim(1) * queries_proj.dim(2)));
+
+        // A caller can switch from the optimized decode shape to an unsupported attention
+        // mode (for example by requesting attention weights). Compact the physical cache
+        // before returning to the generic Concat path so the public state remains valid.
+        const bool has_capacity_strided_cache =
+          cached_keys && !cached_keys->empty() && cached_keys->rank() == 4
+          && cached_keys->dim(2) > offset;
+        if (has_capacity_strided_cache && !can_use_capacity_strided_cache) {
+          Shape compact_shape = cached_keys->shape();
+          const dim_t old_capacity = compact_shape[2];
+          compact_shape[2] = offset;
+          StorageView compact_keys(compact_shape, dtype, device);
+          StorageView compact_values(std::move(compact_shape), dtype, device);
+          metal::kv_cache_grow(cached_keys->buffer(), cached_values->buffer(),
+                               nullptr, nullptr,
+                               compact_keys.buffer(), compact_values.buffer(),
+                               cached_keys->dim(0) * cached_keys->dim(1),
+                               offset, 0, old_capacity, offset,
+                               cached_keys->dim(3) * cached_keys->item_size());
+          *cached_keys = std::move(compact_keys);
+          *cached_values = std::move(compact_values);
+        }
+
+        if (can_use_capacity_strided_cache) {
+          const dim_t append_length = keys_proj.dim(2);
+          logical_cache_length = offset + append_length;
+          const dim_t old_capacity = cached_keys->empty() ? 0 : cached_keys->dim(2);
+          const bool already_capacity_strided = !cached_keys->empty() && old_capacity > offset;
+          dim_t capacity = already_capacity_strided ? old_capacity : 0;
+          const dim_t batch_heads = keys_proj.dim(0) * keys_proj.dim(1);
+          const dim_t row_size_bytes = keys_proj.dim(3) * keys_proj.item_size();
+
+          if (!already_capacity_strided || capacity < logical_cache_length) {
+            capacity = std::max<dim_t>(64, already_capacity_strided ? capacity * 2 : 64);
+            while (capacity < logical_cache_length)
+              capacity *= 2;
+
+            Shape cache_shape = keys_proj.shape();
+            cache_shape[2] = capacity;
+            StorageView new_cached_keys(cache_shape, dtype, device);
+            StorageView new_cached_values(std::move(cache_shape), dtype, device);
+
+            if (offset == 0) {
+              metal::kv_cache_append(keys_proj.buffer(), values_proj.buffer(),
+                                     new_cached_keys.buffer(), new_cached_values.buffer(),
+                                     batch_heads, 0, append_length, capacity, row_size_bytes);
+            } else {
+              metal::kv_cache_grow(cached_keys->buffer(), cached_values->buffer(),
+                                   keys_proj.buffer(), values_proj.buffer(),
+                                   new_cached_keys.buffer(), new_cached_values.buffer(),
+                                   batch_heads, offset, append_length,
+                                   already_capacity_strided ? old_capacity : offset,
+                                   capacity, row_size_bytes);
+            }
+            *cached_keys = std::move(new_cached_keys);
+            *cached_values = std::move(new_cached_values);
+          } else {
+            metal::kv_cache_append(keys_proj.buffer(), values_proj.buffer(),
+                                   cached_keys->buffer(), cached_values->buffer(),
+                                   batch_heads, offset, append_length,
+                                   capacity, row_size_bytes);
+          }
+
+          kv_cache_stride = capacity * keys_proj.dim(3);
+          capacity_strided_cache = true;
+        }
+#endif
+
+        if (cached_keys != nullptr && !capacity_strided_cache) {
           if (cached_keys->empty()) {
             *cached_keys = std::move(keys_proj);
             *cached_values = std::move(values_proj);
@@ -637,7 +757,9 @@ namespace ctranslate2 {
                             bool(cached_keys),
                             beam_size,
                             _alibi,
-                            position_bias);
+                            position_bias,
+                            logical_cache_length,
+                            kv_cache_stride);
 
       if (prefilling && cached_keys && cached_keys->shape()[2] > _sliding_window) {
         // set only last sliding_window tokens to cached_keys and cached_values after computing attention

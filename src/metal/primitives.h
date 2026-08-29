@@ -70,17 +70,34 @@ namespace ctranslate2 {
     // (batch * heads * q_len; q_len == rows_per_bh), context = softmax(scale * q · K^T) · V
     // over the row's keys — the MatMul → SoftMax → MatMul sequence of dot_product_attention
     // in one launch, with no [rows, num_keys] score tensor materialized. queries/output are
-    // [num_rows, depth]; keys/values are [num_rows / rows_per_bh, num_keys, depth], all
-    // contiguous. lengths follows the SoftMax mask contract (one int32 per row, len == 0
+    // [num_rows, depth]; keys/values are [num_rows / rows_per_bh, capacity, depth], where
+    // only the first num_keys rows are logical and kv_stride is the element stride between
+    // batch/head rows. lengths follows the SoftMax mask contract (one int32 per row, len == 0
     // zeroes the row); pass nullptr for full attention. Requires depth <= 256 (the kernel's
     // per-lane accumulator budget) — the caller guards. float32 and float16 (float
     // accumulation in both).
     void sdpa(const float* queries, const float* keys, const float* values,
               const int32_t* lengths, float* output,
-              dim_t num_rows, dim_t rows_per_bh, dim_t num_keys, dim_t depth, float scale);
+              dim_t num_rows, dim_t rows_per_bh, dim_t num_keys, dim_t kv_stride,
+              dim_t depth, float scale);
     void sdpa(const float16_t* queries, const float16_t* keys, const float16_t* values,
               const int32_t* lengths, float16_t* output,
-              dim_t num_rows, dim_t rows_per_bh, dim_t num_keys, dim_t depth, float scale);
+              dim_t num_rows, dim_t rows_per_bh, dim_t num_keys, dim_t kv_stride,
+              dim_t depth, float scale);
+
+    // Append K/V rows into a capacity-strided cache. The in-place form writes only the
+    // new rows. The grow form copies the logical prefix from an old stride and appends the
+    // new rows into a newly allocated cache in one dispatch. Sizes are in bytes so the
+    // same kernels support float32 and float16.
+    void kv_cache_append(const void* keys, const void* values,
+                         void* cached_keys, void* cached_values,
+                         dim_t batch_heads, dim_t cache_length, dim_t append_length,
+                         dim_t capacity, dim_t row_size_bytes);
+    void kv_cache_grow(const void* old_keys, const void* old_values,
+                       const void* keys, const void* values,
+                       void* cached_keys, void* cached_values,
+                       dim_t batch_heads, dim_t cache_length, dim_t append_length,
+                       dim_t old_capacity, dim_t new_capacity, dim_t row_size_bytes);
 
     // Rotary position embedding over a [batch_size * max_time, depth] tensor; sin/cos are
     // [max_time, ndims]. Elements >= ndims are copied through. float32 and float16.
@@ -215,6 +232,17 @@ namespace ctranslate2 {
               float beta,
               float* c, dim_t ldc);
 
+    // Matrix-vector multiplication via MPSMatrixVectorMultiplication:
+    // y = alpha * op(matrix) * x + beta * y. `rows` and `columns` describe op(matrix),
+    // while `ldm` is the leading dimension of the stored (pre-transpose) matrix.
+    void gemv(bool transpose,
+              dim_t rows, dim_t columns,
+              float alpha,
+              const float* matrix, dim_t ldm,
+              const float* x,
+              float beta,
+              float* y);
+
     // Batched strided variant: batch_size independent m*k / k*n / m*n matrices laid out
     // contiguously with the given element strides, matching gemm_batch_strided.
     void gemm_batch_strided(bool transpose_a, bool transpose_b,
@@ -234,6 +262,14 @@ namespace ctranslate2 {
               const float16_t* b, dim_t ldb,
               float beta,
               float16_t* c, dim_t ldc);
+
+    void gemv(bool transpose,
+              dim_t rows, dim_t columns,
+              float alpha,
+              const float16_t* matrix, dim_t ldm,
+              const float16_t* x,
+              float beta,
+              float16_t* y);
 
     void gemm_batch_strided(bool transpose_a, bool transpose_b,
                             dim_t m, dim_t n, dim_t k,

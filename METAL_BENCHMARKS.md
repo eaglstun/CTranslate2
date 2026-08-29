@@ -283,6 +283,147 @@ model is the worst case for any GPU backend — its ops are too small to amortiz
 API cost, which is why CPU (no GPU API in the path) still wins by ~90× even after the ~2×
 speedup.
 
+## Experimental float GEMV at m=1 (`DISABLED_BenchmarkMpsGemv`)
+
+Measured 2026-08-28, M4 Max, Release build. `MPSMatrixVectorMultiplication` is a
+dedicated alternative to expressing decode's `1×K · K×N` projections as a degenerate
+`MPSMatrixMultiplication`. The implementation caches the GEMV object by
+`{rows, columns, transpose, alpha, beta}` and preserves the per-op async commit model.
+It is opt-in with `CT2_MPS_GEMV=1`; the decoder-only model gate below did not justify
+making it the default.
+
+The benchmark reports the best of four repetitions in one process. Values below are
+flush-per-iteration milliseconds from two complete benchmark invocations; ranges show
+the two minima rather than hiding machine variance.
+
+| Dense shape (m=1) | fp16 GEMM   | fp16 GEMV       | fp32 GEMM   | fp32 GEMV       |
+| ----------------- | ----------- | --------------- | ----------- | --------------- |
+| n=896, k=896      | 0.146–0.156 | **0.129–0.134** | 0.133–0.142 | **0.102–0.107** |
+| n=2688, k=896     | 0.126–0.135 | **0.113–0.118** | 0.129–0.140 | **0.118–0.125** |
+| n=4864, k=896     | 0.135–0.138 | **0.112–0.122** | 0.150–0.172 | **0.126–0.137** |
+| n=896, k=4864     | 0.137–0.147 | **0.110–0.112** | 0.148–0.179 | **0.123–0.124** |
+| n=151936, k=896   | 0.686–0.689 | **0.638–0.657** | noisy       | noisy           |
+
+**Read:** the dedicated kernel is a repeatable win on the per-layer projection shapes,
+roughly 7–32% in this probe. The vocabulary projection is much closer; its fp32
+flush-per-iteration cell had a large outlier in one invocation, while batched timings
+were near parity (~1.17–1.21 ms), so no fp32 vocabulary claim is made.
+
+The included translation benchmark (batch 32, three separate warm processes) moved by
+median from **32.13→30.42 ms fp32** and **30.25→29.07 ms fp16** with the route enabled.
+That encouraging result did not survive a real decoder-only model gate.
+
+`MetalTest.DISABLED_BenchmarkLLMMpsGemv` loads Qwen2.5-0.5B once per precision, warms it,
+then averages five forced 128-token batch-1 decodes. Two alternating baseline/GEMV
+process pairs gave:
+
+| Qwen decode | baseline range     | MPS GEMV range     | best-of-two result  |
+| ----------- | ------------------ | ------------------ | ------------------- |
+| fp32        | 3465.59–3715.32 ms | 3462.84–3615.11 ms | **parity** (−0.08%) |
+| fp16        | 2614.33–2683.85 ms | 2661.07–2811.27 ms | **1.8% slower**     |
+
+**Decision:** keep the route opt-in and deprioritized. The isolated 7–32% projection
+wins are too small a share of the full decode loop to improve throughput, and fp16—the
+preferred Qwen compute type—regresses slightly. This is another example of why a kernel
+microbenchmark is a filter, not the promotion gate.
+
+Direct fp32/fp16 parity, both matrix orientations, and nonzero alpha/beta are covered by
+`MetalTest.MpsGemvMatchesHostReference`; all 31 Metal tests pass with the route enabled.
+The real Qwen greedy-decode parity gate also matches CPU for all 24/24 tokens in fp32 and
+fp16 with `CT2_MPS_GEMV=1`.
+
+### Rejected follow-up: combine the two KV-cache Concat copies
+
+The Qwen fp16 decode profile put `Concat` at 10.9%, and each two-input Metal Concat
+encoded the old-cache and new-token copies in separate command buffers. Two implementations
+were tested on 2026-08-28 and removed:
+
+- One branch-selecting byte kernel copying both inputs in a single grid regressed the
+  focused 128-token decode substantially; per-byte division/source selection erased the
+  launch saving.
+- Two existing strided-copy dispatches in one encoder preserved the efficient copy kernel
+  but still failed the model gate: fp32 was flat and fp16 regressed. As with whole-step
+  command-buffer reuse, combining commits interfered with the scheduling/overlap that the
+  current per-copy path gets for free.
+
+Both variants passed all six Metal Concat parity cases, including empty inputs and all
+three concat axes. The failure was throughput, not correctness. Do not retry command-buffer
+coalescing here; a future cache win needs a layout that can append in place without copying
+the old history (for example a capacity-strided or paged cache), which is a state-layout
+change rather than a Concat-kernel tweak.
+
+### Implemented follow-up: capacity-strided append-in-place
+
+That state-layout change was implemented on 2026-08-28 for the fused Metal decode path.
+The cache is physically `[batch, heads, capacity, depth]`, begins at 64 timesteps, and
+doubles geometrically. Logical length comes from the decoder offset. A common step writes
+only the new K/V suffix with one byte-copy kernel; a growth step copies the live prefix and
+appends the suffix into the new allocation in one launch. Fused SDPA consumes an explicit
+K/V batch-head stride, so unused capacity never needs to be packed. Unsupported attention
+modes retain the contiguous Concat path, with a compact-to-contiguous transition if a
+caller switches modes. `CT2_NO_METAL_KV_CACHE=1` is the A/B escape hatch.
+
+Focused Qwen2.5-0.5B batch-1 decode (prompt 32, forced 128 tokens, warmup then average of
+five; same binary, two alternating cache-enabled/cache-disabled process pairs):
+
+| compute | Concat-cache range | capacity-strided range | matched-pair improvement |
+| ------- | ------------------ | ---------------------- | ------------------------ |
+| fp32    | 3300.17–3612.89 ms | **2951.25–3218.07 ms** | **10.6–10.9%**           |
+| fp16    | 2291.38–2425.06 ms | **2095.58–2310.78 ms** | **4.7–8.5%**             |
+
+The real-model correctness gate matched CPU for all 24/24 greedy tokens in fp32 and fp16.
+Primitive coverage verifies in-place append, grow, compact-to-contiguous, and SDPA over a
+capacity stride. All 33 Metal tests pass; the full suite remains 299 passed / 3 skipped /
+1 pre-existing CPU quantized-grouped-Conv1D failure.
+
+### Post-M18 decode profile: cache copying is gone; two fusion targets remain
+
+Re-profiled 2026-08-28 after capacity-strided append, using Qwen2.5-0.5B, prompt 32,
+128 forced greedy tokens, and one warmup plus one profiled generation per cell. The
+Release build had `ENABLE_PROFILING=ON`. Each cell ran in a separate process through the
+`CT2_LLM_PROFILE=post_m18` mode in `MetalTest.DISABLED_BenchmarkLLM`.
+
+The integrated profiler synchronizes Metal at every nested scope, so these percentages
+rank work but do **not** predict an end-to-end speedup. In particular, parent scopes report
+self-time after their named children are subtracted. `MultiHeadAttention self` is the
+unnamed layout/cache/orchestration remainder around its profiled Dense, norm, RoPE, Split,
+and attention children.
+
+| compute / batch | GEMM | Quantize | Dequant GEMM epilogue | RMSNorm | RoPE | Add | fused SDPA | Split | MHA self |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| fp32 / 1 | 39.3% | — | — | 9.6% | 8.8% | 8.5% | 7.7% | 6.0% | 5.4% |
+| fp16 / 1 | 35.9% | — | — | 10.2% | 9.4% | 9.1% | 8.1% | 6.1% | 5.6% |
+| int8 / 1 | 25.1% | 18.1% | 17.2% | 7.1% | 6.6% | 6.3% | 5.7% | 4.3% | 3.9% |
+| fp32 / 8 | 48.5% | — | — | 8.2% | 7.5% | 6.8% | 5.5% | 4.7% | 5.3% |
+| fp16 / 8 | 39.4% | — | — | 9.1% | 9.0% | 8.1% | 7.2% | 5.6% | 5.6% |
+| int8 / 8 | 38.9% | 14.1% | 14.0% | 5.9% | 5.6% | 5.0% | 3.8% | 3.5% | 3.6% |
+
+**Read:**
+
+- The old cache `Concat` hotspot is absent. The remaining natural attention-side fusion
+  boundary is QKV post-processing: `Split + RoPE + MHA self` is **17–21%** of fp32/fp16
+  profile time. At one-token decode, a kernel can plausibly consume the fused QKV
+  projection, rotate Q/K, emit Q, and write rotated K plus V directly into the
+  capacity-strided cache. That attacks several launches and memory passes without batching
+  command buffers.
+- Float projection GEMMs remain the single largest bucket (36–48%). The isolated MPS GEMV
+  experiment already failed its end-to-end gate, so this profile is not evidence to turn
+  it on; a useful GEMM change needs a broader fusion boundary, not another API swap.
+- int8 has a different bottleneck. `Quantize + GEMM + DequantizeGemmOutput` is **60.3% at
+  batch 1 and 67.0% at batch 8**. The whole diagnostic process issued 169,550 command
+  buffers for int8 versus 118,986 for fp32/fp16, about **42% more**. Fusing the small-m
+  int8 GEMV's dequant/bias/activation epilogue is now the best concrete int8 kernel target;
+  the 3B-scale gate still decides whether it matters enough end-to-end.
+- Batch 8 increases the residual attention-side MPS `MatMul` share (0.3%→1.4–2.1%), but
+  fused SDPA prevents the old batch×heads encode explosion. The overall ranking otherwise
+  stays stable across batch sizes.
+
+An attempted unprofiled rerun was discarded: a concurrent Simulator workload slowed the
+first fp32 batch-1 cell to 30.96s versus the clean M18 range of 2.95–3.22s. That is machine
+contention, not a recorded regression. Repeat the steady-state matrix on an idle GPU before
+quoting new throughput; the op-ranking tables above completed and are the result of this
+profiling session.
+
 ## Op fusion: residual-Add + norm (`DISABLED_BenchmarkAddRMSNorm`)
 
 The first **positive** Metal perf lever (the SIMD-group-reduction rewrite was measured dead
@@ -527,8 +668,8 @@ Decode-bound regime (prompt 32, generate 32) — tok/s, higher is better:
   launches. Prefill itself (q_len > 8) stays on MPS GEMM, which wins compute-bound shapes.
 - The doc's old "fewer, bigger ops per step (e.g. a fused attention kernel)" prediction
   (Analysis, lever list) is hereby confirmed measured. Remaining decode budget after the
-  fusion: Gemm/Dense (the projections + lm_head), Concat (KV-cache append), RMSNorm,
-  Rotary, Add — the next fusion candidates if more decode speed is wanted.
+  attention and cache work: Gemm/Dense (the projections + lm_head), RMSNorm, Rotary, and
+  Add — the next fusion candidates if more decode speed is wanted.
 
 ## Whisper beam-search decode: two kernels close an 8× gap (2026-07-17)
 

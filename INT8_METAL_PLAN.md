@@ -5,7 +5,8 @@
 > file is retained as the **design record** (the "why" behind `tests/downstream/` and the
 > resolved environment facts below), not as pending work; the shipped reality and numbers
 > live in `METAL_BACKEND.md` (M11–M16) and `METAL_BENCHMARKS.md`. Original brief, 2026-06-11
-> on the M4 Max, preserved verbatim below.
+> on the M4 Max, preserved verbatim below. Its pre-ship state claims and operational
+> guardrails are historical; current repository/user instructions take precedence.
 >
 > Read `METAL_BACKEND.md` and the `apple-silicon` / `ct2-internals` skills before touching
 > code — this plan assumes their design rules.
@@ -158,8 +159,8 @@ DocC JSON endpoint for Metal/MPS API, the vendored MSL spec PDF for kernel-side 
 - **Converter gotcha:** the homebrew `ct2-transformers-converter` is STALE (no Qwen2; NLLB
   hits `M2M100Encoder has no embed_scale`). Use the **whisperX venv's** 4.8.0 converter
   (`transformers` 4.57.6) — it converts both cleanly.
-- `get_supported_compute_types("metal")` currently `{'float32','float16'}` — int8 appearing
-  there is the graduation smoke signal.
+- In the original pre-ship state, `get_supported_compute_types("metal")` was
+  `{'float32','float16'}` — int8 appearing there was the graduation smoke signal.
 - First MPS GEMM call pays a one-time ~493ms pipeline warmup, then is fast.
 
 ## Guardrails

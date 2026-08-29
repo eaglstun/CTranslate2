@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <vector>
@@ -140,6 +141,60 @@ TEST_F(MetalTest, Float16GemmMatchesFloat32) {
   EXPECT_EQ(c16.dtype(), DataType::FLOAT16);
 
   expect_storage_eq(c16.to_float32(), c32, 2e-2);
+}
+
+TEST_F(MetalTest, MpsGemvMatchesHostReference) {
+  const dim_t rows = 4;
+  const dim_t columns = 3;
+  const float alpha = 0.5f;
+  const float beta = 0.25f;
+  const std::vector<float> logical_matrix = {
+    1, 2, 3,
+    4, 5, 6,
+    7, 8, 9,
+    2, 4, 8,
+  };
+  const std::vector<float> x_values = {2, -1, 0.5f};
+  const std::vector<float> initial_y = {1, 2, 3, 4};
+  std::vector<float> expected(rows);
+  for (dim_t row = 0; row < rows; ++row) {
+    float dot = 0;
+    for (dim_t column = 0; column < columns; ++column)
+      dot += logical_matrix[row * columns + column] * x_values[column];
+    expected[row] = alpha * dot + beta * initial_y[row];
+  }
+
+  for (const bool transpose : {false, true}) {
+    std::vector<float> stored_matrix(logical_matrix.size());
+    if (transpose) {
+      for (dim_t row = 0; row < rows; ++row)
+        for (dim_t column = 0; column < columns; ++column)
+          stored_matrix[column * rows + row] = logical_matrix[row * columns + column];
+    } else {
+      stored_matrix = logical_matrix;
+    }
+
+    for (const DataType dtype : {DataType::FLOAT32, DataType::FLOAT16}) {
+      StorageView matrix = StorageView(transpose ? Shape{columns, rows} : Shape{rows, columns},
+                                       stored_matrix, Device::METAL).to(dtype);
+      StorageView x = StorageView({columns}, x_values, Device::METAL).to(dtype);
+      StorageView y = StorageView({rows}, initial_y, Device::METAL).to(dtype);
+      const dim_t ldm = transpose ? rows : columns;
+      if (dtype == DataType::FLOAT16)
+        metal::gemv(transpose, rows, columns, alpha,
+                    matrix.data<float16_t>(), ldm, x.data<float16_t>(), beta,
+                    y.data<float16_t>());
+      else
+        metal::gemv(transpose, rows, columns, alpha,
+                    matrix.data<float>(), ldm, x.data<float>(), beta, y.data<float>());
+
+      StorageView expected_view({rows}, expected);
+      if (dtype == DataType::FLOAT16)
+        expect_storage_eq(y.to_float32().to(Device::CPU), expected_view, 2e-2);
+      else
+        expect_storage_eq(y.to(Device::CPU), expected_view, 1e-5);
+    }
+  }
 }
 
 TEST_F(MetalTest, Float16SoftMaxMatchesFloat32) {
@@ -439,7 +494,7 @@ void run_sdpa_case(dim_t batch, dim_t heads, dim_t q_len, dim_t num_keys, dim_t 
     StorageView out({batch, heads, q_len, depth}, DataType::FLOAT32, Device::METAL);
     metal::sdpa(q_gpu.data<float>(), k_gpu.data<float>(), v_gpu.data<float>(),
                 len_gpu ? len_gpu->data<int32_t>() : nullptr, out.data<float>(),
-                num_rows, q_len, num_keys, depth, scale);
+                num_rows, q_len, num_keys, num_keys * depth, depth, scale);
     metal::synchronize();
     expect_storage_eq(out.to(Device::CPU), ref, 1e-5);
   }
@@ -455,7 +510,7 @@ void run_sdpa_case(dim_t batch, dim_t heads, dim_t q_len, dim_t num_keys, dim_t 
     StorageView out({batch, heads, q_len, depth}, DataType::FLOAT16, Device::METAL);
     metal::sdpa(q_gpu.data<float16_t>(), k_gpu.data<float16_t>(), v_gpu.data<float16_t>(),
                 len_gpu ? len_gpu->data<int32_t>() : nullptr, out.data<float16_t>(),
-                num_rows, q_len, num_keys, depth, scale);
+                num_rows, q_len, num_keys, num_keys * depth, depth, scale);
     metal::synchronize();
     expect_storage_eq(out.to_float32().to(Device::CPU), ref, 2e-2);
   }
@@ -481,6 +536,110 @@ TEST_F(MetalTest, SdpaFusedMaskedAndBeamParity) {
   const std::vector<int32_t> lengths = {57, 31, 1, 0, 44, 57,     // batch 0, 3 heads x 2 rows
                                         2, 57, 19, 3, 57, 5};     // batch 1
   run_sdpa_case(2, 3, 2, 57, 64, &lengths, 55);
+}
+
+TEST_F(MetalTest, KvCacheAppendAndGrow) {
+  const dim_t batch_heads = 2;
+  const dim_t depth = 3;
+  const dim_t capacity = 4;
+  const std::vector<float> k0 = {1, 2, 3, 4, 5, 6,
+                                 7, 8, 9, 10, 11, 12};
+  const std::vector<float> v0 = {101, 102, 103, 104, 105, 106,
+                                 107, 108, 109, 110, 111, 112};
+  StorageView new_k({batch_heads, 2, depth}, k0, Device::METAL);
+  StorageView new_v({batch_heads, 2, depth}, v0, Device::METAL);
+  StorageView cache_k({batch_heads, capacity, depth}, DataType::FLOAT32, Device::METAL);
+  StorageView cache_v({batch_heads, capacity, depth}, DataType::FLOAT32, Device::METAL);
+
+  metal::kv_cache_append(new_k.buffer(), new_v.buffer(), cache_k.buffer(), cache_v.buffer(),
+                         batch_heads, 0, 2, capacity, depth * sizeof(float));
+
+  const std::vector<float> k1 = {13, 14, 15, 16, 17, 18};
+  const std::vector<float> v1 = {113, 114, 115, 116, 117, 118};
+  StorageView append_k({batch_heads, 1, depth}, k1, Device::METAL);
+  StorageView append_v({batch_heads, 1, depth}, v1, Device::METAL);
+  metal::kv_cache_append(append_k.buffer(), append_v.buffer(), cache_k.buffer(), cache_v.buffer(),
+                         batch_heads, 2, 1, capacity, depth * sizeof(float));
+
+  const dim_t grown_capacity = 8;
+  const std::vector<float> k2 = {19, 20, 21, 22, 23, 24,
+                                 25, 26, 27, 28, 29, 30};
+  const std::vector<float> v2 = {119, 120, 121, 122, 123, 124,
+                                 125, 126, 127, 128, 129, 130};
+  StorageView grow_k({batch_heads, 2, depth}, k2, Device::METAL);
+  StorageView grow_v({batch_heads, 2, depth}, v2, Device::METAL);
+  StorageView grown_k({batch_heads, grown_capacity, depth}, DataType::FLOAT32, Device::METAL);
+  StorageView grown_v({batch_heads, grown_capacity, depth}, DataType::FLOAT32, Device::METAL);
+  metal::kv_cache_grow(cache_k.buffer(), cache_v.buffer(), grow_k.buffer(), grow_v.buffer(),
+                       grown_k.buffer(), grown_v.buffer(), batch_heads, 3, 2,
+                       capacity, grown_capacity, depth * sizeof(float));
+  metal::synchronize();
+
+  const auto actual_k = grown_k.to(Device::CPU).to_vector<float>();
+  const auto actual_v = grown_v.to(Device::CPU).to_vector<float>();
+  const std::vector<float> expected_k = {1, 2, 3, 4, 5, 6, 13, 14, 15, 19, 20, 21, 22, 23, 24,
+                                         7, 8, 9, 10, 11, 12, 16, 17, 18, 25, 26, 27, 28, 29, 30};
+  const std::vector<float> expected_v = {101, 102, 103, 104, 105, 106, 113, 114, 115,
+                                         119, 120, 121, 122, 123, 124,
+                                         107, 108, 109, 110, 111, 112, 116, 117, 118,
+                                         125, 126, 127, 128, 129, 130};
+  for (dim_t bh = 0; bh < batch_heads; ++bh) {
+    const dim_t actual_offset = bh * grown_capacity * depth;
+    const dim_t expected_offset = bh * 5 * depth;
+    EXPECT_TRUE(std::equal(expected_k.begin() + expected_offset,
+                           expected_k.begin() + expected_offset + 5 * depth,
+                           actual_k.begin() + actual_offset));
+    EXPECT_TRUE(std::equal(expected_v.begin() + expected_offset,
+                           expected_v.begin() + expected_offset + 5 * depth,
+                           actual_v.begin() + actual_offset));
+  }
+
+  // The attention layer uses this append_length=0 form when a caller switches from the
+  // fused decode path to an unsupported mode (e.g. requests attention weights).
+  StorageView compact_k({batch_heads, 5, depth}, DataType::FLOAT32, Device::METAL);
+  StorageView compact_v({batch_heads, 5, depth}, DataType::FLOAT32, Device::METAL);
+  metal::kv_cache_grow(grown_k.buffer(), grown_v.buffer(), nullptr, nullptr,
+                       compact_k.buffer(), compact_v.buffer(), batch_heads, 5, 0,
+                       grown_capacity, 5, depth * sizeof(float));
+  metal::synchronize();
+  EXPECT_EQ(compact_k.to(Device::CPU).to_vector<float>(), expected_k);
+  EXPECT_EQ(compact_v.to(Device::CPU).to_vector<float>(), expected_v);
+}
+
+TEST_F(MetalTest, SdpaFusedCapacityStrideParity) {
+  const dim_t batch = 2;
+  const dim_t heads = 2;
+  const dim_t num_keys = 5;
+  const dim_t capacity = 8;
+  const dim_t depth = 16;
+  std::mt19937 rng(77);
+  std::uniform_real_distribution<float> dist(-1.f, 1.f);
+  std::vector<float> q_host(batch * heads * depth);
+  std::vector<float> k_host(batch * heads * num_keys * depth);
+  std::vector<float> v_host(k_host.size());
+  for (auto& x : q_host) x = dist(rng);
+  for (auto& x : k_host) x = dist(rng);
+  for (auto& x : v_host) x = dist(rng);
+
+  const StorageView q_cpu({batch, heads, 1, depth}, q_host, Device::CPU);
+  const StorageView k_cpu({batch, heads, num_keys, depth}, k_host, Device::CPU);
+  const StorageView v_cpu({batch, heads, num_keys, depth}, v_host, Device::CPU);
+  const float scale = 1.f / std::sqrt(static_cast<float>(depth));
+  StorageView ref(DataType::FLOAT32, Device::CPU);
+  sdpa_reference_cpu(q_cpu, k_cpu, v_cpu, nullptr, scale, ref);
+
+  StorageView q = q_cpu.to(Device::METAL);
+  StorageView k = k_cpu.to(Device::METAL);
+  StorageView v = v_cpu.to(Device::METAL);
+  StorageView cache_k({batch, heads, capacity, depth}, DataType::FLOAT32, Device::METAL);
+  StorageView cache_v({batch, heads, capacity, depth}, DataType::FLOAT32, Device::METAL);
+  metal::kv_cache_append(k.buffer(), v.buffer(), cache_k.buffer(), cache_v.buffer(),
+                         batch * heads, 0, num_keys, capacity, depth * sizeof(float));
+  StorageView out({batch, heads, 1, depth}, DataType::FLOAT32, Device::METAL);
+  metal::sdpa(q.data<float>(), cache_k.data<float>(), cache_v.data<float>(), nullptr,
+              out.data<float>(), batch * heads, 1, num_keys, capacity * depth, depth, scale);
+  metal::synchronize();
+  expect_storage_eq(out.to(Device::CPU), ref, 1e-5);
 }
 
 // Metal multinomial draws its uniforms from the CT2 host generator, so the same seed
@@ -995,6 +1154,94 @@ TEST_F(MetalTest, DISABLED_BenchmarkGemmEncode) {
   }
 }
 
+// A/B the current degenerate 1xK MPSMatrixMultiplication against the dedicated
+// MPSMatrixVectorMultiplication path on real Qwen2.5-0.5B decode shapes. Run with
+// CT2_MPS_GEMV unset so the GEMM column remains the baseline implementation.
+TEST_F(MetalTest, DISABLED_BenchmarkMpsGemv) {
+  if (std::getenv("CT2_MPS_GEMV"))
+    GTEST_SKIP() << "Unset CT2_MPS_GEMV for the direct GEMM-vs-GEMV A/B";
+
+  std::cout << "\n=== MPS GEMM vs GEMV at m=1 (ms/iter) ===\n";
+  struct Shape { dim_t n; dim_t k; int iters; };
+  for (const Shape shape : {Shape{896, 896, 100},
+                            Shape{2688, 896, 100},
+                            Shape{4864, 896, 50},
+                            Shape{896, 4864, 50},
+                            Shape{151936, 896, 10}}) {
+    for (const DataType dtype : {DataType::FLOAT16, DataType::FLOAT32}) {
+      StorageView matrix({shape.n, shape.k}, dtype, Device::METAL);
+      StorageView x({shape.k}, dtype, Device::METAL);
+      StorageView y({shape.n}, dtype, Device::METAL);
+      if (dtype == DataType::FLOAT16) {
+        std::fill(matrix.data<float16_t>(), matrix.data<float16_t>() + matrix.size(),
+                  static_cast<float16_t>(0.02f));
+        std::fill(x.data<float16_t>(), x.data<float16_t>() + x.size(),
+                  static_cast<float16_t>(0.01f));
+      } else {
+        std::fill(matrix.data<float>(), matrix.data<float>() + matrix.size(), 0.02f);
+        std::fill(x.data<float>(), x.data<float>() + x.size(), 0.01f);
+      }
+
+      auto gemm = [&] {
+        if (dtype == DataType::FLOAT16)
+          metal::gemm(false, true, 1, shape.n, shape.k, 1.f,
+                      x.data<float16_t>(), shape.k,
+                      matrix.data<float16_t>(), shape.k,
+                      0.f, y.data<float16_t>(), shape.n);
+        else
+          metal::gemm(false, true, 1, shape.n, shape.k, 1.f,
+                      x.data<float>(), shape.k, matrix.data<float>(), shape.k,
+                      0.f, y.data<float>(), shape.n);
+      };
+      auto gemv = [&] {
+        if (dtype == DataType::FLOAT16)
+          metal::gemv(false, shape.n, shape.k, 1.f,
+                      matrix.data<float16_t>(), shape.k, x.data<float16_t>(),
+                      0.f, y.data<float16_t>());
+        else
+          metal::gemv(false, shape.n, shape.k, 1.f,
+                      matrix.data<float>(), shape.k, x.data<float>(),
+                      0.f, y.data<float>());
+      };
+
+      auto flush_per_iter = [&](auto&& fn) {
+        return time_ms(shape.iters, [&] {
+          fn();
+          synchronize_device(Device::METAL, 0);
+        });
+      };
+      auto batched_encode = [&](auto&& fn) {
+        fn();
+        synchronize_device(Device::METAL, 0);
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < shape.iters; ++i)
+          fn();
+        synchronize_device(Device::METAL, 0);
+        const auto t1 = std::chrono::steady_clock::now();
+        return std::chrono::duration<double, std::milli>(t1 - t0).count() / shape.iters;
+      };
+
+      auto best_of_four = [&](auto&& measure) {
+        double best = std::numeric_limits<double>::max();
+        for (int repeat = 0; repeat < 4; ++repeat)
+          best = std::min(best, measure());
+        return best;
+      };
+
+      const double gemm_flush = best_of_four([&] { return flush_per_iter(gemm); });
+      const double gemv_flush = best_of_four([&] { return flush_per_iter(gemv); });
+      const double gemm_batched = best_of_four([&] { return batched_encode(gemm); });
+      const double gemv_batched = best_of_four([&] { return batched_encode(gemv); });
+      std::cout << "  n=" << shape.n << " k=" << shape.k << " "
+                << (dtype == DataType::FLOAT16 ? "fp16" : "fp32")
+                << ": GEMM " << gemm_flush << " / " << gemm_batched
+                << ", GEMV " << gemv_flush << " / " << gemv_batched
+                << "  (flush / batched)\n";
+    }
+    std::cout << "\n";
+  }
+}
+
 // Row-reduction kernels (softmax / rms_norm / layer_norm). One threadgroup per row; the
 // reduction is the cost being optimized. Representative LLM shapes: attention-score softmax
 // (many rows, key-length depth) and norms (rows = batch*seq, depth = hidden). A/B harness
@@ -1142,20 +1389,20 @@ TEST_F(MetalTest, DISABLED_BenchmarkLLM) {
   // than fp32 at bs=1 by dumping the per-op time breakdown for each. The profiler flushes
   // per scope, so absolute times are inflated, but the fp32-vs-fp16 comparison is apples to
   // apples. Set CT2_LLM_PROFILE=1.
-  if (std::getenv("CT2_LLM_PROFILE")) {
+  if (const char* profile_mode = std::getenv("CT2_LLM_PROFILE")) {
     // Profile two regimes: prefill-bound (long prompt, 1 step → big GEMMs dominate) and
     // decode-bound (short prompt, many 1-token steps → tiny matrix-vector ops, op-count
     // bound). The op breakdown differs sharply; small-op fusions (e.g. add_rms_norm) matter
     // most in decode. The profiler flushes per scope, so absolute times are inflated.
     auto profile = [&](const std::string& label, Device dev, ComputeType ct,
-                       size_t prompt_len, size_t steps) {
+                       size_t batch_size, size_t prompt_len, size_t steps, int iterations) {
       GenerationOptions options;
       options.beam_size = 1;
       options.sampling_topk = 1;
       options.max_length = steps;
       options.min_length = steps;
       options.include_prompt_in_result = false;
-      const std::vector<std::vector<std::string>> batch(1, make_prompt(prompt_len));
+      const std::vector<std::vector<std::string>> batch(batch_size, make_prompt(prompt_len));
       auto model = models::Model::load(model_dir, dev, 0, ct);
       Generator generator(model);
       auto wait = [&] {
@@ -1165,13 +1412,64 @@ TEST_F(MetalTest, DISABLED_BenchmarkLLM) {
       };
       wait();  // warmup
       init_profiling(dev, 1);
-      for (int i = 0; i < 10; ++i)
+      for (int i = 0; i < iterations; ++i)
         wait();
       std::cerr << "\n##### PROFILE " << label << " #####\n";
       dump_profiling(std::cerr);
     };
-    profile("METAL fp16 PREFILL (prompt 512, 1 step)", Device::METAL, ComputeType::FLOAT16, 512, 1);
-    profile("METAL fp16 DECODE (prompt 8, 64 steps)", Device::METAL, ComputeType::FLOAT16, 8, 64);
+    if (std::strcmp(profile_mode, "post_m18") == 0) {
+      const char* compute_env = std::getenv("CT2_LLM_PROFILE_COMPUTE");
+      const std::string compute = compute_env ? compute_env : "fp16";
+      ComputeType compute_type;
+      if (compute == "fp32")
+        compute_type = ComputeType::FLOAT32;
+      else if (compute == "fp16")
+        compute_type = ComputeType::FLOAT16;
+      else if (compute == "int8")
+        compute_type = ComputeType::INT8;
+      else
+        throw std::invalid_argument("CT2_LLM_PROFILE_COMPUTE must be fp32, fp16, or int8");
+
+      const char* batch_env = std::getenv("CT2_LLM_PROFILE_BATCH");
+      const size_t batch_size = batch_env ? std::strtoul(batch_env, nullptr, 10) : 1;
+      if (batch_size == 0)
+        throw std::invalid_argument("CT2_LLM_PROFILE_BATCH must be positive");
+
+      profile("POST-M18 METAL " + compute + " DECODE (batch "
+                + std::to_string(batch_size) + ", prompt 32, 128 steps)",
+              Device::METAL, compute_type, batch_size, 32, 128, 1);
+    } else {
+      profile("METAL fp16 PREFILL (prompt 512, 1 step)",
+              Device::METAL, ComputeType::FLOAT16, 1, 512, 1, 10);
+      profile("METAL fp16 DECODE (prompt 8, 64 steps)",
+              Device::METAL, ComputeType::FLOAT16, 1, 8, 64, 10);
+    }
+    return;
+  }
+
+  // Post-M18 steady-state gate matching the profiling matrix above, without the
+  // profiler's per-scope stream synchronization. Run one compute/batch cell per process
+  // so CT2_METAL_STATS remains attributable to that cell.
+  if (std::getenv("CT2_LLM_POST_M18")) {
+    const char* compute_env = std::getenv("CT2_LLM_BENCH_COMPUTE");
+    const std::string compute = compute_env ? compute_env : "fp16";
+    ComputeType compute_type;
+    if (compute == "fp32")
+      compute_type = ComputeType::FLOAT32;
+    else if (compute == "fp16")
+      compute_type = ComputeType::FLOAT16;
+    else if (compute == "int8")
+      compute_type = ComputeType::INT8;
+    else
+      throw std::invalid_argument("CT2_LLM_BENCH_COMPUTE must be fp32, fp16, or int8");
+
+    const char* batch_env = std::getenv("CT2_LLM_BENCH_BATCH");
+    const size_t batch_size = batch_env ? std::strtoul(batch_env, nullptr, 10) : 1;
+    if (batch_size == 0)
+      throw std::invalid_argument("CT2_LLM_BENCH_BATCH must be positive");
+
+    std::cout << "\n--- post-M18 decode: prompt=32, decode=128 ---\n";
+    run("METAL " + compute, Device::METAL, compute_type, batch_size, 32, 128);
     return;
   }
 
@@ -1188,6 +1486,47 @@ TEST_F(MetalTest, DISABLED_BenchmarkLLM) {
       run("METAL fp16", Device::METAL, ComputeType::FLOAT16, bs, r.prompt, r.decode);
       std::cout << "\n";
     }
+  }
+}
+
+// Focused gate for CT2_MPS_GEMV: batch-1 autoregressive decode keeps every Dense
+// projection at m=1. A longer forced decode amplifies that path while one model load and
+// warmup stay outside the timed region. Run this test in separate processes with the env
+// switch unset/set; unlike BenchmarkLLM it deliberately excludes CPU and batch-8 controls.
+TEST_F(MetalTest, DISABLED_BenchmarkLLMMpsGemv) {
+  const char* model_env = std::getenv("CT2_LLM_MODEL");
+  if (!model_env)
+    GTEST_SKIP() << "Set CT2_LLM_MODEL to a converted decoder-only model directory";
+
+  const std::vector<std::string> content =
+      {"ing", "ion", "ent", "ate", "ation", "ort", "ame", "ist", "ers", "ass", "int", "urn"};
+  std::vector<std::string> prompt;
+  prompt.reserve(32);
+  for (size_t i = 0; i < 32; ++i)
+    prompt.push_back(content[i % content.size()]);
+
+  GenerationOptions options;
+  options.beam_size = 1;
+  options.sampling_topk = 1;
+  options.max_length = 128;
+  options.min_length = 128;
+  options.include_prompt_in_result = false;
+
+  std::cout << "\n=== Qwen batch-1 decode, prompt=32, decode=128 ===\n";
+  for (const ComputeType compute_type : {ComputeType::FLOAT32, ComputeType::FLOAT16}) {
+    auto model = models::Model::load(model_env, Device::METAL, 0, compute_type);
+    Generator generator(model);
+    const std::vector<std::vector<std::string>> batch = {prompt};
+    auto wait = [&] {
+      auto futures = generator.generate_batch_async(batch, options);
+      for (auto& future : futures)
+        future.get();
+    };
+
+    wait();
+    const double ms = time_ms(5, wait);
+    std::cout << "  METAL " << (compute_type == ComputeType::FLOAT16 ? "fp16" : "fp32")
+              << ": " << ms << " ms, " << (128.0 / (ms / 1000.0)) << " tok/s\n";
   }
 }
 
