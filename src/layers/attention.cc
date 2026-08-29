@@ -547,11 +547,10 @@ namespace ctranslate2 {
       } else {
 
 #ifdef CT2_WITH_METAL
-        // The prototype remains opt-in until matched end-to-end A/B runs show a
-        // repeatable win. It is intentionally independent from the capacity-cache
-        // switch so the fused and separate post-processing paths can share M18.
-        static const bool metal_qkv_fusion_enabled =
-          std::getenv("CT2_METAL_QKV_FUSION") != nullptr;
+        // Keep an independent A/B switch so the fused and separate post-processing
+        // paths can share the capacity cache.
+        static const bool metal_qkv_fusion_disabled =
+          std::getenv("CT2_NO_METAL_QKV_FUSION") != nullptr;
         static const bool metal_kv_cache_disabled =
           std::getenv("CT2_NO_METAL_KV_CACHE") != nullptr;
         static const bool metal_sdpa_disabled =
@@ -569,7 +568,7 @@ namespace ctranslate2 {
                   && cached_keys->dim(2) >= offset
                   && cached_keys->dim(3) == _d_head));
         const bool can_fuse_qkv_post =
-          metal_qkv_fusion_enabled
+          !metal_qkv_fusion_disabled
           && !metal_kv_cache_disabled
           && !metal_sdpa_disabled
           && queries.device() == Device::METAL

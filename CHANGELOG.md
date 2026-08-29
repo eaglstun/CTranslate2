@@ -8,6 +8,7 @@
 
 ### Fixes and improvements
 
+* **Fused QKV post-processing into the Metal capacity cache (M19)** — one-token self-attention now replaces Split, two Rotary launches, and the separate KV-cache append/grow with one fp32/fp16 Metal kernel. Matched Qwen2.5-0.5B decode A/B runs improved every tested fp32/fp16/int8 batch-1/8 cell; `CT2_NO_METAL_QKV_FUSION=1` restores the separate path for diagnosis.
 * **Whisper beam-search decode on Metal is now ~4× faster than CPU (M17)** — large-v3 FP16 went from 2× slower than CPU to 6.4× realtime (transcript byte-identical to CPU in FP16/FP32/INT8). The gap was two unaccelerated kernels, not the per-op encode floor: `Transpose` had no Metal routing and fell to the CPU reference, forcing a full GPU-queue drain per call (~128×/token in beam decode, since beam folds into the head-split time axis), and `gather` copied each ~1 MB KV-cache-reorder row with a single thread. Fixed with a native element-width `Transpose` kernel and a row-parallel `gather`.
 * **Bumped the `spdlog` submodule v1.10.0 → v1.17.0** (bundled `fmt` 8.x → 12.1). No source changes required — CT2's logging call sites use only literal format strings with trivial argument types, so `fmt` 12's compile-time format checking passes as-is. Verified with a full `-DWITH_METAL=ON` Apple Silicon build: `libctranslate2.dylib`, `ctranslate2_test`, and `benchmark_ops` all link clean.
 * Reduce the default CPU thread count on Apple Silicon Ruy builds without OpenMP to avoid excessive CPU usage on small translation workloads (#2063)

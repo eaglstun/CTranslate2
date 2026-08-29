@@ -389,14 +389,14 @@ self-time after their named children are subtracted. `MultiHeadAttention self` i
 unnamed layout/cache/orchestration remainder around its profiled Dense, norm, RoPE, Split,
 and attention children.
 
-| compute / batch | GEMM | Quantize | Dequant GEMM epilogue | RMSNorm | RoPE | Add | fused SDPA | Split | MHA self |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| fp32 / 1 | 39.3% | — | — | 9.6% | 8.8% | 8.5% | 7.7% | 6.0% | 5.4% |
-| fp16 / 1 | 35.9% | — | — | 10.2% | 9.4% | 9.1% | 8.1% | 6.1% | 5.6% |
-| int8 / 1 | 25.1% | 18.1% | 17.2% | 7.1% | 6.6% | 6.3% | 5.7% | 4.3% | 3.9% |
-| fp32 / 8 | 48.5% | — | — | 8.2% | 7.5% | 6.8% | 5.5% | 4.7% | 5.3% |
-| fp16 / 8 | 39.4% | — | — | 9.1% | 9.0% | 8.1% | 7.2% | 5.6% | 5.6% |
-| int8 / 8 | 38.9% | 14.1% | 14.0% | 5.9% | 5.6% | 5.0% | 3.8% | 3.5% | 3.6% |
+| compute / batch |  GEMM | Quantize | Dequant GEMM epilogue | RMSNorm | RoPE |  Add | fused SDPA | Split | MHA self |
+| --------------- | ----: | -------: | --------------------: | ------: | ---: | ---: | ---------: | ----: | -------: |
+| fp32 / 1        | 39.3% |        — |                     — |    9.6% | 8.8% | 8.5% |       7.7% |  6.0% |     5.4% |
+| fp16 / 1        | 35.9% |        — |                     — |   10.2% | 9.4% | 9.1% |       8.1% |  6.1% |     5.6% |
+| int8 / 1        | 25.1% |    18.1% |                 17.2% |    7.1% | 6.6% | 6.3% |       5.7% |  4.3% |     3.9% |
+| fp32 / 8        | 48.5% |        — |                     — |    8.2% | 7.5% | 6.8% |       5.5% |  4.7% |     5.3% |
+| fp16 / 8        | 39.4% |        — |                     — |    9.1% | 9.0% | 8.1% |       7.2% |  5.6% |     5.6% |
+| int8 / 8        | 38.9% |    14.1% |                 14.0% |    5.9% | 5.6% | 5.0% |       3.8% |  3.5% |     3.6% |
 
 **Read:**
 
@@ -423,6 +423,33 @@ first fp32 batch-1 cell to 30.96s versus the clean M18 range of 2.95–3.22s. Th
 contention, not a recorded regression. Repeat the steady-state matrix on an idle GPU before
 quoting new throughput; the op-ranking tables above completed and are the result of this
 profiling session.
+
+### M19: fused one-token QKV post-processing is a repeated end-to-end win
+
+The post-M18 profile's attention fusion was implemented as one kernel that consumes the
+flat QKV projection, rotates Q/K, emits Q, and writes K/V directly into the
+capacity-strided cache. It replaces Split, two Rotary launches, and the separate cache
+append/grow path. `CT2_NO_METAL_QKV_FUSION=1` restores the old sequence for A/B.
+
+Qwen2.5-0.5B, prompt 32 / decode 128, Release build on M4 Max. Each reported process
+warms once and averages three timed generations. Two matched off/on process pairs were
+run per cell in opposite order; fp16 batch 1 received five pairs because it contradicted
+the earlier single negative probe.
+
+| Compute / batch | Separate path (ms) |  Fused path (ms) | Matched improvement |
+| --------------- | -----------------: | ---------------: | ------------------: |
+| fp32 / 1        |   2520.80, 2445.95 | 2303.42, 2276.36 |        **6.9–8.6%** |
+| fp32 / 8        |   4057.52, 3860.60 | 3751.17, 3755.97 |        **2.7–7.6%** |
+| fp16 / 1        |    1867.10–1947.52 |  1424.58–1545.04 |      **20.7–25.9%** |
+| fp16 / 8        |   2318.99, 2314.72 | 2033.41, 1980.99 |      **12.3–14.4%** |
+| int8 / 1        |   1727.42, 1729.62 | 1368.88, 1352.59 |      **20.8–21.8%** |
+| int8 / 8        |   5333.09, 4211.86 | 3927.51, 4084.20 |       **3.0–26.4%** |
+
+The int8 batch-8 cell was noisy, but reversing process order preserved a positive lower
+bound. Direct append/grow fp32/fp16 parity passed, and the real-model decode gate produced
+24/24 tokens identical to CPU for both Metal precisions. The repeated matrix therefore
+clears the default-enable bar; no speculative dispatch tuning is warranted before the
+next model-level profile.
 
 ## Op fusion: residual-Add + norm (`DISABLED_BenchmarkAddRMSNorm`)
 
