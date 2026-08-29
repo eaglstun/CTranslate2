@@ -1,118 +1,96 @@
-# Metal Backend — Next Steps
+# Metal Backend — Ranked Next Work
 
-Session handoff, 2026-07-20. Three ranked improvement targets, each grounded in the
-compute-type benchmark sweep run this session (OPUS-MT 75M, NLLB-200 600M, Qwen2.5-0.5B —
-see `METAL_BENCHMARKS.md`). Benchmark rig lives in `../EasyNMT/ct2-bench/`
-(`bench.py`, `bench_nllb.py`, `bench_qwen.py`, `bench_qwen_prefill.py`), run through the
-Metal-capable ctranslate2 4.8.1 in the whisperX venv
-(`/Users/eeaglstun/Documents/dev/whisperX/.venv`, linked to `~/.local/ct2-metal`).
+Status as of 2026-08-28, after M18 (capacity-strided KV cache). This is the active,
+ordered backlog. Completed investigations stay in `METAL_BENCHMARKS.md`; shipped features
+stay in `METAL_BACKEND.md`; closed project plans are design records, not competing TODO
+lists.
 
 Two env-gated profilers are already in-tree: `CT2_AUTO_PROFILE=cpu|metal` and
-`CT2_METAL_STATS=1`.
+`CT2_METAL_STATS=1`. Important A/B switches are `CT2_NO_METAL_SDPA=1`,
+`CT2_NO_METAL_KV_CACHE=1`, `CT2_NO_METAL_SAMPLING=1`, `CT2_NO_MPP_GEMM=1`, and
+`CT2_MPS_GEMV=1` (experimental and off by default).
 
----
+## Ranked list
 
-## Goal 1 (highest leverage) — close the encoder-decoder FP16 gap
+1. **Prototype fused QKV post-processing into the capacity cache.** The post-M18 profile
+   is complete: `Split + RoPE + MultiHeadAttention self-time` is 17–21% of fp32/fp16
+   decode at batch 1/8, while the old cache `Concat` hotspot is gone. For the one-token,
+   fused-SDPA route, consume the fused QKV projection in one Metal kernel, rotate Q/K,
+   emit Q, and write rotated K plus V directly into their capacity-strided rows. Gate it
+   against separate Split + two Rotary calls + cache append, then require a repeated
+   end-to-end win. This is one natural dataflow fusion, not command-buffer batching.
 
-**The finding.** On translation models (OPUS-MT, NLLB, M2M), FP16 is a _pessimization_ — it
-loses to both `float32` and `int8`. On decoder-only Qwen, FP16 _wins_ every regime. Same
-backend, opposite verdict. The mechanism: enc-dec models route some hot ops to the CPU
-reference, forcing fp16→fp32→fp16 round-trips; the tax scales with activation volume (the
-penalty grows with batch). Qwen's hot path (fused SDPA, RMSNorm, RoPE) is all fp16-native, so
-it pays no tax. This is a coverage gap, not a law of physics.
+2. **Close the classic encoder-decoder fp16 coverage/performance gap.** Qwen and Whisper
+   run end-to-end in fp16, but the July OPUS-MT/NLLB sweep still found fp16 activation
+   conversion churn and recommended fp32 or int8. Re-profile NLLB and OPUS-MT and graduate
+   the highest-cost CPU-reference op actually observed. `Tile` is the leading architectural
+   candidate because beam search replicates encoder state, but it is a hypothesis, not a
+   conclusion. Other currently unrouted candidates include `Sub`, `Mean`, `Sum`, `MinMax`,
+   and `AlibiAdd`. Success means fp16 is no longer a pessimization on at least NLLB batch 8+
+   without regressing Qwen or Whisper.
 
-**Why it's #1.** It's the difference between "Metal wins translation ~1.5×" and "Metal wins
-translation like it wins LLMs (3×+)." FP16 is the knob users reach for by default, so a
-backend where that knob makes translation _slower_ is a footgun. Whisper (also enc-dec) already
-wins in FP16 after M17, so its hot ops are covered — the Marian/NLLB models must touch
-something Whisper skips.
+3. **Fuse the int8 small-m GEMV epilogue, then validate it at 3B scale.** The post-M18
+   profile explains the 0.5B anomaly: Quantize + GEMM + DequantizeGemmOutput consumes
+   60–67% and the int8 diagnostic process issues about 42% more command buffers than float.
+   Extend the small-m int8 GEMV to write fp16/fp32 output with scale, bias, and activation
+   directly, eliminating the int32 output pass and dequant epilogue launch. Keep the exact
+   int32-accumulation oracle. Then profile a 3B model (and 7B if memory permits) to establish
+   the real size/batch crossover; do not generalize from 0.5B alone.
 
-**Concrete first step (≈10 min, no code).** Profile the fp16 enc-dec path to name the guilty
-op(s):
+4. **Extend the capacity cache only where a real workload currently falls back.** The M18
+   route intentionally excludes sliding-window attention, relative bias/ALiBi, attention
+   output, FlashAttention, and merged-MQA layouts. Add one mode at a time only after a model
+   or profile proves it hot. Sliding-window support is the most promising: a ring or paged
+   layout can bound memory and avoid periodic compaction, but it also changes masking and
+   logical-to-physical indexing and therefore needs dedicated wraparound and beam-reorder
+   tests.
 
-```bash
-cd /Users/eeaglstun/Documents/dev/EasyNMT/ct2-bench
-CT2_AUTO_PROFILE=metal CT2_METAL_STATS=1 \
-  /Users/eeaglstun/Documents/dev/whisperX/.venv/bin/python bench_nllb.py \
-  --batch 32 --beam 5 --runs 1 --warmup 0
-```
+5. **Move shader compilation off the first inference.** Package an offline `.metallib`,
+   locate it relative to the loaded library, and retain source compilation as a compatibility
+   fallback. Measure cold model-load plus first-token latency; this is a startup win, not a
+   steady-state throughput claim.
 
-Look for ops running on the CPU reference and/or fp16↔fp32 conversions in the hot loop.
+6. **Scope native bf16 as a separate compatibility project.** First inventory MPS/custom
+   kernel dtype support and the minimum Apple GPU/macOS target, then prove load, GEMM,
+   normalization, attention, and output parity on a model whose native weights are bf16.
+   Do not advertise bf16 until a complete model path exists. AWQ int4 and multi-GPU remain
+   lower priority than this.
 
-**Prime suspects (hypotheses, confirm with the profiler — do NOT assume):**
+## Next experiment to run
 
-- `tile` — beam search replicates encoder states across beams; enc-dec + beam-specific, and it
-  has NO Metal routing (confirmed via `grep -L Device::METAL src/ops/*.cc`).
-- A general-axis `softmax` / `layer_norm` variant these models hit that Whisper doesn't.
-- Other unrouted ops in the list: `alibi_add`, `mean`, `sub`, `sum`, `min_max`.
+The immediate next action is item 1's focused primitive prototype and A/B. The broad
+post-M18 profile is recorded in `METAL_BENCHMARKS.md`; do not repeat it unless the decode
+graph changes. Use matched A/B processes because thermal, first-use variance, and other GPU
+clients are large enough to mis-rank small wins.
 
-**The fix pattern (established — same as Whisper M17).** For the guilty op: add a native Metal
-kernel in `kernels/kernels_msl.h`, check `x.device() == Device::METAL` at the `operator()`
-level and call the `metal::` entry point (return before generic dispatch), else fall through to
-CPU reference. Verify parity with the `metal-parity-verifier` agent (fp32 + fp16), then re-run
-`bench_nllb.py` to confirm fp16 crosses back above fp32.
+Minimum matrix:
 
-**Success criteria.** NLLB fp16 ≥ fp32 at bs≥8 (ideally approaching the int8 line); no parity
-regression on the op/decode suites.
+| Workload | Compute | Batch | Purpose |
+| --- | --- | ---: | --- |
+| Qwen2.5-0.5B, prompt 32 / decode 128 | fp32 | 1, 8 | residual launch and cache cost |
+| Qwen2.5-0.5B, prompt 32 / decode 128 | fp16 | 1, 8 | primary fast path |
+| Qwen2.5-0.5B, prompt 32 / decode 128 | int8 | 1, 8 | compare epilogue overhead |
 
----
+For every optimization: add direct fp32/fp16 parity where applicable, run the full Metal
+suite, run a real-model token parity gate, and require a repeatable end-to-end win before
+enabling it by default.
 
-## Goal 2 (runner-up) — the int8-loses-e2e anomaly
+## Do not reopen without new evidence
 
-**The finding.** The `int8-metal-project` notes record that int8 decode GEMV _beats_ fp16 at
-the kernel level. But end-to-end on Qwen this session, int8 was the _slowest_ Metal option
-(decode 1.06×/2.05×/1.67× vs fp16 1.23×/3.62×/2.56×). A kernel that wins in isolation but loses
-e2e = free performance hiding around it.
+- Whole-step command-buffer reuse: neutral at batch 1 and regressed GEMM-heavy workloads.
+- Combining the two old Concat copies: parity-correct but slower; M18 replaced the layout.
+- Defaulting to `MPSMatrixVectorMultiplication`: isolated GEMV wins did not survive the
+  Qwen gate, so `CT2_MPS_GEMV=1` remains experimental.
+- GPU Conv1D as a Whisper priority: the M17 profile put the whole encoder near 3% of the
+  transcribe run.
+- On-device beam selection or ICB replay for the old Whisper gap: M17 showed Gather and
+  Transpose, not those mechanisms, caused it.
 
-**Why it matters.** int8's ~42% RSS reduction (per the notes) is what lets _big_ models fit on
-a Mac. Right now you pay memory to lose speed — nobody takes that trade. If int8 delivered its
-kernel-level win e2e, you'd get both.
+## Current coverage snapshot
 
-**Concrete first step.** Profile Qwen decode under int8 and compare against fp16:
-
-```bash
-CT2_AUTO_PROFILE=metal CT2_METAL_STATS=1 \
-  /Users/eeaglstun/Documents/dev/whisperX/.venv/bin/python bench_qwen.py \
-  --batch 8 --gen-len 64 --runs 1 --warmup 0 --model-dir qwen05-fp32
-```
-
-Questions to answer: is the fast int8 GEMV actually being dispatched in the real decode loop,
-or is it falling back? How much time goes to `dequantize`/`quantize` around the GEMMs? Are the
-non-GEMM ops (norms, SDPA) running int8-adjacent in fp32 and forcing conversions?
-
-**Success criteria.** Either (a) int8 decode ≥ fp16 on Qwen, or (b) a documented, understood
-reason it can't be (so the README guidance is provably right, not just empirically observed).
-
----
-
-## Goal 3 (further out — needs a bigger test than this session ran)
-
-Everything benchmarked so far is ≤600M. Two things only surface at scale:
-
-**3a. int8 memory win at scale.** Convert a 3B–7B model (e.g. Qwen2.5-3B/7B) and re-run the
-decode + prefill sweeps. Does int8's memory-traffic advantage finally pay off e2e under real
-memory pressure? This is the natural continuation of Goal 2 and the real-world case for int8.
-
-**3b. Native BF16 compute path.** The README advertises BF16, modern LLMs are natively bf16, and
-M3+ GPUs support bf16 in hardware. We only benchmarked fp16 (which requires bf16→fp16
-conversion and has range issues — recall the Gemma2 fp16-`tanh` NaN saga, `metal-gemma2-broken`
-notes). A native bf16 path could be a _correctness_ win as much as a perf one: match
-model-native precision, avoid the fp16 range clamps. This is a real project, not an afternoon —
-scope it before committing.
-
-**Success criteria.** 3a: int8 wins (or ties) fp16 e2e on a 3B+ model. 3b: bf16 compute type
-runs end-to-end matching CPU, and removes at least one existing fp16 range workaround.
-
----
-
-## Quick reference — what's already routed to Metal
-
-Ops WITH a Metal path (as of this session): `add`, `bias_add`, `concat`, `conv1d`,
-`dequantize`, `gather`, `gelu`, `gemm`, `gumbel_max`, `layer_norm`, `matmul`, `mul`,
-`multinomial`, `quantize`, `relu`, `rms_norm`, `rotary`, `sigmoid`, `slide`, `softmax`,
-`split`, `swish`, `tanh`, `topk`, `topp_mask`, `transpose`.
-
-Ops with NO Metal routing (candidates for Goal 1): `tile`, `alibi_add`, `mean`, `sub`, `sum`,
-`min_max`, `cos`, `sin`, `log`, `median_filter`. (Regenerate with
-`for f in src/ops/*.cc; do grep -q "Device::METAL\|metal::" "$f" || echo "$(basename $f)"; done`
-— ignore the `*_cpu.cc` entries, those are CPU halves of routed ops.)
+Full fp16 model paths are proven for decoder-only Qwen and encoder-decoder Whisper. Native
+Metal routes cover GEMM/MatMul, last-axis norms, RoPE, Gather, rank-≤4 Transpose for 1/2/4
+byte elements, BiasAdd/activations, float Add/Mul, Concat/Split/Slide, int8 quantize/GEMM/
+dequantize, sampling, fused decode SDPA, and capacity-strided KV append. The CPU-reference
+fallback remains valid for fp32; an ungraduated fp16 op needs either a native half kernel or
+an explicit fp16→fp32→fp16 compatibility island.

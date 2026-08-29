@@ -1,4 +1,11 @@
-# Whisper / faster-whisper bring-up on the Metal backend — findings
+# Whisper / faster-whisper bring-up on the Metal backend — historical findings
+
+> **Archived report. Current status (2026-08-28): Whisper on Metal is production-usable
+> in this fork.** M17 resolved the performance gap: large-v3 fp16 transcribes a 30s clip
+> in 4.6s (6.4× realtime), 4.3× faster than the measured CPU fp32 baseline, with matching
+> output. The original failures and hypotheses below are retained as an investigation
+> record; they are not current limitations or recommendations. See
+> `METAL_WHISPER_NEXT_STEPS.md` and `METAL_BACKEND.md` M17 for the resolved account.
 
 First end-to-end attempt to run **OpenAI Whisper (via faster-whisper / CTranslate2)** on
 the `Device::METAL` backend. The translation transformer path is well covered by
@@ -6,8 +13,8 @@ the `Device::METAL` backend. The translation transformer path is well covered by
 importantly the **Conv1D audio encoder**. This is a field report of what happened, with
 exact repro and root cause tied to source lines, so the gaps can go on the roadmap.
 
-**TL;DR:** the bindings build and load cleanly, the Metal device is recognized, and
-`get_supported_compute_types("metal")` returns `{float16, float32}`. But no Whisper
+**Original TL;DR (superseded):** the bindings build and load cleanly, the Metal device is
+recognized, and `get_supported_compute_types("metal")` returns `{float16, float32}`. But no Whisper
 configuration is currently usable: **fp16 throws in Conv1D**, **fp32 large-v3 is SIGKILLed
 during the encoder forward pass**, and **fp32 small is correct but ~5× slower than CPU**
 and is SIGKILLed on long audio. All three map cleanly onto already-known roadmap gaps
@@ -222,18 +229,17 @@ print(f"load {load_s:.2f}s  transcribe {transcribe_s:.2f}s  "
 
 </details>
 
-## Suggested priorities (from a Whisper consumer's seat)
+## Resolution of the original priorities
 
-1. **Make `DEVICE_AND_FLOAT_DISPATCH` Metal-aware for fp16** (or route Conv1D fp16 to the
-   CPU-reference float path by upcasting). This single change unblocks the entire fp16
-   encoder and is the highest-leverage item — fp16 is the point of the backend on Apple GPUs.
-2. **Bound encoder memory** — confirm whether the SIGKILL is command-buffer accumulation
-   (insert periodic `metal::flush()` / buffer reclamation across the encoder op chain) or a
-   single oversized Conv1D staging allocation. Instruments Allocations trace would settle it.
-3. **A GPU Conv1D kernel** (the deferred item) — until then the audio encoder is CPU-bound
-   regardless of decoder speed, capping any Whisper win.
-4. **Doc note** that Metal (MKL-less) builds drop CPU int8.
+1. **fp16 Conv1D:** resolved with an explicit fp16→fp32→fp16 compatibility island.
+2. **Encoder/decode SIGKILL:** resolved by draining Objective-C autorelease pools around
+   command-buffer construction and commit.
+3. **GPU Conv1D:** no longer a priority; the M17 profile put the whole encoder near 3% of
+   runtime.
+4. **CPU int8 in the Accelerate-only build:** documented and remains a build-configuration
+   limitation, not a Metal defect.
 
-Until 1–3 land, faster-whisper should stay on the CPU/CUDA wheels; the Metal backend is a
-strong correctness result for the translation transformer but not yet a Whisper accelerator.
-Glad to retest instrumented builds on the M4 Max.
+The later performance investigation found the real Whisper bottlenecks in an unrouted
+Transpose and a serial Gather kernel. Their M17 fixes took large-v3 fp16 from slower than
+CPU to 4.3× faster. Any new Whisper work should begin with a fresh profile; the active
+cross-model priorities live in `METAL_NEXT_STEPS.md`.

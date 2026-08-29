@@ -376,6 +376,54 @@ Primitive coverage verifies in-place append, grow, compact-to-contiguous, and SD
 capacity stride. All 33 Metal tests pass; the full suite remains 299 passed / 3 skipped /
 1 pre-existing CPU quantized-grouped-Conv1D failure.
 
+### Post-M18 decode profile: cache copying is gone; two fusion targets remain
+
+Re-profiled 2026-08-28 after capacity-strided append, using Qwen2.5-0.5B, prompt 32,
+128 forced greedy tokens, and one warmup plus one profiled generation per cell. The
+Release build had `ENABLE_PROFILING=ON`. Each cell ran in a separate process through the
+`CT2_LLM_PROFILE=post_m18` mode in `MetalTest.DISABLED_BenchmarkLLM`.
+
+The integrated profiler synchronizes Metal at every nested scope, so these percentages
+rank work but do **not** predict an end-to-end speedup. In particular, parent scopes report
+self-time after their named children are subtracted. `MultiHeadAttention self` is the
+unnamed layout/cache/orchestration remainder around its profiled Dense, norm, RoPE, Split,
+and attention children.
+
+| compute / batch | GEMM | Quantize | Dequant GEMM epilogue | RMSNorm | RoPE | Add | fused SDPA | Split | MHA self |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| fp32 / 1 | 39.3% | — | — | 9.6% | 8.8% | 8.5% | 7.7% | 6.0% | 5.4% |
+| fp16 / 1 | 35.9% | — | — | 10.2% | 9.4% | 9.1% | 8.1% | 6.1% | 5.6% |
+| int8 / 1 | 25.1% | 18.1% | 17.2% | 7.1% | 6.6% | 6.3% | 5.7% | 4.3% | 3.9% |
+| fp32 / 8 | 48.5% | — | — | 8.2% | 7.5% | 6.8% | 5.5% | 4.7% | 5.3% |
+| fp16 / 8 | 39.4% | — | — | 9.1% | 9.0% | 8.1% | 7.2% | 5.6% | 5.6% |
+| int8 / 8 | 38.9% | 14.1% | 14.0% | 5.9% | 5.6% | 5.0% | 3.8% | 3.5% | 3.6% |
+
+**Read:**
+
+- The old cache `Concat` hotspot is absent. The remaining natural attention-side fusion
+  boundary is QKV post-processing: `Split + RoPE + MHA self` is **17–21%** of fp32/fp16
+  profile time. At one-token decode, a kernel can plausibly consume the fused QKV
+  projection, rotate Q/K, emit Q, and write rotated K plus V directly into the
+  capacity-strided cache. That attacks several launches and memory passes without batching
+  command buffers.
+- Float projection GEMMs remain the single largest bucket (36–48%). The isolated MPS GEMV
+  experiment already failed its end-to-end gate, so this profile is not evidence to turn
+  it on; a useful GEMM change needs a broader fusion boundary, not another API swap.
+- int8 has a different bottleneck. `Quantize + GEMM + DequantizeGemmOutput` is **60.3% at
+  batch 1 and 67.0% at batch 8**. The whole diagnostic process issued 169,550 command
+  buffers for int8 versus 118,986 for fp32/fp16, about **42% more**. Fusing the small-m
+  int8 GEMV's dequant/bias/activation epilogue is now the best concrete int8 kernel target;
+  the 3B-scale gate still decides whether it matters enough end-to-end.
+- Batch 8 increases the residual attention-side MPS `MatMul` share (0.3%→1.4–2.1%), but
+  fused SDPA prevents the old batch×heads encode explosion. The overall ranking otherwise
+  stays stable across batch sizes.
+
+An attempted unprofiled rerun was discarded: a concurrent Simulator workload slowed the
+first fp32 batch-1 cell to 30.96s versus the clean M18 range of 2.95–3.22s. That is machine
+contention, not a recorded regression. Repeat the steady-state matrix on an idle GPU before
+quoting new throughput; the op-ranking tables above completed and are the result of this
+profiling session.
+
 ## Op fusion: residual-Add + norm (`DISABLED_BenchmarkAddRMSNorm`)
 
 The first **positive** Metal perf lever (the SIMD-group-reduction rewrite was measured dead

@@ -481,38 +481,38 @@ pre-existing Accelerate-build failure in quantized grouped Conv1D.
 | GumbelMax / Multinomial sampling (float32 and float16)                     | **GPU** — host-seeded kernels (`set_random_seed`-reproducible); Multinomial at sample_size 1                                                |
 | Decode attention: q·K^T → softmax → ·V (float32 and float16)               | **GPU** — fused single-launch SDPA kernel at q_len ≤ 8 (greedy/beam decode, short prefill); larger q_len uses MPS GEMM + softmax kernel     |
 | Decoder KV-cache append (fused-SDPA shapes)                                | **GPU** — capacity-strided in-place K/V append; geometric grow at capacity boundaries (`CT2_NO_METAL_KV_CACHE=1` disables)                  |
-| Everything else (general-axis LayerNorm/BiasAdd, conv, int Mul, …)         | CPU reference over unified memory (correct, float32 only)                                                                                   |
-| fp16 for ungraduated ops                                                   | Not yet — CPU reference is float32-only, so a full fp16 model needs those ops graduated to half kernels first                               |
+| Everything else (general-axis LayerNorm/BiasAdd, conv, int Mul, …)         | CPU reference over unified memory; selected fp16 callers such as Conv1D use explicit float32 compatibility islands                          |
+| fp16 for ungraduated ops                                                   | Architecture-dependent — native half kernel or explicit fp16→fp32→fp16 island required; Qwen and Whisper full-model paths are proven        |
 | bf16 compute                                                               | Not yet                                                                                                                                     |
 
 ## What's left
 
-### Near term — graduate more ops to GPU kernels
+`METAL_NEXT_STEPS.md` is the single ranked backlog. The post-M18 decode profile is now
+complete: the leading float-path fusion candidate is QKV post-processing (Split + RoPE +
+capacity-cache append), while int8 is dominated by its Quantize/GEMM/Dequantize pipeline.
+The other high-value lane is classic encoder-decoder fp16: Qwen and Whisper are already
+proven end-to-end in fp16, but July OPUS-MT/NLLB measurements still show conversion churn
+from architecture-specific CPU-reference ops.
 
-Each follows the established pattern: write an MSL kernel, add a `metal::` entry point,
-add `if (device == Device::METAL)` routing in the op, verify parity against the CPU
-reference via the existing suite.
+### Coverage work
 
-- Remaining elementwise variants (sub/min/max/scalar-add) used in decoding
-- Next decode-fusion candidates: the projection GEMM epilogues, RMSNorm, and Rotary
+Each newly graduated op follows the established pattern: write an MSL kernel, add a
+`metal::` entry point, route at the op boundary, and verify against the CPU reference.
+Current candidates include `Tile` for encoder-decoder beam search and the remaining
+elementwise/reduction variants (`Sub`, `Mean`, `Sum`, `MinMax`, scalar add), but profiling
+must select the order. Full-model fp16 is no longer globally blocked: it is green for Qwen
+and Whisper. The remaining issue is model-architecture coverage—an ungraduated op is
+float32-only unless it has an explicit fp16 compatibility island.
 
-### fp16 — foundation done, full-model fp16 remaining
+Still worth evaluating after a profile:
 
-Where Apple Silicon actually gets fast. The foundation shipped in M5: `mayiuse_float16`
-is true for Metal, and GEMM + softmax run in fp16. **A full fp16 model is still blocked**
-because the CPU-reference binding is float32-only — every op a model touches needs a half
-kernel. So full fp16 ≈ the "graduate more ops" list above, done with `half` kernels.
-Remaining fp16 work:
-
-- fp16 `half` kernels for the rest of the decoder path (norms, gather, rotary, bias/act).
-- Optionally a `Device::METAL`-aware `DEVICE_AND_FLOAT_DISPATCH` in `src/dispatch.h` (it
-  hardcodes `Device::CUDA` for fp16/bf16) if any fp16 op is routed through the generic
-  dispatch rather than at `operator()` level.
 - `get_preferred_size_multiple` `Device::METAL` branch in `src/types.cc` (padding hint;
   currently returns 1).
-- Consider enabling fp16 in the `AUTO` compute-type path once the full path supports it.
+- Enable fp16 in the `AUTO` compute-type path only when the supported architecture set and
+  fallback behavior are clear enough that auto-selection cannot turn a working model into
+  a runtime dtype error.
 
-### Performance work (after correctness)
+### Performance work
 
 - ~~Batch op encoding into fewer command buffers / reduce per-op synchronize.~~ — tried and
   reverted: per-thread command-buffer reuse (one commit per step) measured neutral-to-negative
@@ -526,6 +526,9 @@ Remaining fp16 work:
   `MPSMatrixVectorMultiplication`. Decode-shaped microbenchmarks are positive, but the
   Qwen2.5-0.5B batch-1 gate measured fp32 at parity and fp16 1.8% slower, so this stays
   opt-in rather than becoming the default. See `METAL_BENCHMARKS.md`.
+- ~~Re-profile after M18.~~ — done 2026-08-28. Split + RoPE + MultiHeadAttention
+  self-time is 17–21% of fp32/fp16 decode; the int8 Dense pipeline is 60–67%. See
+  `METAL_BENCHMARKS.md`. Prefer operation fusion that removes launches and memory passes.
 
 ### Deferred / out of scope for now
 
@@ -534,7 +537,7 @@ Remaining fp16 work:
   profile put the whole Whisper encoder at ~3% of a transcribe run, so a GPU Conv1D is
   low-value there)
 - AWQ int4 GEMM
-- bf16 (only on newer Apple GPUs)
+- Native bf16 implementation (scope hardware/OS support first; ranked backlog item 6)
 - NCCL / tensor parallelism (multi-GPU)
 
 ## Gotchas for contributors

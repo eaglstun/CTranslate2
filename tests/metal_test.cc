@@ -1389,20 +1389,20 @@ TEST_F(MetalTest, DISABLED_BenchmarkLLM) {
   // than fp32 at bs=1 by dumping the per-op time breakdown for each. The profiler flushes
   // per scope, so absolute times are inflated, but the fp32-vs-fp16 comparison is apples to
   // apples. Set CT2_LLM_PROFILE=1.
-  if (std::getenv("CT2_LLM_PROFILE")) {
+  if (const char* profile_mode = std::getenv("CT2_LLM_PROFILE")) {
     // Profile two regimes: prefill-bound (long prompt, 1 step → big GEMMs dominate) and
     // decode-bound (short prompt, many 1-token steps → tiny matrix-vector ops, op-count
     // bound). The op breakdown differs sharply; small-op fusions (e.g. add_rms_norm) matter
     // most in decode. The profiler flushes per scope, so absolute times are inflated.
     auto profile = [&](const std::string& label, Device dev, ComputeType ct,
-                       size_t prompt_len, size_t steps) {
+                       size_t batch_size, size_t prompt_len, size_t steps, int iterations) {
       GenerationOptions options;
       options.beam_size = 1;
       options.sampling_topk = 1;
       options.max_length = steps;
       options.min_length = steps;
       options.include_prompt_in_result = false;
-      const std::vector<std::vector<std::string>> batch(1, make_prompt(prompt_len));
+      const std::vector<std::vector<std::string>> batch(batch_size, make_prompt(prompt_len));
       auto model = models::Model::load(model_dir, dev, 0, ct);
       Generator generator(model);
       auto wait = [&] {
@@ -1412,13 +1412,64 @@ TEST_F(MetalTest, DISABLED_BenchmarkLLM) {
       };
       wait();  // warmup
       init_profiling(dev, 1);
-      for (int i = 0; i < 10; ++i)
+      for (int i = 0; i < iterations; ++i)
         wait();
       std::cerr << "\n##### PROFILE " << label << " #####\n";
       dump_profiling(std::cerr);
     };
-    profile("METAL fp16 PREFILL (prompt 512, 1 step)", Device::METAL, ComputeType::FLOAT16, 512, 1);
-    profile("METAL fp16 DECODE (prompt 8, 64 steps)", Device::METAL, ComputeType::FLOAT16, 8, 64);
+    if (std::strcmp(profile_mode, "post_m18") == 0) {
+      const char* compute_env = std::getenv("CT2_LLM_PROFILE_COMPUTE");
+      const std::string compute = compute_env ? compute_env : "fp16";
+      ComputeType compute_type;
+      if (compute == "fp32")
+        compute_type = ComputeType::FLOAT32;
+      else if (compute == "fp16")
+        compute_type = ComputeType::FLOAT16;
+      else if (compute == "int8")
+        compute_type = ComputeType::INT8;
+      else
+        throw std::invalid_argument("CT2_LLM_PROFILE_COMPUTE must be fp32, fp16, or int8");
+
+      const char* batch_env = std::getenv("CT2_LLM_PROFILE_BATCH");
+      const size_t batch_size = batch_env ? std::strtoul(batch_env, nullptr, 10) : 1;
+      if (batch_size == 0)
+        throw std::invalid_argument("CT2_LLM_PROFILE_BATCH must be positive");
+
+      profile("POST-M18 METAL " + compute + " DECODE (batch "
+                + std::to_string(batch_size) + ", prompt 32, 128 steps)",
+              Device::METAL, compute_type, batch_size, 32, 128, 1);
+    } else {
+      profile("METAL fp16 PREFILL (prompt 512, 1 step)",
+              Device::METAL, ComputeType::FLOAT16, 1, 512, 1, 10);
+      profile("METAL fp16 DECODE (prompt 8, 64 steps)",
+              Device::METAL, ComputeType::FLOAT16, 1, 8, 64, 10);
+    }
+    return;
+  }
+
+  // Post-M18 steady-state gate matching the profiling matrix above, without the
+  // profiler's per-scope stream synchronization. Run one compute/batch cell per process
+  // so CT2_METAL_STATS remains attributable to that cell.
+  if (std::getenv("CT2_LLM_POST_M18")) {
+    const char* compute_env = std::getenv("CT2_LLM_BENCH_COMPUTE");
+    const std::string compute = compute_env ? compute_env : "fp16";
+    ComputeType compute_type;
+    if (compute == "fp32")
+      compute_type = ComputeType::FLOAT32;
+    else if (compute == "fp16")
+      compute_type = ComputeType::FLOAT16;
+    else if (compute == "int8")
+      compute_type = ComputeType::INT8;
+    else
+      throw std::invalid_argument("CT2_LLM_BENCH_COMPUTE must be fp32, fp16, or int8");
+
+    const char* batch_env = std::getenv("CT2_LLM_BENCH_BATCH");
+    const size_t batch_size = batch_env ? std::strtoul(batch_env, nullptr, 10) : 1;
+    if (batch_size == 0)
+      throw std::invalid_argument("CT2_LLM_BENCH_BATCH must be positive");
+
+    std::cout << "\n--- post-M18 decode: prompt=32, decode=128 ---\n";
+    run("METAL " + compute, Device::METAL, compute_type, batch_size, 32, 128);
     return;
   }
 

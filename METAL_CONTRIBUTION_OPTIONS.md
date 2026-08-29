@@ -5,6 +5,9 @@ rebased on upstream, PR'd into the fork's own `main` (the architecturally correc
 for a separate GPU backend). What remains are two open, optional follow-ups — neither
 blocks anything.
 
+Status refreshed 2026-08-28 after M18. These remain optional non-engine follow-ups; the
+ranked engineering backlog lives in `METAL_NEXT_STEPS.md`.
+
 ## 1. Deep-dive writeup (portfolio value)
 
 The perf-investigation arc is good content: profiling a real LLM and finding the `Add`
@@ -12,8 +15,9 @@ op had silently never been on the GPU (27× fp16 blowup); trying command-buffer 
 the "obvious" lever — and **measuring it neutral-to-negative** because batching kills
 CPU/GPU overlap; then the M16 fused-attention and M17 Whisper wins where the real
 culprits (per-batch-index MPS encodes; a CPU-reference `Transpose` draining the queue
-~128×/token; a single-threaded gather) were nothing the priors predicted. The
-through-line — _measure, don't guess_ — is a better story than a clean win.
+~128×/token; a single-threaded gather) were nothing the priors predicted; then M18
+showed why changing the KV-cache layout beat both attempted Concat micro-optimizations.
+The through-line — _measure, don't guess_ — is a better story than a clean win.
 
 Home is already scaffolded: `ai.ericeaglstun.com` has a `deep-dives/` Apple-Silicon
 porting series (`~/Documents/web/ericeaglstun-ai/content/deep-dives/`:
