@@ -5,8 +5,9 @@ beam-5 decode: Metal fp16 **4.6s (6.4× realtime)** vs CPU fp32 **20.2s (1.49×)
 Metal is now **4.3× faster than CPU**, with a byte-identical transcript (segments,
 timestamps, text) in fp16, fp32, and int8. The 730s file runs at 3.54× RT, 5.1 GB
 peak RSS. The original plan below was ranked by priors; Step 0's profile invalidated
-almost all of it. Measurements recorded in `METAL_BENCHMARKS.md`; milestone write-up
-in `METAL_BACKEND.md` (M17).
+almost all of it. Measurements are recorded in
+[`METAL_BENCHMARKS.md`](../../../METAL_BENCHMARKS.md); the milestone write-up is in
+[`METAL_BACKEND.md`](../../../METAL_BACKEND.md) (M17).
 
 ## What Step 0 actually found
 

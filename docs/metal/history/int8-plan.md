@@ -4,11 +4,13 @@
 > the Metal-4 MPP `matmul2d` prefill path, and the downstream validation harness. This
 > file is retained as the **design record** (the "why" behind `tests/downstream/` and the
 > resolved environment facts below), not as pending work; the shipped reality and numbers
-> live in `METAL_BACKEND.md` (M11–M16) and `METAL_BENCHMARKS.md`. Original brief, 2026-06-11
+> live in [`METAL_BACKEND.md`](../../../METAL_BACKEND.md) (M11–M16) and
+> [`METAL_BENCHMARKS.md`](../../../METAL_BENCHMARKS.md). Original brief, 2026-06-11
 > on the M4 Max, preserved verbatim below. Its pre-ship state claims and operational
 > guardrails are historical; current repository/user instructions take precedence.
 >
-> Read `METAL_BACKEND.md` and the `apple-silicon` / `ct2-internals` skills before touching
+> Read [`METAL_BACKEND.md`](../../../METAL_BACKEND.md) and the `apple-silicon` /
+> `ct2-internals` skills before touching
 > code — this plan assumes their design rules.
 
 ## Mission

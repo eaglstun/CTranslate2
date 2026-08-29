@@ -6,7 +6,7 @@ for a separate GPU backend). What remains are two open, optional follow-ups — 
 blocks anything.
 
 Status refreshed 2026-08-28 after M18. These remain optional non-engine follow-ups; the
-ranked engineering backlog lives in `METAL_NEXT_STEPS.md`.
+ranked engineering backlog lives in [`METAL_NEXT_STEPS.md`](../../METAL_NEXT_STEPS.md).
 
 ## 1. Deep-dive writeup (portfolio value)
 
@@ -31,8 +31,10 @@ entry and links straight into the existing glossary terms (`metal`, `mps`, `cuda
 If upstreaming is ever worth pursuing, open a GitHub **Discussion first — not a PR**:
 "Working Metal backend, fp32/fp16/int8 end-to-end, parity with CPU on the op suite,
 here's the design — is there appetite, and in what shape?" Costs an afternoon and tells
-you whether a salami-sliced upstream attempt is even open. Per CONTRIBUTING.md the work
+you whether a salami-sliced upstream attempt is even open. Per
+[`CONTRIBUTING.md`](../../CONTRIBUTING.md) the work
 must be disclosed as AI-assisted and every load-bearing choice defensible cold — the
 unified-memory pointer contract, why METAL binds to the CPU dispatch case (avoiding ~50
 dispatch-site instantiations), and the `allocator.cc` / `devices.cc` early-returns for
-`Device::METAL`. All three are documented in `METAL_BACKEND.md`.
+`Device::METAL`. All three are documented in
+[`METAL_BACKEND.md`](../../METAL_BACKEND.md).

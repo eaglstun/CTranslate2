@@ -3,6 +3,10 @@
 Status as of 2026-08-28. This document tracks the in-progress Apple Metal GPU backend
 (`Device::METAL`, built with `-DWITH_METAL=ON`) for CTranslate2.
 
+Documentation map: [benchmarks](METAL_BENCHMARKS.md),
+[active backlog](METAL_NEXT_STEPS.md), and
+[additional/historical records](docs/metal/README.md).
+
 ## TL;DR
 
 A new GPU backend for Apple Silicon. **A full encoder-decoder transformer runs
@@ -138,12 +142,12 @@ new→commit pair must wrap itself in `@autoreleasepool`.**
 | `src/metal/device.mm`                | Device/queue/library singleton, pipeline cache, lifecycle                                   |
 | `src/metal/allocator.mm`             | Shared-buffer allocator + address-ordered side table                                        |
 | `src/metal/primitives.h`             | Pure-C++ declarations of `metal::` compute entry points                                     |
-| `src/metal/primitives.mm`            | `metal::add`, `metal::softmax` (kernel dispatch)                                            |
+| `src/metal/primitives.mm`            | Host-side dispatch for custom Metal compute kernels                                         |
 | `src/metal/gemm.mm`                  | `metal::gemm` / `gemm_batch_strided` via MPSMatrixMultiplication                            |
-| `src/metal/kernels/kernels_msl.h`    | MSL kernel source (add, softmax) as a raw string                                            |
+| `src/metal/kernels/kernels_msl.h`    | Runtime-compiled MSL source for custom kernels                                               |
 | `src/device_dispatch.h`              | `METAL_DEVICE_CASE` (CPU-reference binding)                                                 |
 | `src/allocator.cc`, `src/devices.cc` | METAL early-returns for allocator/device-index/synchronize                                  |
-| `tests/metal_test.cc`                | Metal-specific tests incl. end-to-end translation                                           |
+| `tests/metal_test.cc`                | Metal kernel parity, end-to-end, real-model, and benchmark tests                            |
 
 CMake wiring lives in the `if(WITH_METAL)` block in `CMakeLists.txt` (Objective-C++ via
 `enable_language(OBJCXX)`, links `Metal`/`MetalPerformanceShaders`/`Foundation`).
@@ -203,7 +207,7 @@ allocation/MPS.
 > `std::tanh` saturates to ±1. Fixed by clamping the `tanh` argument (`ct2_tanh_safe` in
 > `kernels_msl.h`). Full debugging writeup — including the CPU-reference bisection method and
 > the "mid-pipeline CPU reads of MPS output are unreliable" caveat — in
-> [`METAL_GEMMA2_NAN_POSTMORTEM.md`](METAL_GEMMA2_NAN_POSTMORTEM.md).
+> [Gemma2 NaN postmortem](docs/metal/history/gemma2-nan-postmortem.md).
 
 ### ✅ M10 — fp16 inference end-to-end
 
@@ -215,7 +219,8 @@ comparison-based and runs on the CPU reference; it is not a hot op).
 
 ### ✅ M11 — int8 Phase 1: quantization plumbing + GEMM shim (2026-06-11)
 
-The int8 path runs end-to-end on Metal (per `INT8_METAL_PLAN.md` Phase 1).
+The int8 path runs end-to-end on Metal (see the historical
+[INT8 implementation plan](docs/metal/history/int8-plan.md), Phase 1).
 `mayiuse_int8(METAL)` is true and `get_supported_compute_types("metal")` reports
 `int8` / `int8_float32` / `int8_float16`. New native kernels: `ct2_quantize_s8_*`
 (per-row amax tree reduce; `precise::divide` for the scale, `rint` for round-to-even —
@@ -288,7 +293,8 @@ results): builds the lib from this worktree → `cmake --install` to a pinned pr
 rebuilds the wheel (`CTRANSLATE2_ROOT`) → force-reinstalls into each consumer venv →
 runs each consumer's canonical job → diffs against an **fp16-on-Metal golden** from the
 same build, with quant-error tolerances. This is the loose end-to-end oracle from
-`INT8_METAL_PLAN.md`; the C++ op suite remains the bit-tight one.
+[INT8 implementation plan](docs/metal/history/int8-plan.md); the C++ op suite remains
+the bit-tight one.
 
 Measured 2026-06-11 (M4 Max, single full run; details in
 `tests/downstream/results/RESULTS.md`) — **4/4 pass**:
@@ -431,7 +437,8 @@ Result: **39.2s → 4.6s** (6.4× realtime, 4.3× faster than CPU fp32); fp32 5.
 text) in all configs. Qwen rechecked same-binary: no regression (bs=8 slightly better,
 prefill transposes now native). Suite 104/106 (2 pre-existing Conv1D skips). Full
 tables and the deprioritized-lever list in `METAL_BENCHMARKS.md`;
-`METAL_WHISPER_NEXT_STEPS.md` records the investigation.
+the [Whisper performance investigation](docs/metal/history/whisper-investigation.md)
+records the investigation.
 
 ### ✅ M18 — capacity-strided KV cache: true append-in-place (2026-08-28)
 

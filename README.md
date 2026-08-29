@@ -149,5 +149,6 @@ Check out our [Contributing Guide](CONTRIBUTING.md) to learn how to set up your 
 ## Additional resources
 
 - [Documentation](https://opennmt.net/CTranslate2)
+- [Metal fork documentation](docs/metal/README.md)
 - [Forum](https://forum.opennmt.net)
 - [Gitter](https://gitter.im/OpenNMT/CTranslate2)

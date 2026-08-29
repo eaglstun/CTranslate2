@@ -1,7 +1,8 @@
 # Downstream validation harness
 
 End-to-end check that the Metal int8 path produces sane output in the four real
-consumers, per `INT8_METAL_PLAN.md`. The C++ op suite is the bit-tight oracle
+consumers, per the [historical INT8 implementation plan](../../docs/metal/history/int8-plan.md).
+The C++ op suite is the bit-tight oracle
 (Metal int8 vs CPU int8); this harness is the loose oracle — Metal int8 vs an
 **fp16-on-Metal golden** with a quant-error tolerance. It catches garbage, not
 ULP drift.

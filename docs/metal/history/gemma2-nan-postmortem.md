@@ -6,6 +6,9 @@ activation kernel fed it the huge arguments that Gemma2's deep-layer activations
 **Fix:** clamp the `tanh` argument to `[-15, 15]` in `src/metal/kernels/kernels_msl.h`
 (~10 lines).
 
+This is a historical debugging record. Current backend status is documented in
+[`METAL_BACKEND.md`](../../../METAL_BACKEND.md).
+
 ---
 
 ## Symptom

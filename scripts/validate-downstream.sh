@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Downstream validation harness for the Metal backend (see INT8_METAL_PLAN.md).
+# Downstream validation harness for the Metal backend
+# (see docs/metal/history/int8-plan.md).
 #
 # Pipeline: build the C++ lib from THIS worktree -> cmake --install to a pinned
 # per-run prefix -> rebuild the Python wheel against it -> force-reinstall into

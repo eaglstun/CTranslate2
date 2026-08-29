@@ -5,7 +5,8 @@
 > in 4.6s (6.4× realtime), 4.3× faster than the measured CPU fp32 baseline, with matching
 > output. The original failures and hypotheses below are retained as an investigation
 > record; they are not current limitations or recommendations. See
-> `METAL_WHISPER_NEXT_STEPS.md` and `METAL_BACKEND.md` M17 for the resolved account.
+> See the [resolved investigation](whisper-investigation.md) and
+> [`METAL_BACKEND.md`](../../../METAL_BACKEND.md) M17 for the resolved account.
 
 First end-to-end attempt to run **OpenAI Whisper (via faster-whisper / CTranslate2)** on
 the `Device::METAL` backend. The translation transformer path is well covered by
@@ -54,7 +55,8 @@ and is SIGKILLed on long audio. All three map cleanly onto already-known roadmap
 > Metal is now correct and memory-safe but **slower than CPU** for Whisper. large-v3 metal
 > fp16 = 0.41× RT (4.1 GB), metal fp32 = 0.27× RT (8.0 GB), **cpu fp32 = 1.41× RT** (8.3 GB) —
 > CPU is ~3.4× faster. Whisper is **decode-bound** (autoregressive, many tiny sequential ops),
-> which is exactly where Metal loses to the per-op GPU-API floor (`METAL_BENCHMARKS.md`); the
+> which is exactly where Metal loses to the per-op GPU-API floor
+> ([`METAL_BENCHMARKS.md`](../../../METAL_BENCHMARKS.md)); the
 > bigger large-v3 GEMMs don't amortize because the decode loop, not the GEMMs, dominates. So
 > the "fp16 large-v3 is where Apple Silicon wins" guess did NOT pan out — the win here is
 > functional (it runs, correct, half the memory in fp16), not throughput. Notably, **large-v3
@@ -163,7 +165,8 @@ growth over the decode loop rather than a fixed working set.
 `get_supported_compute_types("cpu")` on this build is `{'float32'}` only — no `int8`. This
 is the `-DWITH_MKL=OFF` build (no INT8 GEMM backend), not a Metal bug, but worth flagging:
 faster-whisper's default CPU mode is `int8`, so a Metal-enabled wheel built this way silently
-loses the fast quantized CPU fallback. A note in `METAL_BACKEND.md`'s Build section ("Metal
+loses the fast quantized CPU fallback. A note in
+[`METAL_BACKEND.md`](../../../METAL_BACKEND.md)'s Build section ("Metal
 builds are MKL-less → CPU int8 is unavailable; use float32 or build with an int8-capable CPU
 GEMM") would save the next person the surprise.
 
@@ -242,4 +245,4 @@ print(f"load {load_s:.2f}s  transcribe {transcribe_s:.2f}s  "
 The later performance investigation found the real Whisper bottlenecks in an unrouted
 Transpose and a serial Gather kernel. Their M17 fixes took large-v3 fp16 from slower than
 CPU to 4.3× faster. Any new Whisper work should begin with a fresh profile; the active
-cross-model priorities live in `METAL_NEXT_STEPS.md`.
+cross-model priorities live in [`METAL_NEXT_STEPS.md`](../../../METAL_NEXT_STEPS.md).
