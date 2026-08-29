@@ -384,6 +384,131 @@ kernel void ct2_kv_cache_grow_bytes(device const uchar* old_k [[buffer(0)]],
   }
 }
 
+// ---- Fused one-token QKV post-processing ----  consume the flat fused projection,
+// apply RoPE to Q/K, emit head-split Q, replicate GQA K/V heads, and append directly to
+// the capacity cache. The grow variant also copies the live cache prefix.
+template <typename T>
+inline float ct2_qkv_rotate(device const T* x,
+                            device const T* sin,
+                            device const T* cos,
+                            uint e,
+                            uint rotary_dim,
+                            uint interleave) {
+  const float value = (float)x[e];
+  if (e >= rotary_dim)
+    return value;
+
+  const uint middle = rotary_dim / 2u;
+  float pair;
+  if (interleave != 0u)
+    pair = (e % 2u == 0u) ? -(float)x[e + 1u] : (float)x[e - 1u];
+  else
+    pair = (e < middle) ? -(float)x[e + middle] : (float)x[e - middle];
+  return value * (float)cos[e] + pair * (float)sin[e];
+}
+
+template <typename T>
+inline void ct2_qkv_post_impl(device const T* fused,
+                              device const T* sin,
+                              device const T* cos,
+                              device const T* old_k,
+                              device const T* old_v,
+                              device T* q,
+                              device T* cache_k,
+                              device T* cache_v,
+                              uint batch_size,
+                              uint num_heads,
+                              uint num_kv_heads,
+                              uint cache_len,
+                              uint old_cap,
+                              uint new_cap,
+                              uint depth,
+                              uint rotary_dim,
+                              uint interleave,
+                              bool grow,
+                              uint2 g) {
+  const ulong q_elements = (ulong)batch_size * num_heads * depth;
+  const uint plane = g.y;
+
+  if (plane == 0u) {
+    if ((ulong)g.x >= q_elements)
+      return;
+    const uint d = g.x % depth;
+    const uint h = (g.x / depth) % num_heads;
+    const uint b = g.x / (depth * num_heads);
+    const uint fused_width = (num_heads + 2u * num_kv_heads) * depth;
+    device const T* q_row = fused + (ulong)b * fused_width + (ulong)h * depth;
+    q[g.x] = (T)ct2_qkv_rotate(q_row, sin, cos, d, rotary_dim, interleave);
+    return;
+  }
+
+  const uint write_len = grow ? cache_len + 1u : 1u;
+  const ulong cache_elements = (ulong)batch_size * num_heads * write_len * depth;
+  if ((ulong)g.x >= cache_elements)
+    return;
+
+  const uint d = g.x % depth;
+  const uint t = (g.x / depth) % write_len;
+  const uint h = (g.x / (depth * write_len)) % num_heads;
+  const uint b = g.x / (depth * write_len * num_heads);
+  const ulong dst = (((ulong)b * num_heads + h) * new_cap
+                     + (grow ? t : cache_len)) * depth + d;
+  device T* cache = plane == 1u ? cache_k : cache_v;
+
+  if (grow && t < cache_len) {
+    device const T* old_cache = plane == 1u ? old_k : old_v;
+    const ulong src = (((ulong)b * num_heads + h) * old_cap + t) * depth + d;
+    cache[dst] = old_cache[src];
+    return;
+  }
+
+  const uint kv_head = h / (num_heads / num_kv_heads);
+  const uint fused_width = (num_heads + 2u * num_kv_heads) * depth;
+  const ulong row_base = (ulong)b * fused_width;
+  if (plane == 1u) {
+    device const T* k_row = fused + row_base
+                            + (ulong)(num_heads + kv_head) * depth;
+    cache[dst] = (T)ct2_qkv_rotate(k_row, sin, cos, d, rotary_dim, interleave);
+  } else {
+    const ulong v_base = (ulong)(num_heads + num_kv_heads + kv_head) * depth;
+    cache[dst] = fused[row_base + v_base + d];
+  }
+}
+
+#define CT2_QKV_POST_KERNELS(TYPE, SUFFIX)                                                    \
+kernel void ct2_qkv_post_append_##SUFFIX(                                                    \
+    device const TYPE* fused [[buffer(0)]], device const TYPE* sin [[buffer(1)]],             \
+    device const TYPE* cos [[buffer(2)]], device const TYPE* old_k [[buffer(3)]],             \
+    device const TYPE* old_v [[buffer(4)]], device TYPE* q [[buffer(5)]],                     \
+    device TYPE* cache_k [[buffer(6)]], device TYPE* cache_v [[buffer(7)]],                   \
+    constant uint& batch_size [[buffer(8)]], constant uint& num_heads [[buffer(9)]],          \
+    constant uint& num_kv_heads [[buffer(10)]], constant uint& cache_len [[buffer(11)]],      \
+    constant uint& old_cap [[buffer(12)]], constant uint& new_cap [[buffer(13)]],             \
+    constant uint& depth [[buffer(14)]], constant uint& rotary_dim [[buffer(15)]],            \
+    constant uint& interleave [[buffer(16)]], uint2 g [[thread_position_in_grid]]) {          \
+  ct2_qkv_post_impl<TYPE>(fused, sin, cos, old_k, old_v, q, cache_k, cache_v, batch_size,     \
+                           num_heads, num_kv_heads, cache_len, old_cap, new_cap, depth,        \
+                           rotary_dim, interleave, false, g);                                 \
+}                                                                                            \
+kernel void ct2_qkv_post_grow_##SUFFIX(                                                      \
+    device const TYPE* fused [[buffer(0)]], device const TYPE* sin [[buffer(1)]],             \
+    device const TYPE* cos [[buffer(2)]], device const TYPE* old_k [[buffer(3)]],             \
+    device const TYPE* old_v [[buffer(4)]], device TYPE* q [[buffer(5)]],                     \
+    device TYPE* cache_k [[buffer(6)]], device TYPE* cache_v [[buffer(7)]],                   \
+    constant uint& batch_size [[buffer(8)]], constant uint& num_heads [[buffer(9)]],          \
+    constant uint& num_kv_heads [[buffer(10)]], constant uint& cache_len [[buffer(11)]],      \
+    constant uint& old_cap [[buffer(12)]], constant uint& new_cap [[buffer(13)]],             \
+    constant uint& depth [[buffer(14)]], constant uint& rotary_dim [[buffer(15)]],            \
+    constant uint& interleave [[buffer(16)]], uint2 g [[thread_position_in_grid]]) {          \
+  ct2_qkv_post_impl<TYPE>(fused, sin, cos, old_k, old_v, q, cache_k, cache_v, batch_size,     \
+                           num_heads, num_kv_heads, cache_len, old_cap, new_cap, depth,        \
+                           rotary_dim, interleave, true, g);                                  \
+}
+
+CT2_QKV_POST_KERNELS(float, float)
+CT2_QKV_POST_KERNELS(half, half)
+#undef CT2_QKV_POST_KERNELS
+
 // ---- Normalizations (one threadgroup per row, fixed power-of-two reduction) ----
 // Reductions accumulate in float; 1.0f/sqrt is used (not rsqrt) to match the CPU kernels.
 constant uint CT2_NORM_TG = 256;

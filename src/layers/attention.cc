@@ -537,6 +537,7 @@ namespace ctranslate2 {
       dim_t logical_cache_length = 0;
       dim_t kv_cache_stride = 0;
       bool capacity_strided_cache = false;
+      bool fused_qkv_post = false;
 
       if (!_self_attention) {
 
@@ -544,6 +545,124 @@ namespace ctranslate2 {
                                 values_proj, cached_keys, cached_values,
                                 queries_padder, values_padder, beam_size);
       } else {
+
+#ifdef CT2_WITH_METAL
+        // The prototype remains opt-in until matched end-to-end A/B runs show a
+        // repeatable win. It is intentionally independent from the capacity-cache
+        // switch so the fused and separate post-processing paths can share M18.
+        static const bool metal_qkv_fusion_enabled =
+          std::getenv("CT2_METAL_QKV_FUSION") != nullptr;
+        static const bool metal_kv_cache_disabled =
+          std::getenv("CT2_NO_METAL_KV_CACHE") != nullptr;
+        static const bool metal_sdpa_disabled =
+          std::getenv("CT2_NO_METAL_SDPA") != nullptr;
+        const dim_t fused_rotary_dim = _rotary_embeddings
+                                       ? _rotary_embeddings->get_dim(_d_head)
+                                       : 0;
+        const bool qkv_cache_shape_valid =
+          cached_keys && cached_values
+          && ((cached_keys->empty() && cached_values->empty() && offset == 0)
+              || (cached_keys->rank() == 4
+                  && cached_values->shape() == cached_keys->shape()
+                  && cached_keys->dim(0) == fused_proj.dim(0)
+                  && cached_keys->dim(1) == _num_heads
+                  && cached_keys->dim(2) >= offset
+                  && cached_keys->dim(3) == _d_head));
+        const bool can_fuse_qkv_post =
+          metal_qkv_fusion_enabled
+          && !metal_kv_cache_disabled
+          && !metal_sdpa_disabled
+          && queries.device() == Device::METAL
+          && cached_keys != nullptr
+          && _rotary_embeddings
+          && !_q_norm && !_k_norm && !_v_norm
+          && !queries_padder
+          && _sliding_window == 0
+          && !_merge_time_and_head_dims
+          && fused_proj.rank() == 3
+          && fused_proj.dim(1) == 1
+          && fused_proj.dim(2) == (_num_heads + 2 * _num_heads_kv) * _d_head
+          && _num_heads_kv > 0
+          && _num_heads % _num_heads_kv == 0
+          && _d_head <= 256
+          && fused_rotary_dim > 0
+          && fused_rotary_dim <= _d_head
+          && fused_rotary_dim % 2 == 0
+          && (dtype == DataType::FLOAT32 || dtype == DataType::FLOAT16)
+          && !_relative_position_keys
+          && !_relative_asymmetric_position_keys
+          && !_relative_position_values
+          && !_relative_attention_bias
+          && !_alibi
+          && !attention
+          && qkv_cache_shape_valid
+          && (!values_lengths
+              || (values_lengths->dtype() == DataType::INT32
+                  && values_lengths->device() == Device::METAL
+                  && values_lengths->size() == fused_proj.dim(0) * _num_heads));
+
+        if (can_fuse_qkv_post) {
+          const dim_t batch_size = fused_proj.dim(0);
+          const dim_t append_length = 1;
+          logical_cache_length = offset + append_length;
+          const dim_t old_capacity = cached_keys->empty() ? 0 : cached_keys->dim(2);
+          const bool already_capacity_strided = !cached_keys->empty() && old_capacity > offset;
+          dim_t capacity = already_capacity_strided ? old_capacity : 0;
+          const bool needs_allocation = !already_capacity_strided
+                                        || capacity < logical_cache_length;
+          const bool grow = needs_allocation && offset > 0;
+
+          StorageView new_cached_keys(dtype, device);
+          StorageView new_cached_values(dtype, device);
+          StorageView* cache_k = cached_keys;
+          StorageView* cache_v = cached_values;
+          if (needs_allocation) {
+            capacity = std::max<dim_t>(64, already_capacity_strided ? capacity * 2 : 64);
+            while (capacity < logical_cache_length)
+              capacity *= 2;
+            const Shape cache_shape = {batch_size, _num_heads, capacity, _d_head};
+            new_cached_keys.resize(cache_shape);
+            new_cached_values.resize(cache_shape);
+            cache_k = &new_cached_keys;
+            cache_v = &new_cached_values;
+          }
+
+          queries_proj.resize({batch_size, _num_heads, 1, _d_head});
+          const dim_t rotary_dim = fused_rotary_dim;
+          StorageView sin(dtype, device);
+          StorageView cos(dtype, device);
+          _rotary_embeddings->get_sin_cos(1, rotary_dim, offset, device, dtype, sin, cos);
+
+          if (dtype == DataType::FLOAT32) {
+            metal::qkv_post(fused_proj.data<float>(), sin.data<float>(), cos.data<float>(),
+                            grow ? cached_keys->data<float>() : nullptr,
+                            grow ? cached_values->data<float>() : nullptr,
+                            queries_proj.data<float>(), cache_k->data<float>(), cache_v->data<float>(),
+                            batch_size, _num_heads, _num_heads_kv, offset,
+                            grow ? old_capacity : capacity, capacity, _d_head, rotary_dim,
+                            _rotary_embeddings->get_interleave(), grow);
+          } else {
+            metal::qkv_post(fused_proj.data<float16_t>(), sin.data<float16_t>(),
+                            cos.data<float16_t>(),
+                            grow ? cached_keys->data<float16_t>() : nullptr,
+                            grow ? cached_values->data<float16_t>() : nullptr,
+                            queries_proj.data<float16_t>(), cache_k->data<float16_t>(),
+                            cache_v->data<float16_t>(), batch_size, _num_heads, _num_heads_kv,
+                            offset, grow ? old_capacity : capacity, capacity, _d_head,
+                            rotary_dim, _rotary_embeddings->get_interleave(), grow);
+          }
+
+          if (needs_allocation) {
+            *cached_keys = std::move(new_cached_keys);
+            *cached_values = std::move(new_cached_values);
+          }
+          kv_cache_stride = capacity * _d_head;
+          capacity_strided_cache = true;
+          fused_qkv_post = true;
+        }
+#endif
+
+        if (!fused_qkv_post) {
 
         if (_num_heads_kv < _num_heads) {// MQA or GQA: queries stay in merged time/head format
           if (queries_padder)
@@ -729,6 +848,7 @@ namespace ctranslate2 {
               *cached_values = std::move(tmp);
             }
           }
+        }
         }
       }
 

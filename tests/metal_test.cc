@@ -606,6 +606,120 @@ TEST_F(MetalTest, KvCacheAppendAndGrow) {
   EXPECT_EQ(compact_v.to(Device::CPU).to_vector<float>(), expected_v);
 }
 
+TEST_F(MetalTest, FusedQkvPostAppendGrowAndHalfParity) {
+  const dim_t batch = 2;
+  const dim_t heads = 4;
+  const dim_t kv_heads = 2;
+  const dim_t depth = 4;
+  const dim_t rotary_dim = 4;
+  const dim_t fused_width = (heads + 2 * kv_heads) * depth;
+  const dim_t capacity = 4;
+  const std::vector<float> sin_host = {0.1f, 0.2f, 0.3f, 0.4f};
+  const std::vector<float> cos_host = {0.9f, 0.8f, 0.7f, 0.6f};
+  std::vector<float> fused_host(batch * fused_width);
+  for (size_t i = 0; i < fused_host.size(); ++i)
+    fused_host[i] = (static_cast<float>(i) - 11.f) / 17.f;
+
+  const auto rotate = [&](const float* row, dim_t d) {
+    const dim_t middle = rotary_dim / 2;
+    const float pair = d < middle ? -row[d + middle] : row[d - middle];
+    return row[d] * cos_host[d] + pair * sin_host[d];
+  };
+  const auto expected_q = [&](const std::vector<float>& fused, dim_t b, dim_t h, dim_t d) {
+    return rotate(fused.data() + b * fused_width + h * depth, d);
+  };
+  const auto expected_k = [&](const std::vector<float>& fused, dim_t b, dim_t h, dim_t d) {
+    const dim_t kv_h = h / (heads / kv_heads);
+    return rotate(fused.data() + b * fused_width + (heads + kv_h) * depth, d);
+  };
+  const auto expected_v = [&](const std::vector<float>& fused, dim_t b, dim_t h, dim_t d) {
+    const dim_t kv_h = h / (heads / kv_heads);
+    return fused[b * fused_width + (heads + kv_heads + kv_h) * depth + d];
+  };
+
+  StorageView fused({batch, 1, fused_width}, fused_host, Device::METAL);
+  StorageView sin({1, rotary_dim}, sin_host, Device::METAL);
+  StorageView cos({1, rotary_dim}, cos_host, Device::METAL);
+  StorageView q({batch, heads, 1, depth}, DataType::FLOAT32, Device::METAL);
+  StorageView cache_k({batch, heads, capacity, depth}, DataType::FLOAT32, Device::METAL);
+  StorageView cache_v({batch, heads, capacity, depth}, DataType::FLOAT32, Device::METAL);
+  metal::qkv_post(fused.data<float>(), sin.data<float>(), cos.data<float>(), nullptr, nullptr,
+                  q.data<float>(), cache_k.data<float>(), cache_v.data<float>(),
+                  batch, heads, kv_heads, 0, capacity, capacity, depth, rotary_dim,
+                  /*interleave=*/false, /*grow=*/false);
+  metal::synchronize();
+
+  const auto q_host = q.to(Device::CPU).to_vector<float>();
+  const auto k_host = cache_k.to(Device::CPU).to_vector<float>();
+  const auto v_host = cache_v.to(Device::CPU).to_vector<float>();
+  for (dim_t b = 0; b < batch; ++b) {
+    for (dim_t h = 0; h < heads; ++h) {
+      for (dim_t d = 0; d < depth; ++d) {
+        const dim_t q_i = (b * heads + h) * depth + d;
+        const dim_t cache_i = ((b * heads + h) * capacity) * depth + d;
+        EXPECT_NEAR(q_host[q_i], expected_q(fused_host, b, h, d), 1e-6);
+        EXPECT_NEAR(k_host[cache_i], expected_k(fused_host, b, h, d), 1e-6);
+        EXPECT_NEAR(v_host[cache_i], expected_v(fused_host, b, h, d), 1e-6);
+      }
+    }
+  }
+
+  std::vector<float> fused_next = fused_host;
+  for (auto& value : fused_next)
+    value += 0.25f;
+  StorageView next({batch, 1, fused_width}, fused_next, Device::METAL);
+  const dim_t grown_capacity = 8;
+  StorageView q_next({batch, heads, 1, depth}, DataType::FLOAT32, Device::METAL);
+  StorageView grown_k({batch, heads, grown_capacity, depth}, DataType::FLOAT32, Device::METAL);
+  StorageView grown_v({batch, heads, grown_capacity, depth}, DataType::FLOAT32, Device::METAL);
+  metal::qkv_post(next.data<float>(), sin.data<float>(), cos.data<float>(),
+                  cache_k.data<float>(), cache_v.data<float>(), q_next.data<float>(),
+                  grown_k.data<float>(), grown_v.data<float>(), batch, heads, kv_heads,
+                  1, capacity, grown_capacity, depth, rotary_dim,
+                  /*interleave=*/false, /*grow=*/true);
+  metal::synchronize();
+  const auto grown_k_host = grown_k.to(Device::CPU).to_vector<float>();
+  const auto grown_v_host = grown_v.to(Device::CPU).to_vector<float>();
+  for (dim_t b = 0; b < batch; ++b) {
+    for (dim_t h = 0; h < heads; ++h) {
+      for (dim_t d = 0; d < depth; ++d) {
+        const dim_t old_i = ((b * heads + h) * capacity) * depth + d;
+        const dim_t prefix_i = ((b * heads + h) * grown_capacity) * depth + d;
+        const dim_t append_i = prefix_i + depth;
+        EXPECT_NEAR(grown_k_host[prefix_i], k_host[old_i], 1e-6);
+        EXPECT_NEAR(grown_v_host[prefix_i], v_host[old_i], 1e-6);
+        EXPECT_NEAR(grown_k_host[append_i], expected_k(fused_next, b, h, d), 1e-6);
+        EXPECT_NEAR(grown_v_host[append_i], expected_v(fused_next, b, h, d), 1e-6);
+      }
+    }
+  }
+
+  StorageView fused_half = fused.to(DataType::FLOAT16);
+  StorageView sin_half = sin.to(DataType::FLOAT16);
+  StorageView cos_half = cos.to(DataType::FLOAT16);
+  StorageView q_half({batch, heads, 1, depth}, DataType::FLOAT16, Device::METAL);
+  StorageView k_half({batch, heads, capacity, depth}, DataType::FLOAT16, Device::METAL);
+  StorageView v_half({batch, heads, capacity, depth}, DataType::FLOAT16, Device::METAL);
+  metal::qkv_post(fused_half.data<float16_t>(), sin_half.data<float16_t>(),
+                  cos_half.data<float16_t>(), nullptr, nullptr, q_half.data<float16_t>(),
+                  k_half.data<float16_t>(), v_half.data<float16_t>(), batch, heads, kv_heads,
+                  0, capacity, capacity, depth, rotary_dim,
+                  /*interleave=*/false, /*grow=*/false);
+  metal::synchronize();
+  expect_storage_eq(q_half.to_float32(), q.to_float32(), 2e-3);
+  const auto k_half_host = k_half.to_float32().to(Device::CPU).to_vector<float>();
+  const auto v_half_host = v_half.to_float32().to(Device::CPU).to_vector<float>();
+  for (dim_t b = 0; b < batch; ++b) {
+    for (dim_t h = 0; h < heads; ++h) {
+      for (dim_t d = 0; d < depth; ++d) {
+        const dim_t i = ((b * heads + h) * capacity) * depth + d;
+        EXPECT_NEAR(k_half_host[i], k_host[i], 2e-3);
+        EXPECT_NEAR(v_half_host[i], v_host[i], 2e-3);
+      }
+    }
+  }
+}
+
 TEST_F(MetalTest, SdpaFusedCapacityStrideParity) {
   const dim_t batch = 2;
   const dim_t heads = 2;

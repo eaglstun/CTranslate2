@@ -218,6 +218,96 @@ namespace ctranslate2 {
                         old_capacity, new_capacity, row_size_bytes, true);
     }
 
+    namespace {
+      void qkv_post_impl(const char* pipeline_name,
+                         const void* fused_qkv, const void* sin, const void* cos,
+                         const void* old_cached_keys, const void* old_cached_values,
+                         void* queries, void* cached_keys, void* cached_values,
+                         dim_t batch_size, dim_t num_heads, dim_t num_kv_heads,
+                         dim_t cache_length, dim_t old_capacity, dim_t new_capacity,
+                         dim_t depth, dim_t rotary_dim, bool interleave, bool grow) {
+        if (batch_size == 0 || num_heads == 0 || depth == 0)
+          return;
+
+        const BufferRange fused_buffer = buffer_and_offset(fused_qkv);
+        const BufferRange sin_buffer = buffer_and_offset(sin);
+        const BufferRange cos_buffer = buffer_and_offset(cos);
+        const BufferRange old_k_buffer = grow ? buffer_and_offset(old_cached_keys)
+                                              : buffer_and_offset(cached_keys);
+        const BufferRange old_v_buffer = grow ? buffer_and_offset(old_cached_values)
+                                              : buffer_and_offset(cached_values);
+        const BufferRange q_buffer = buffer_and_offset(queries);
+        const BufferRange cache_k_buffer = buffer_and_offset(cached_keys);
+        const BufferRange cache_v_buffer = buffer_and_offset(cached_values);
+
+        id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
+        id<MTLCommandBuffer> command_buffer = new_command_buffer();
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        [encoder setComputePipelineState:pso];
+        [encoder setBuffer:fused_buffer.buffer offset:fused_buffer.offset atIndex:0];
+        [encoder setBuffer:sin_buffer.buffer offset:sin_buffer.offset atIndex:1];
+        [encoder setBuffer:cos_buffer.buffer offset:cos_buffer.offset atIndex:2];
+        [encoder setBuffer:old_k_buffer.buffer offset:old_k_buffer.offset atIndex:3];
+        [encoder setBuffer:old_v_buffer.buffer offset:old_v_buffer.offset atIndex:4];
+        [encoder setBuffer:q_buffer.buffer offset:q_buffer.offset atIndex:5];
+        [encoder setBuffer:cache_k_buffer.buffer offset:cache_k_buffer.offset atIndex:6];
+        [encoder setBuffer:cache_v_buffer.buffer offset:cache_v_buffer.offset atIndex:7];
+
+        const uint32_t batch_u = static_cast<uint32_t>(batch_size);
+        const uint32_t heads_u = static_cast<uint32_t>(num_heads);
+        const uint32_t kv_heads_u = static_cast<uint32_t>(num_kv_heads);
+        const uint32_t cache_length_u = static_cast<uint32_t>(cache_length);
+        const uint32_t old_capacity_u = static_cast<uint32_t>(old_capacity);
+        const uint32_t new_capacity_u = static_cast<uint32_t>(new_capacity);
+        const uint32_t depth_u = static_cast<uint32_t>(depth);
+        const uint32_t rotary_dim_u = static_cast<uint32_t>(rotary_dim);
+        const uint32_t interleave_u = interleave ? 1u : 0u;
+        [encoder setBytes:&batch_u length:sizeof(batch_u) atIndex:8];
+        [encoder setBytes:&heads_u length:sizeof(heads_u) atIndex:9];
+        [encoder setBytes:&kv_heads_u length:sizeof(kv_heads_u) atIndex:10];
+        [encoder setBytes:&cache_length_u length:sizeof(cache_length_u) atIndex:11];
+        [encoder setBytes:&old_capacity_u length:sizeof(old_capacity_u) atIndex:12];
+        [encoder setBytes:&new_capacity_u length:sizeof(new_capacity_u) atIndex:13];
+        [encoder setBytes:&depth_u length:sizeof(depth_u) atIndex:14];
+        [encoder setBytes:&rotary_dim_u length:sizeof(rotary_dim_u) atIndex:15];
+        [encoder setBytes:&interleave_u length:sizeof(interleave_u) atIndex:16];
+
+        const dim_t q_elements = batch_size * num_heads * depth;
+        const dim_t cache_elements = batch_size * num_heads
+                                     * (grow ? cache_length + 1 : 1) * depth;
+        const NSUInteger elements = static_cast<NSUInteger>(std::max(q_elements, cache_elements));
+        const NSUInteger tg = std::min<NSUInteger>(pso.maxTotalThreadsPerThreadgroup, elements);
+        [encoder dispatchThreads:MTLSizeMake(elements, 3, 1)
+              threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+        [encoder endEncoding];
+        commit_command_buffer(command_buffer);
+      }
+    }
+
+    void qkv_post(const float* fused_qkv, const float* sin, const float* cos,
+                  const float* old_cached_keys, const float* old_cached_values,
+                  float* queries, float* cached_keys, float* cached_values,
+                  dim_t batch_size, dim_t num_heads, dim_t num_kv_heads,
+                  dim_t cache_length, dim_t old_capacity, dim_t new_capacity,
+                  dim_t depth, dim_t rotary_dim, bool interleave, bool grow) {
+      qkv_post_impl(grow ? "ct2_qkv_post_grow_float" : "ct2_qkv_post_append_float",
+                    fused_qkv, sin, cos, old_cached_keys, old_cached_values,
+                    queries, cached_keys, cached_values, batch_size, num_heads, num_kv_heads,
+                    cache_length, old_capacity, new_capacity, depth, rotary_dim, interleave, grow);
+    }
+
+    void qkv_post(const float16_t* fused_qkv, const float16_t* sin, const float16_t* cos,
+                  const float16_t* old_cached_keys, const float16_t* old_cached_values,
+                  float16_t* queries, float16_t* cached_keys, float16_t* cached_values,
+                  dim_t batch_size, dim_t num_heads, dim_t num_kv_heads,
+                  dim_t cache_length, dim_t old_capacity, dim_t new_capacity,
+                  dim_t depth, dim_t rotary_dim, bool interleave, bool grow) {
+      qkv_post_impl(grow ? "ct2_qkv_post_grow_half" : "ct2_qkv_post_append_half",
+                    fused_qkv, sin, cos, old_cached_keys, old_cached_values,
+                    queries, cached_keys, cached_values, batch_size, num_heads, num_kv_heads,
+                    cache_length, old_capacity, new_capacity, depth, rotary_dim, interleave, grow);
+    }
+
     // Must match CT2_NORM_TG in kernels_msl.h.
     static constexpr NSUInteger kNormThreadgroup = 256;
 
