@@ -99,6 +99,24 @@ namespace ctranslate2 {
                        dim_t batch_heads, dim_t cache_length, dim_t append_length,
                        dim_t old_capacity, dim_t new_capacity, dim_t row_size_bytes);
 
+    // One-token fused self-attention post-processing. The input is the Dense projection
+    // [batch, 1, (num_heads + 2*num_kv_heads)*depth]. The kernel splits it, applies RoPE
+    // to Q/K, emits Q as [batch, num_heads, 1, depth], replicates GQA K/V heads, and
+    // appends them directly to the capacity-strided cache. When grow is true, the live
+    // prefix is copied from old_cached_* into the new allocation in the same dispatch.
+    void qkv_post(const float* fused_qkv, const float* sin, const float* cos,
+                  const float* old_cached_keys, const float* old_cached_values,
+                  float* queries, float* cached_keys, float* cached_values,
+                  dim_t batch_size, dim_t num_heads, dim_t num_kv_heads,
+                  dim_t cache_length, dim_t old_capacity, dim_t new_capacity,
+                  dim_t depth, dim_t rotary_dim, bool interleave, bool grow);
+    void qkv_post(const float16_t* fused_qkv, const float16_t* sin, const float16_t* cos,
+                  const float16_t* old_cached_keys, const float16_t* old_cached_values,
+                  float16_t* queries, float16_t* cached_keys, float16_t* cached_values,
+                  dim_t batch_size, dim_t num_heads, dim_t num_kv_heads,
+                  dim_t cache_length, dim_t old_capacity, dim_t new_capacity,
+                  dim_t depth, dim_t rotary_dim, bool interleave, bool grow);
+
     // Rotary position embedding over a [batch_size * max_time, depth] tensor; sin/cos are
     // [max_time, ndims]. Elements >= ndims are copied through. float32 and float16.
     void rotary(const float* input, const float* sin, const float* cos, float* output,

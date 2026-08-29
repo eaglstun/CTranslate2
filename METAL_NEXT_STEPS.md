@@ -8,7 +8,8 @@ lists.
 Two env-gated profilers are already in-tree: `CT2_AUTO_PROFILE=cpu|metal` and
 `CT2_METAL_STATS=1`. Important A/B switches are `CT2_NO_METAL_SDPA=1`,
 `CT2_NO_METAL_KV_CACHE=1`, `CT2_NO_METAL_SAMPLING=1`, `CT2_NO_MPP_GEMM=1`, and
-`CT2_MPS_GEMV=1` (experimental and off by default).
+`CT2_MPS_GEMV=1` (experimental and off by default). The item-1 prototype is gated by
+`CT2_METAL_QKV_FUSION=1` and remains off by default pending a repeated end-to-end win.
 
 ## Ranked list
 
@@ -19,6 +20,10 @@ Two env-gated profilers are already in-tree: `CT2_AUTO_PROFILE=cpu|metal` and
    emit Q, and write rotated K plus V directly into their capacity-strided rows. Gate it
    against separate Split + two Rotary calls + cache append, then require a repeated
    end-to-end win. This is one natural dataflow fusion, not command-buffer batching.
+   **Prototype status:** fp32/fp16 append and grow kernels now cover MHA/GQA, with direct
+   parity and real-Qwen token parity. The first fp16 batch-1 A/B was negative (about 4%),
+   so `CT2_METAL_QKV_FUSION=1` is opt-in while dispatch tuning and the rest of the matrix
+   are evaluated.
 
 2. **Close the classic encoder-decoder fp16 coverage/performance gap.** Qwen and Whisper
    run end-to-end in fp16, but the July OPUS-MT/NLLB sweep still found fp16 activation

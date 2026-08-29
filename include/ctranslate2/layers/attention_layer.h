@@ -94,6 +94,17 @@ namespace ctranslate2 {
 
       void apply(StorageView& x, const dim_t offset = 0, bool fa2 = false);
 
+      // Returns views over the lazily initialized rotary tables for [offset,
+      // offset + max_time). This is used by fused attention post-processing paths that
+      // apply RoPE without materializing separate query/key tensors first.
+      void get_sin_cos(dim_t max_time,
+                       dim_t dim,
+                       dim_t offset,
+                       Device device,
+                       DataType dtype,
+                       StorageView& sin,
+                       StorageView& cos);
+
       StorageView& get_cos_half() {
         return *_cos_half;
       }
@@ -104,6 +115,10 @@ namespace ctranslate2 {
 
       bool get_interleave() const {
         return _interleave;
+      }
+
+      dim_t get_dim(dim_t depth) const {
+        return _dim == 0 ? depth : _dim;
       }
 
     private:
