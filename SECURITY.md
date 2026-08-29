@@ -6,7 +6,6 @@ Security fixes are provided for the latest release series only.
 
 ## Reporting a Vulnerability
 
-
 Do not open public issues for security vulnerabilities.
 
 Please report security vulnerabilities privately to Jordi Mas <jmas@softcatala.org>.

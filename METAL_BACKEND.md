@@ -144,7 +144,7 @@ new→commit pair must wrap itself in `@autoreleasepool`.**
 | `src/metal/primitives.h`             | Pure-C++ declarations of `metal::` compute entry points                                     |
 | `src/metal/primitives.mm`            | Host-side dispatch for custom Metal compute kernels                                         |
 | `src/metal/gemm.mm`                  | `metal::gemm` / `gemm_batch_strided` via MPSMatrixMultiplication                            |
-| `src/metal/kernels/kernels_msl.h`    | Runtime-compiled MSL source for custom kernels                                               |
+| `src/metal/kernels/kernels_msl.h`    | Runtime-compiled MSL source for custom kernels                                              |
 | `src/device_dispatch.h`              | `METAL_DEVICE_CASE` (CPU-reference binding)                                                 |
 | `src/allocator.cc`, `src/devices.cc` | METAL early-returns for allocator/device-index/synchronize                                  |
 | `tests/metal_test.cc`                | Metal kernel parity, end-to-end, real-model, and benchmark tests                            |
@@ -504,7 +504,7 @@ identical to CPU in both precisions. The fusion is enabled by default;
 | GumbelMax / Multinomial sampling (float32 and float16)                     | **GPU** — host-seeded kernels (`set_random_seed`-reproducible); Multinomial at sample_size 1                                                |
 | Decode attention: q·K^T → softmax → ·V (float32 and float16)               | **GPU** — fused single-launch SDPA kernel at q_len ≤ 8 (greedy/beam decode, short prefill); larger q_len uses MPS GEMM + softmax kernel     |
 | Decoder KV-cache append (fused-SDPA shapes)                                | **GPU** — capacity-strided in-place K/V append; geometric grow at capacity boundaries (`CT2_NO_METAL_KV_CACHE=1` disables)                  |
-| One-token QKV post-processing (fused-SDPA shapes)                          | **GPU** — fused Split + Q/K RoPE + capacity-cache append/grow (`CT2_NO_METAL_QKV_FUSION=1` disables)                                      |
+| One-token QKV post-processing (fused-SDPA shapes)                          | **GPU** — fused Split + Q/K RoPE + capacity-cache append/grow (`CT2_NO_METAL_QKV_FUSION=1` disables)                                        |
 | Everything else (general-axis LayerNorm/BiasAdd, conv, int Mul, …)         | CPU reference over unified memory; selected fp16 callers such as Conv1D use explicit float32 compatibility islands                          |
 | fp16 for ungraduated ops                                                   | Architecture-dependent — native half kernel or explicit fp16→fp32→fp16 island required; Qwen and Whisper full-model paths are proven        |
 | bf16 compute                                                               | Not yet                                                                                                                                     |

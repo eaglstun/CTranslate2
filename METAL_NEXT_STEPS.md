@@ -58,10 +58,10 @@ solely from the architectural hypothesis.
 
 Minimum matrix:
 
-| Workload | Compute | Batch | Purpose |
-| --- | --- | ---: | --- |
-| NLLB-200 distilled 600M | fp32, fp16 | 1, 8 | identify fp16 conversion and fallback hotspots |
-| OPUS-MT | fp32, fp16 | 1, 8 | distinguish shared encoder-decoder costs from NLLB-specific ops |
+| Workload                | Compute    | Batch | Purpose                                                         |
+| ----------------------- | ---------- | ----: | --------------------------------------------------------------- |
+| NLLB-200 distilled 600M | fp32, fp16 |  1, 8 | identify fp16 conversion and fallback hotspots                  |
+| OPUS-MT                 | fp32, fp16 |  1, 8 | distinguish shared encoder-decoder costs from NLLB-specific ops |
 
 For every optimization: add direct fp32/fp16 parity where applicable, run the full Metal
 suite, run a real-model token parity gate, and require a repeatable end-to-end win before
