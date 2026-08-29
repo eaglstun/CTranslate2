@@ -465,6 +465,22 @@ precisions. Append, grow, compact-to-contiguous, and capacity-strided SDPA have 
 parity tests; all 33 Metal tests pass. The full 303-test suite has the same single
 pre-existing Accelerate-build failure in quantized grouped Conv1D.
 
+### ✅ M19 — fused QKV post-processing into the capacity cache (2026-08-29)
+
+One-token self-attention now consumes the flat fused QKV projection in one Metal kernel,
+rotates Q and K, emits Q, and writes rotated K plus V directly into capacity-strided cache
+rows. This replaces Split, two Rotary launches, and the separate cache append while
+preserving the M18 grow path. The route covers fp32/fp16 MHA and GQA under the existing
+fused-SDPA contract; unsupported shapes keep the separate path.
+
+Matched Qwen2.5-0.5B prompt-32/decode-128 A/B pairs were positive in every tested cell.
+The conservative repeated gains were **6.9% / 2.7% for fp32**, **20.7% / 12.3% for
+fp16**, and **20.8% / 3.0% for int8** at batch 1 / 8 respectively. The noisier pair in
+each cell was still positive; fp16 batch 1 repeated across five process pairs. Direct
+append/grow parity passes in fp32/fp16, and real-Qwen greedy output remained 24/24 tokens
+identical to CPU in both precisions. The fusion is enabled by default;
+`CT2_NO_METAL_QKV_FUSION=1` restores the separate path for A/B and diagnosis.
+
 ## What runs where today
 
 | Operation                                                                  | Metal execution                                                                                                                             |
@@ -488,18 +504,18 @@ pre-existing Accelerate-build failure in quantized grouped Conv1D.
 | GumbelMax / Multinomial sampling (float32 and float16)                     | **GPU** — host-seeded kernels (`set_random_seed`-reproducible); Multinomial at sample_size 1                                                |
 | Decode attention: q·K^T → softmax → ·V (float32 and float16)               | **GPU** — fused single-launch SDPA kernel at q_len ≤ 8 (greedy/beam decode, short prefill); larger q_len uses MPS GEMM + softmax kernel     |
 | Decoder KV-cache append (fused-SDPA shapes)                                | **GPU** — capacity-strided in-place K/V append; geometric grow at capacity boundaries (`CT2_NO_METAL_KV_CACHE=1` disables)                  |
+| One-token QKV post-processing (fused-SDPA shapes)                          | **GPU** — fused Split + Q/K RoPE + capacity-cache append/grow (`CT2_NO_METAL_QKV_FUSION=1` disables)                                      |
 | Everything else (general-axis LayerNorm/BiasAdd, conv, int Mul, …)         | CPU reference over unified memory; selected fp16 callers such as Conv1D use explicit float32 compatibility islands                          |
 | fp16 for ungraduated ops                                                   | Architecture-dependent — native half kernel or explicit fp16→fp32→fp16 island required; Qwen and Whisper full-model paths are proven        |
 | bf16 compute                                                               | Not yet                                                                                                                                     |
 
 ## What's left
 
-`METAL_NEXT_STEPS.md` is the single ranked backlog. The post-M18 decode profile is now
-complete: the leading float-path fusion candidate is QKV post-processing (Split + RoPE +
-capacity-cache append), while int8 is dominated by its Quantize/GEMM/Dequantize pipeline.
-The other high-value lane is classic encoder-decoder fp16: Qwen and Whisper are already
+`METAL_NEXT_STEPS.md` is the single ranked backlog. With QKV post-processing fused in M19,
+the next high-value lane is classic encoder-decoder fp16: Qwen and Whisper are already
 proven end-to-end in fp16, but July OPUS-MT/NLLB measurements still show conversion churn
-from architecture-specific CPU-reference ops.
+from architecture-specific CPU-reference ops. The independent decode lane is the int8
+Quantize/GEMM/Dequantize pipeline identified by the post-M18 profile.
 
 ### Coverage work
 

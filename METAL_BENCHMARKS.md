@@ -424,6 +424,33 @@ contention, not a recorded regression. Repeat the steady-state matrix on an idle
 quoting new throughput; the op-ranking tables above completed and are the result of this
 profiling session.
 
+### M19: fused one-token QKV post-processing is a repeated end-to-end win
+
+The post-M18 profile's attention fusion was implemented as one kernel that consumes the
+flat QKV projection, rotates Q/K, emits Q, and writes K/V directly into the
+capacity-strided cache. It replaces Split, two Rotary launches, and the separate cache
+append/grow path. `CT2_NO_METAL_QKV_FUSION=1` restores the old sequence for A/B.
+
+Qwen2.5-0.5B, prompt 32 / decode 128, Release build on M4 Max. Each reported process
+warms once and averages three timed generations. Two matched off/on process pairs were
+run per cell in opposite order; fp16 batch 1 received five pairs because it contradicted
+the earlier single negative probe.
+
+| Compute / batch | Separate path (ms) | Fused path (ms) | Matched improvement |
+| --- | ---: | ---: | ---: |
+| fp32 / 1 | 2520.80, 2445.95 | 2303.42, 2276.36 | **6.9–8.6%** |
+| fp32 / 8 | 4057.52, 3860.60 | 3751.17, 3755.97 | **2.7–7.6%** |
+| fp16 / 1 | 1867.10–1947.52 | 1424.58–1545.04 | **20.7–25.9%** |
+| fp16 / 8 | 2318.99, 2314.72 | 2033.41, 1980.99 | **12.3–14.4%** |
+| int8 / 1 | 1727.42, 1729.62 | 1368.88, 1352.59 | **20.8–21.8%** |
+| int8 / 8 | 5333.09, 4211.86 | 3927.51, 4084.20 | **3.0–26.4%** |
+
+The int8 batch-8 cell was noisy, but reversing process order preserved a positive lower
+bound. Direct append/grow fp32/fp16 parity passed, and the real-model decode gate produced
+24/24 tokens identical to CPU for both Metal precisions. The repeated matrix therefore
+clears the default-enable bar; no speculative dispatch tuning is warranted before the
+next model-level profile.
+
 ## Op fusion: residual-Add + norm (`DISABLED_BenchmarkAddRMSNorm`)
 
 The first **positive** Metal perf lever (the SIMD-group-reduction rewrite was measured dead
