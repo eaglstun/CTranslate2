@@ -193,46 +193,19 @@ constant uint CT2_SDPA_SG = 4;       // SIMD-groups (of 32 lanes) per row
 constant uint CT2_SDPA_MAX_D = 256;  // max head depth; the host routes here only when
                                      // depth <= this (8 accumulator registers per lane)
 
+// Online-softmax scan of keys [begin, end) of one score row: this thread's SIMD-group
+// takes keys begin + simd_group, + CT2_SDPA_SG, ... and folds each into its running
+// partial (max m, denominator l_sum, weighted-V accumulator acc[dims_per_lane]).
+// exp(-INFINITY - m_new) == 0 makes the first iteration's rescale a no-op. Must be called
+// in SIMD-group-uniform control flow (simd_sum).
 template <typename T>
-inline void ct2_sdpa_impl(device const T* q_buf,
-                          device const T* k_buf,
-                          device const T* v_buf,
-                          device T* out,
-                          device const int* lengths,
-                          uint num_keys, uint kv_stride, uint depth, uint rows_per_bh,
-                          float scale, uint has_lengths,
-                          uint row, uint simd_lane, uint simd_group,
-                          threadgroup float* tg_m,
-                          threadgroup float* tg_l,
-                          threadgroup float* tg_acc) {
-  const uint bh = row / rows_per_bh;
-  device const T* q_row = q_buf + (ulong)row * depth;
-  device const T* k_base = k_buf + (ulong)bh * kv_stride;
-  device const T* v_base = v_buf + (ulong)bh * kv_stride;
-  device T* out_row = out + (ulong)row * depth;
-
-  uint len = num_keys;
-  if (has_lengths != 0u) {
-    const int l = lengths[row];
-    len = l > 0 ? (uint)l : 0u;
-  }
-
-  if (len == 0u) {  // SoftMax contract: fully masked row → exact zeros
-    for (uint j = simd_group * 32u + simd_lane; j < depth; j += CT2_SDPA_SG * 32u)
-      out_row[j] = T(0);
-    return;
-  }
-
-  const uint dims_per_lane = (depth + 31u) / 32u;
-  float m = -INFINITY;
-  float l_sum = 0.0f;
-  float acc[CT2_SDPA_MAX_D / 32u];
-  for (uint i = 0u; i < dims_per_lane; ++i)
-    acc[i] = 0.0f;
-
-  // Keys t = simd_group, simd_group + CT2_SDPA_SG, ... — score then online update.
-  // exp(-INFINITY - m_new) == 0 makes the first iteration's rescale a no-op.
-  for (uint t = simd_group; t < len; t += CT2_SDPA_SG) {
+inline void ct2_sdpa_scan(device const T* q_row,
+                          device const T* k_base,
+                          device const T* v_base,
+                          uint begin, uint end, uint depth, float scale,
+                          uint simd_lane, uint simd_group, uint dims_per_lane,
+                          thread float& m, thread float& l_sum, thread float* acc) {
+  for (uint t = begin + simd_group; t < end; t += CT2_SDPA_SG) {
     device const T* k_row = k_base + (ulong)t * depth;
     float partial = 0.0f;
     for (uint j = simd_lane; j < depth; j += 32u)
@@ -251,10 +224,14 @@ inline void ct2_sdpa_impl(device const T* q_buf,
     }
     m = m_new;
   }
+}
 
-  // Merge the per-SIMD-group partials. len > 0 guarantees group 0 saw key 0, so the
-  // global max is finite; a group with no keys (len < CT2_SDPA_SG) contributes
-  // exp(-INFINITY - m_all) == 0.
+// Publish this SIMD-group's partial to threadgroup memory and wait for the others.
+inline void ct2_sdpa_publish(float m, float l_sum, thread const float* acc,
+                             uint simd_lane, uint simd_group, uint dims_per_lane,
+                             threadgroup float* tg_m,
+                             threadgroup float* tg_l,
+                             threadgroup float* tg_acc) {
   if (simd_lane == 0u) {
     tg_m[simd_group] = m;
     tg_l[simd_group] = l_sum;
@@ -262,21 +239,84 @@ inline void ct2_sdpa_impl(device const T* q_buf,
   for (uint i = 0u; i < dims_per_lane; ++i)
     tg_acc[simd_group * CT2_SDPA_MAX_D + simd_lane + 32u * i] = acc[i];
   threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+// Log-sum-exp merge of the published SIMD-group partials: the merged running max and
+// denominator, plus the per-group weights exp(m_g - m_all) to apply to tg_acc. At least
+// one group must have seen a key (finite max); a group with no keys contributes
+// exp(-INFINITY - m_all) == 0.
+inline void ct2_sdpa_merge(threadgroup const float* tg_m,
+                           threadgroup const float* tg_l,
+                           thread float& m_all, thread float& l_all, thread float* w) {
+  m_all = -INFINITY;
+  for (uint g = 0u; g < CT2_SDPA_SG; ++g)
+    m_all = max(m_all, tg_m[g]);
+  l_all = 0.0f;
+  for (uint g = 0u; g < CT2_SDPA_SG; ++g) {
+    w[g] = exp(tg_m[g] - m_all);
+    l_all += tg_l[g] * w[g];
+  }
+}
+
+// Per-row key count under the SoftMax mask contract (len <= 0 means fully masked).
+inline uint ct2_sdpa_row_len(device const int* lengths, uint has_lengths, uint num_keys,
+                             uint row) {
+  if (has_lengths == 0u)
+    return num_keys;
+  const int l = lengths[row];
+  return l > 0 ? (uint)l : 0u;
+}
+
+template <typename T>
+inline void ct2_sdpa_impl(device const T* q_buf,
+                          device const T* k_buf,
+                          device const T* v_buf,
+                          device T* out,
+                          device const int* lengths,
+                          uint num_keys, uint kv_stride, uint depth, uint rows_per_bh,
+                          float scale, uint has_lengths,
+                          uint row, uint simd_lane, uint simd_group,
+                          threadgroup float* tg_m,
+                          threadgroup float* tg_l,
+                          threadgroup float* tg_acc) {
+  const uint bh = row / rows_per_bh;
+  device const T* q_row = q_buf + (ulong)row * depth;
+  device const T* k_base = k_buf + (ulong)bh * kv_stride;
+  device const T* v_base = v_buf + (ulong)bh * kv_stride;
+  device T* out_row = out + (ulong)row * depth;
+
+  const uint len = ct2_sdpa_row_len(lengths, has_lengths, num_keys, row);
+
+  if (len == 0u) {  // SoftMax contract: fully masked row → exact zeros
+    for (uint j = simd_group * 32u + simd_lane; j < depth; j += CT2_SDPA_SG * 32u)
+      out_row[j] = T(0);
+    return;
+  }
+
+  const uint dims_per_lane = (depth + 31u) / 32u;
+  float m = -INFINITY;
+  float l_sum = 0.0f;
+  float acc[CT2_SDPA_MAX_D / 32u];
+  for (uint i = 0u; i < dims_per_lane; ++i)
+    acc[i] = 0.0f;
+
+  ct2_sdpa_scan<T>(q_row, k_base, v_base, 0u, len, depth, scale,
+                   simd_lane, simd_group, dims_per_lane, m, l_sum, acc);
+
+  // Merge the per-SIMD-group partials. len > 0 guarantees group 0 saw key 0, so the
+  // global max is finite.
+  ct2_sdpa_publish(m, l_sum, acc, simd_lane, simd_group, dims_per_lane, tg_m, tg_l, tg_acc);
 
   if (simd_group == 0u) {
-    float m_all = -INFINITY;
-    for (uint g = 0u; g < CT2_SDPA_SG; ++g)
-      m_all = max(m_all, tg_m[g]);
-    float l_all = 0.0f;
-    for (uint g = 0u; g < CT2_SDPA_SG; ++g)
-      l_all += tg_l[g] * exp(tg_m[g] - m_all);
+    float m_all, l_all, w[CT2_SDPA_SG];
+    ct2_sdpa_merge(tg_m, tg_l, m_all, l_all, w);
     const float inv_l = 1.0f / l_all;
     for (uint i = 0u; i < dims_per_lane; ++i) {
       const uint j = simd_lane + 32u * i;
       if (j < depth) {
         float o = 0.0f;
         for (uint g = 0u; g < CT2_SDPA_SG; ++g)
-          o += tg_acc[g * CT2_SDPA_MAX_D + j] * exp(tg_m[g] - m_all);
+          o += tg_acc[g * CT2_SDPA_MAX_D + j] * w[g];
         out_row[j] = T(o * inv_l);
       }
     }
@@ -323,6 +363,182 @@ kernel void ct2_sdpa_half(device const half* q       [[buffer(0)]],
   threadgroup float tg_acc[CT2_SDPA_SG * CT2_SDPA_MAX_D];
   ct2_sdpa_impl<half>(q, k, v, out, lengths, num_keys, kv_stride, depth, rows_per_bh, scale,
                       has_lengths, row, simd_lane, simd_group, tg_m, tg_l, tg_acc);
+}
+
+// ---- Split-K fused SDPA (flash-decoding) ----  the single-pass kernel above launches one
+// threadgroup per score row, so a few rows over a long key axis (Whisper cross-attention:
+// 100 rows x 1,500 keys) leave most of the GPU idle. Here the key axis is cut into
+// num_splits chunks of `chunk` keys and the grid is (num_splits, num_rows) threadgroups:
+// threadgroup (s, row) runs the same online-softmax scan over keys
+// [s*chunk, min((s+1)*chunk, len)) and writes its UNNORMALIZED float partial — running
+// max m, denominator l, weighted-V accumulator — to
+// partials[(row*num_splits + s) * (depth + 2)] = {m, l, acc[depth]}. A second dispatch in
+// the same encoder (ct2_sdpa_combine_*) merges the partials per row with the same
+// log-sum-exp rule the SIMD-groups use. A split that starts at or past the row's length
+// (including every split of a len == 0 row) writes the empty partial {-INFINITY, 0, 0...}.
+template <typename T>
+inline void ct2_sdpa_split_impl(device const T* q_buf,
+                                device const T* k_buf,
+                                device const T* v_buf,
+                                device float* partials,
+                                device const int* lengths,
+                                uint num_keys, uint kv_stride, uint depth, uint rows_per_bh,
+                                float scale, uint has_lengths, uint num_splits, uint chunk,
+                                uint row, uint split, uint simd_lane, uint simd_group,
+                                threadgroup float* tg_m,
+                                threadgroup float* tg_l,
+                                threadgroup float* tg_acc) {
+  const uint bh = row / rows_per_bh;
+  device const T* q_row = q_buf + (ulong)row * depth;
+  device const T* k_base = k_buf + (ulong)bh * kv_stride;
+  device const T* v_base = v_buf + (ulong)bh * kv_stride;
+  device float* part = partials + ((ulong)row * num_splits + split) * (depth + 2u);
+
+  const uint len = ct2_sdpa_row_len(lengths, has_lengths, num_keys, row);
+  const uint begin = split * chunk;
+  const uint end = min(begin + chunk, len);
+
+  if (begin >= len) {  // uniform across the threadgroup
+    if (simd_group == 0u && simd_lane == 0u) {
+      part[0] = -INFINITY;
+      part[1] = 0.0f;
+    }
+    for (uint j = simd_group * 32u + simd_lane; j < depth; j += CT2_SDPA_SG * 32u)
+      part[2u + j] = 0.0f;
+    return;
+  }
+
+  const uint dims_per_lane = (depth + 31u) / 32u;
+  float m = -INFINITY;
+  float l_sum = 0.0f;
+  float acc[CT2_SDPA_MAX_D / 32u];
+  for (uint i = 0u; i < dims_per_lane; ++i)
+    acc[i] = 0.0f;
+
+  ct2_sdpa_scan<T>(q_row, k_base, v_base, begin, end, depth, scale,
+                   simd_lane, simd_group, dims_per_lane, m, l_sum, acc);
+
+  // begin < len guarantees group 0 saw key `begin`, so the chunk max is finite.
+  ct2_sdpa_publish(m, l_sum, acc, simd_lane, simd_group, dims_per_lane, tg_m, tg_l, tg_acc);
+
+  if (simd_group == 0u) {
+    float m_all, l_all, w[CT2_SDPA_SG];
+    ct2_sdpa_merge(tg_m, tg_l, m_all, l_all, w);
+    if (simd_lane == 0u) {
+      part[0] = m_all;
+      part[1] = l_all;
+    }
+    for (uint i = 0u; i < dims_per_lane; ++i) {
+      const uint j = simd_lane + 32u * i;
+      if (j < depth) {
+        float o = 0.0f;
+        for (uint g = 0u; g < CT2_SDPA_SG; ++g)
+          o += tg_acc[g * CT2_SDPA_MAX_D + j] * w[g];
+        part[2u + j] = o;
+      }
+    }
+  }
+}
+
+kernel void ct2_sdpa_split_float(device const float* q      [[buffer(0)]],
+                                 device const float* k      [[buffer(1)]],
+                                 device const float* v      [[buffer(2)]],
+                                 device float* partials     [[buffer(3)]],
+                                 device const int* lengths  [[buffer(4)]],
+                                 constant uint& num_keys     [[buffer(5)]],
+                                 constant uint& depth        [[buffer(6)]],
+                                 constant uint& rows_per_bh  [[buffer(7)]],
+                                 constant float& scale       [[buffer(8)]],
+                                 constant uint& has_lengths  [[buffer(9)]],
+                                 constant uint& kv_stride    [[buffer(10)]],
+                                 constant uint& num_splits   [[buffer(11)]],
+                                 constant uint& chunk        [[buffer(12)]],
+                                 uint2 tg [[threadgroup_position_in_grid]],
+                                 uint simd_lane [[thread_index_in_simdgroup]],
+                                 uint simd_group [[simdgroup_index_in_threadgroup]]) {
+  threadgroup float tg_m[CT2_SDPA_SG];
+  threadgroup float tg_l[CT2_SDPA_SG];
+  threadgroup float tg_acc[CT2_SDPA_SG * CT2_SDPA_MAX_D];
+  ct2_sdpa_split_impl<float>(q, k, v, partials, lengths, num_keys, kv_stride, depth,
+                             rows_per_bh, scale, has_lengths, num_splits, chunk,
+                             tg.y, tg.x, simd_lane, simd_group, tg_m, tg_l, tg_acc);
+}
+
+kernel void ct2_sdpa_split_half(device const half* q       [[buffer(0)]],
+                                device const half* k       [[buffer(1)]],
+                                device const half* v       [[buffer(2)]],
+                                device float* partials     [[buffer(3)]],
+                                device const int* lengths  [[buffer(4)]],
+                                constant uint& num_keys     [[buffer(5)]],
+                                constant uint& depth        [[buffer(6)]],
+                                constant uint& rows_per_bh  [[buffer(7)]],
+                                constant float& scale       [[buffer(8)]],
+                                constant uint& has_lengths  [[buffer(9)]],
+                                constant uint& kv_stride    [[buffer(10)]],
+                                constant uint& num_splits   [[buffer(11)]],
+                                constant uint& chunk        [[buffer(12)]],
+                                uint2 tg [[threadgroup_position_in_grid]],
+                                uint simd_lane [[thread_index_in_simdgroup]],
+                                uint simd_group [[simdgroup_index_in_threadgroup]]) {
+  threadgroup float tg_m[CT2_SDPA_SG];
+  threadgroup float tg_l[CT2_SDPA_SG];
+  threadgroup float tg_acc[CT2_SDPA_SG * CT2_SDPA_MAX_D];
+  ct2_sdpa_split_impl<half>(q, k, v, partials, lengths, num_keys, kv_stride, depth,
+                            rows_per_bh, scale, has_lengths, num_splits, chunk,
+                            tg.y, tg.x, simd_lane, simd_group, tg_m, tg_l, tg_acc);
+}
+
+// Combine pass: one thread per output element (grid = depth x num_rows). Reads the row's
+// num_splits partials and applies M = max m_s, L = sum l_s*exp(m_s - M),
+// out = sum acc_s*exp(m_s - M) / L. len == 0 rows produce exact zeros (SoftMax contract);
+// for len > 0 split 0 is never empty, so M is finite and empty splits weigh
+// exp(-INFINITY - M) == 0 against their zeroed accumulators.
+template <typename T>
+inline void ct2_sdpa_combine_impl(device const float* partials,
+                                  device T* out,
+                                  device const int* lengths,
+                                  uint depth, uint num_splits, uint has_lengths,
+                                  uint j, uint row) {
+  device T* o_ptr = out + (ulong)row * depth + j;
+  if (ct2_sdpa_row_len(lengths, has_lengths, 1u, row) == 0u) {
+    *o_ptr = T(0);
+    return;
+  }
+  const uint stride = depth + 2u;
+  device const float* part = partials + (ulong)row * num_splits * stride;
+  float m_all = -INFINITY;
+  for (uint s = 0u; s < num_splits; ++s)
+    m_all = max(m_all, part[s * stride]);
+  float l_all = 0.0f;
+  float o = 0.0f;
+  for (uint s = 0u; s < num_splits; ++s) {
+    const float w = exp(part[s * stride] - m_all);
+    l_all += part[s * stride + 1u] * w;
+    o += part[s * stride + 2u + j] * w;
+  }
+  *o_ptr = T(o * (1.0f / l_all));
+}
+
+kernel void ct2_sdpa_combine_float(device const float* partials [[buffer(0)]],
+                                   device float* out            [[buffer(1)]],
+                                   device const int* lengths    [[buffer(2)]],
+                                   constant uint& depth          [[buffer(3)]],
+                                   constant uint& num_splits     [[buffer(4)]],
+                                   constant uint& has_lengths    [[buffer(5)]],
+                                   uint2 gid [[thread_position_in_grid]]) {
+  ct2_sdpa_combine_impl<float>(partials, out, lengths, depth, num_splits, has_lengths,
+                               gid.x, gid.y);
+}
+
+kernel void ct2_sdpa_combine_half(device const float* partials [[buffer(0)]],
+                                  device half* out             [[buffer(1)]],
+                                  device const int* lengths    [[buffer(2)]],
+                                  constant uint& depth          [[buffer(3)]],
+                                  constant uint& num_splits     [[buffer(4)]],
+                                  constant uint& has_lengths    [[buffer(5)]],
+                                  uint2 gid [[thread_position_in_grid]]) {
+  ct2_sdpa_combine_impl<half>(partials, out, lengths, depth, num_splits, has_lengths,
+                              gid.x, gid.y);
 }
 
 // ---- Capacity-strided KV cache append ----  the cache layout is

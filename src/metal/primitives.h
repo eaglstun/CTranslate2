@@ -85,6 +85,24 @@ namespace ctranslate2 {
               dim_t num_rows, dim_t rows_per_bh, dim_t num_keys, dim_t kv_stride,
               dim_t depth, float scale);
 
+    // Split-K (flash-decoding) form of sdpa(): the key axis is cut into num_splits chunks,
+    // each (row, chunk) gets its own threadgroup, and a combine dispatch in the same
+    // command buffer merges the per-chunk partials with a log-sum-exp. Same contract and
+    // result as sdpa() up to float summation order; it exists because one threadgroup per
+    // row leaves the GPU mostly idle when rows are few and keys are many (Whisper
+    // cross-attention). sdpa() calls sdpa_num_splits() to choose; sdpa_split() takes the
+    // count explicitly (tests and benchmarks; clamped to [1, num_keys], 1 = single pass).
+    // CT2_NO_METAL_SDPA_SPLIT=1 makes sdpa_num_splits() always return 1.
+    dim_t sdpa_num_splits(dim_t num_rows, dim_t num_keys);
+    void sdpa_split(const float* queries, const float* keys, const float* values,
+                    const int32_t* lengths, float* output,
+                    dim_t num_rows, dim_t rows_per_bh, dim_t num_keys, dim_t kv_stride,
+                    dim_t depth, float scale, dim_t num_splits);
+    void sdpa_split(const float16_t* queries, const float16_t* keys, const float16_t* values,
+                    const int32_t* lengths, float16_t* output,
+                    dim_t num_rows, dim_t rows_per_bh, dim_t num_keys, dim_t kv_stride,
+                    dim_t depth, float scale, dim_t num_splits);
+
     // Append K/V rows into a capacity-strided cache. The in-place form writes only the
     // new rows. The grow form copies the logical prefix from an old stride and appends the
     // new rows into a newly allocated cache in one dispatch. Sizes are in bytes so the
