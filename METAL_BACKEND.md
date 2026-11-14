@@ -23,7 +23,8 @@ memory, behind a full regression net (the existing op/layer/storage suites all r
 2.6×, int8 at fp16 parity) and now autoregressive decode too (Qwen bs=1 edges CPU,
 bs=8 ~2.8× over CPU). Whisper beam-search decode joined the win column in M17
 (2026-07-17): large-v3 fp16 at 6.4× realtime, 4.3× faster than CPU, transcript
-byte-identical.
+byte-identical. Split-K fused attention (M20, 2026-11-13) took that to 9.0× realtime
+(3.35 s for the 30 s clip) with the same transcript.
 
 ## Why this is tractable
 
@@ -481,6 +482,46 @@ append/grow parity passes in fp32/fp16, and real-Qwen greedy output remained 24/
 identical to CPU in both precisions. The fusion is enabled by default;
 `CT2_NO_METAL_QKV_FUSION=1` restores the separate path for A/B and diagnosis.
 
+### ✅ M20 — split-K fused SDPA: few-row, long-key attention at full GPU width (2026-11-13)
+
+The M16 kernel launches one threadgroup per score row. Whisper large-v3 cross-attention
+has only 100 rows (5 beams × 20 heads) over 1,500 keys, so each call ran at low occupancy:
+about 435 µs, 1.9 s of GPU time per 30 s clip, the largest single reason upstream's
+`Device::MPS` backend was faster on Whisper. The split-K (flash-decoding) path cuts the key
+axis into chunks and gives each (chunk, row) its own threadgroup:
+
+- `ct2_sdpa_split_{float,half}` runs the same online-softmax scan as the single-pass
+  kernel over one chunk and writes an unnormalized float partial `{m, l, acc[depth]}`.
+- `ct2_sdpa_combine_{float,half}` merges a row's partials with a log-sum-exp
+  (`M = max m`, `L = Σ l·exp(m − M)`, `out = Σ acc·exp(m − M) / L`).
+- Both dispatches share **one compute encoder in one command buffer**. The scan, publish
+  and merge steps are shared helpers, so the two kernels cannot drift apart.
+
+`metal::sdpa` chooses the split count (`sdpa_num_splits`): as many splits as keep
+`rows × splits` within about one wave of 320 threadgroups, with at least 128 keys per
+split, otherwise the single-pass kernel. Measured on an M4 Max (40-core GPU), per-call time
+is flat up to roughly 350 threadgroups of 128 threads and degrades past it, so the count
+rounds down. Whisper beam 5 gets 3 splits; Qwen stays single-pass until its context
+passes 256 keys. The partials scratch is a thread-local Metal buffer that grows geometrically,
+so there is no per-call allocation. `CT2_NO_METAL_SDPA_SPLIT=1` forces the single-pass
+kernel; `CT2_METAL_SDPA_SPLIT_TGS` and `CT2_METAL_SDPA_SPLIT_MIN_CHUNK` override the two
+thresholds for sweeps on other GPUs (the defaults were only measured on the M4 Max).
+
+Result (same-binary alternating A/B, 5 process pairs × 5 passes, clip30, beam 5): Whisper
+large-v3 fp16 **4.61 s → 3.35 s** (1.38×, 9.0× realtime), fp32 **5.69 s → 4.43 s**
+(1.28×); transcript byte-identical (`be969f62b3`) in every run. Cross-attention `sdpa` GPU
+time fell from 432 µs to 155 µs per call in fp16 (1.86 s → 0.67 s per pass). Qwen2.5-0.5B
+at the usual 128 generated tokens never reaches the split path and is unchanged within
+spread at bs=1 and bs=8 in fp16 and fp32, with identical token hashes. At 512 generated
+tokens the split path engages and decode is 8–15% faster in all four configurations; fp32
+tokens are identical to the single-pass kernel and to the CPU. In fp16 the two kernels can
+part ways at a near-tie (first seen at step 292, top-2 log-prob gap 0.0044), because a
+different split count is a different float summation order. Tests:
+`SdpaSplitParityWithReference`, `SdpaSplitMaskedAndCapacityStrideParity`,
+`SdpaSplitRouting`; `*Metal*:*METAL*` 111 passed / 2 skipped. Tables, the threshold sweep
+and the per-kernel breakdown are in `METAL_BENCHMARKS.md` and
+`docs/metal/plan-sdpa-split-k.md`.
+
 ## What runs where today
 
 | Operation                                                                  | Metal execution                                                                                                                             |
@@ -502,7 +543,7 @@ identical to CPU in both precisions. The fusion is enabled by default;
 | GEMM int8×int8→int32                                                       | **GPU (native)** — exact int32 accumulation; SIMD-group GEMV at m ≤ 8, Metal-4 MPP `matmul2d` at m > 8 (macOS 26+), hand-tiled MSL fallback |
 | TopK / TopPMask (float32 and float16)                                      | **GPU** — custom kernels, bit-parity with CPU (size caps fall back to CPU reference)                                                        |
 | GumbelMax / Multinomial sampling (float32 and float16)                     | **GPU** — host-seeded kernels (`set_random_seed`-reproducible); Multinomial at sample_size 1                                                |
-| Decode attention: q·K^T → softmax → ·V (float32 and float16)               | **GPU** — fused single-launch SDPA kernel at q_len ≤ 8 (greedy/beam decode, short prefill); larger q_len uses MPS GEMM + softmax kernel     |
+| Decode attention: q·K^T → softmax → ·V (float32 and float16)               | **GPU** — fused SDPA kernel at q_len ≤ 8 (split-K for few rows × many keys; `CT2_NO_METAL_SDPA_SPLIT=1` disables), else MPS GEMM + softmax  |
 | Decoder KV-cache append (fused-SDPA shapes)                                | **GPU** — capacity-strided in-place K/V append; geometric grow at capacity boundaries (`CT2_NO_METAL_KV_CACHE=1` disables)                  |
 | One-token QKV post-processing (fused-SDPA shapes)                          | **GPU** — fused Split + Q/K RoPE + capacity-cache append/grow (`CT2_NO_METAL_QKV_FUSION=1` disables)                                        |
 | Everything else (general-axis LayerNorm/BiasAdd, conv, int Mul, …)         | CPU reference over unified memory; selected fp16 callers such as Conv1D use explicit float32 compatibility islands                          |
