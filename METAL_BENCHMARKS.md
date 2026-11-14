@@ -744,6 +744,155 @@ clean — vs 0.41× RT at bring-up (2026-06-09), an ~8.6× end-to-end improvemen
   encode floor priced at ~30ms/token CPU-side against ~250ms of GPU-visible work that
   turned out to be the gather. Re-profile before building any of them.
 
+## Split-K fused SDPA: Whisper cross-attention at full GPU width (2026-11-13)
+
+Apple M4 Max (40-core GPU), 64 GB, macOS 27.0, Release build with Accelerate,
+`OPENMP_RUNTIME=NONE`, `ENABLE_PROFILING=OFF`. Every end-to-end figure is a same-binary
+alternating A/B through `CT2_NO_METAL_SDPA_SPLIT=1` (off) against the default (split):
+fresh process per arm, arm order reversed on odd rounds. `mediaanalysisd` and
+`corespotlightd` were bursting to 100–160% CPU all afternoon, so the harness started a
+run only on a quiet machine and discarded and repeated any run that ended with another
+process above 20% of a core (14 discarded during the main matrix). Design and the M20
+summary are in `METAL_BACKEND.md`; the plan and full results are in
+`docs/metal/plan-sdpa-split-k.md`.
+
+**Kernel-level sweep** (`DISABLED_BenchmarkSdpaSplit`, fp16, d_head 64, µs per call,
+median of 5 bursts of 200 launches with one synchronize per burst; `s1` is the single-pass
+kernel):
+
+| Shape (rows × keys)                  | s1    | s2    | s3        | s4    | s8    | s16      | s24      | s32   | Heuristic picks |
+| ------------------------------------ | ----- | ----- | --------- | ----- | ----- | -------- | -------- | ----- | --------------- |
+| Whisper-L cross, beam 5: 100 × 1500  | 446.5 | 241.5 | **169.2** | 224.3 | 183.9 | 192.2    | 177.5    | 173.0 | 3               |
+| Whisper-L cross, greedy: 20 × 1500   | 343.2 | 174.9 | 119.0     | 91.5  | 50.8  | **33.7** | 43.1     | 44.2  | 11              |
+| Whisper-L cross, batch 4: 400 × 1500 | 944.9 | 741.5 | 805.9     | 818.4 | 722.4 | 658.5    | 649.2    | 653.1 | 1               |
+| Qwen bs=1: 14 × 1024                 | 231.4 | 121.5 | 83.3      | 64.3  | 37.1  | 25.9     | **25.3** | 33.3  | 8               |
+| Qwen bs=1: 14 × 4096                 | 938.6 | 475.1 | 321.8     | 244.3 | 129.7 | 73.6     | **57.1** | 78.2  | 22              |
+| Qwen bs=8: 112 × 1024                | 268.8 | 145.3 | **106.5** | 140.5 | 131.6 | 116.5    | 115.1    | 114.1 | 2               |
+| Qwen bs=1: 14 × 64                   | 19.2  | 14.5  | 12.9      | 11.4  | 11.0  | —        | —        | —     | 1               |
+| NLLB cross, bs=8 beam 5: 640 × 32    | 21.7  | 26.4  | 27.1      | 27.2  | —     | —        | —        | —     | 1               |
+
+fp32 follows the same shape (Whisper beam 5: 474.0 → 197.4 at 3 splits). The best split
+count always lands where `rows × splits` is about 300–350: the single-pass kernel costs a
+flat 69–72 µs from 256 to 352 rows (256 keys, fp16) and then climbs (368 rows 89 µs, 400
+rows 120 µs, 512 rows 159 µs). That is one wave of 128-thread threadgroups on this GPU, so
+the heuristic rounds `320 / rows` down. Past the wave, extra splits cost at most about 15%
+against the best count and still beat single-pass at long keys; with short keys and many
+rows (640 × 32) splitting loses, and the heuristic never splits there.
+
+**Threshold sweep, end to end** (Whisper large-v3 fp16, clip30, beam 5, seconds per pass;
+2 alternating rounds of 1 warmup + 3 passes under the quiet-machine gate; the two process
+medians are shown, and every pass was within 0.02 s of its process median):
+
+| Setting                                | Splits for cross-attn     | Round 1 | Round 2 |
+| -------------------------------------- | ------------------------- | ------- | ------- |
+| off (`CT2_NO_METAL_SDPA_SPLIT=1`)      | 1                         | 4.60    | 4.65    |
+| `CT2_METAL_SDPA_SPLIT_TGS=200`         | 2                         | 3.67    | 3.68    |
+| **default: target 320, min chunk 128** | 3                         | 3.37    | 3.38    |
+| `CT2_METAL_SDPA_SPLIT_TGS=640`         | 6                         | 3.38    | 3.38    |
+| `CT2_METAL_SDPA_SPLIT_TGS=1280`        | 11                        | 3.41    | 3.42    |
+| `CT2_METAL_SDPA_SPLIT_MIN_CHUNK=32`    | 3, self-attention up to 3 | 3.34    | 3.34    |
+| `CT2_METAL_SDPA_SPLIT_MIN_CHUNK=512`   | 2                         | 3.69    | 3.68    |
+
+Three splits is the knee: two leaves 0.3 s on the table, six to eleven are flat to
+slightly worse. An earlier ungated sweep also ran a 352-threadgroup target (3 splits,
+3.34–3.35 s) and a 256-key minimum chunk (3 splits, 3.37 s). Letting self-attention split
+as well (minimum chunk 32) measured 0.03–0.04 s (1%) faster in both rounds. That is
+repeatable here but small, and it would also route short-context LLM decode to the split
+path, so the default stays at 128.
+
+**End-to-end A/B** (median of per-process medians; range is over process medians):
+
+| Workload                      | off (single-pass)    | split (default)        | Change    | Output hash       |
+| ----------------------------- | -------------------- | ---------------------- | --------- | ----------------- |
+| Whisper large-v3 fp16, s/pass | 4.61 (4.58–4.62)     | **3.35** (3.34–3.88 †) | **1.38×** | `be969f62b3` both |
+| Whisper large-v3 fp32, s/pass | 5.69 (5.69–5.77)     | **4.43** (4.37–4.56)   | **1.28×** | `be969f62b3` both |
+| Qwen2.5-0.5B fp16 bs=1, tok/s | 177.2 (176.5–177.6)  | 177.2 (176.2–178.8)    | none      | `c1444f2d70` both |
+| Qwen2.5-0.5B fp16 bs=8, tok/s | 1211.6 (1204–1316 ‡) | 1206.1 (1201–1320 ‡)   | none      | `f653792625` both |
+| Qwen2.5-0.5B fp32 bs=1, tok/s | 150.1 (149.6–150.3)  | 150.1 (149.8–150.2)    | none      | `c1444f2d70` both |
+| Qwen2.5-0.5B fp32 bs=8, tok/s | 858.6 (857.5–859.2)  | 856.2 (856.1–857.0)    | −0.3%     | `f653792625` both |
+| OPUS-MT fp16 bs=1, tok/s      | 192.2 (190.7–198.8)  | 194.4 (194.3–194.9)    | none      | `1255ca4303` both |
+| OPUS-MT fp16 bs=8, tok/s      | 849.6 (820.8–863.6)  | 844.6 (832.0–866.1)    | none      | `f1ed445777` both |
+| NLLB-600M fp16 bs=1, tok/s    | 86.2 (86.0–86.6)     | 86.3 (85.4–86.6)       | none      | `8fba0a74d0` both |
+| NLLB-600M fp16 bs=8, tok/s    | 256.4 (255.4–259.1)  | 256.1 (255.9–258.0)    | none      | `cece2ba05f` both |
+
+Whisper: 5 process pairs × (1 warmup + 5 passes). Qwen (128 greedy tokens), OPUS-MT and
+NLLB (beam 5): 3 process pairs × (3 warmups + 7 passes).
+
+† Four of the five split processes had medians of 3.34–3.35 s. The fifth (3.88 s, passes
+3.85–4.01) ran in the same round as the slowest fp32 split process; the gate only checks
+load at the start and end of a run, so a mid-run burst is the likely cause, not verified.
+Its slowest pass was still faster than the fastest off pass (4.56 s).
+
+‡ Qwen fp16 bs=8 is bimodal on this rig in **both** arms (about 1,204 or about 1,318
+tok/s per process), so the range is rig behaviour, not an effect of the change.
+
+**Long-context LLM decode** (Qwen2.5-0.5B, 44-token prompt, **512** forced greedy tokens so
+self-attention reaches 556 keys and the split path engages from 256 keys on; 3 process
+pairs × (2 warmups + 5 passes), tok/s, median of process medians, range over them):
+
+| Config    | off (single-pass)      | split (default)          | Change | Tokens                           |
+| --------- | ---------------------- | ------------------------ | ------ | -------------------------------- |
+| fp32 bs=1 | 127.8 (127.8–128.0)    | **146.5** (146.3–146.6)  | +14.6% | identical; both equal CPU fp32   |
+| fp32 bs=8 | 788.4 (555.6 §–792.2)  | **855.3** (803.8–858.5)  | +8.5%  | identical; both equal CPU fp32   |
+| fp16 bs=1 | 164.6 (159.0–170.6)    | **181.1** (181.0–182.0)  | +10.0% | differ from step 292 (see below) |
+| fp16 bs=8 | 1200.0 (1196.0–1207.5) | **1321.5** (1317–1387 ¶) | +10.1% | differ from step 292 (see below) |
+
+§ One off process read 555.6 (passes 527–576) with nothing flagged at its end; the other
+two were 788.4 and 792.2. ¶ The 1,387 process was accepted on its fifth attempt with
+`corespotlightd` busy at its end; the other two were 1,317 and 1,322.
+
+**fp16 token parity at 512 tokens.** In fp32 the single-pass kernel, the split kernel and
+the CPU produce the same 512 tokens at bs=1 and bs=8. In fp16 the two arms part ways, and
+a CPU fp32 arbiter (`forward_batch` over the shared prefix) shows both are near-ties
+decided by float summation order, not errors:
+
+- **Single-pass fp16** leaves the fp32 sequence at generated step 292 (336 keys): fp32
+  log-probs −2.3424 vs −2.3468 for the two candidates, a gap of 0.0044.
+- **Split fp16, bs=1** (2 to 4 splits as the context grows) matches CPU fp32 for all 512
+  tokens.
+- **Split fp16, bs=8** (2 splits) matches fp32 until step 422 (466 keys), where the top
+  fp32 token is the EOS that `min_length` suppresses and the next two candidates are
+  0.0014 apart (−4.5361 vs −4.5375).
+
+So the 128-token gate hashes are unchanged, and at 512 tokens the split path stays on the
+fp32 sequence at least as long as the single-pass path does in every case measured. A
+different split count is a different summation order, though, so fp16 greedy output past
+a near-tie is not guaranteed to match between the two kernels.
+
+**Per-kernel GPU time** (scratch-only instrumented build, summed
+`GPUEndTime − GPUStartTime` per command buffer; one process per cell, 1 warmup + 4 passes,
+quiet machine; 4,320 cross-attention and 4,320 self-attention `sdpa` launches per pass):
+
+| Per pass                               | fp16 off         | fp16 split         | fp32 off         | fp32 split         |
+| -------------------------------------- | ---------------- | ------------------ | ---------------- | ------------------ |
+| Cross-attention `sdpa` (1,500 keys)    | 432 µs, 1,864 ms | **155 µs, 668 ms** | 445 µs, 1,920 ms | **160 µs, 691 ms** |
+| Self-attention `sdpa` (short keys)     | 25.7 µs, 111 ms  | 25.7 µs, 111 ms    | 26.5 µs, 115 ms  | 26.4 µs, 114 ms    |
+| All kernels, GPU busy                  | 3.82 s           | 2.62 s             | 4.72 s           | 3.49 s             |
+| CPU blocked in `[queue commandBuffer]` | 2.06 s           | 0.88 s             | 2.74 s           | 1.60 s             |
+| Wall time (instrumented)               | 4.65 s           | 3.38 s             | 5.79 s           | 4.36 s             |
+
+**Read:**
+
+- Cross-attention `sdpa` dropped 2.8× per call and 1.2 s of GPU time per pass in both
+  precisions, and wall time followed (−1.26 s fp16 and fp32).
+- Against upstream `Device::MPS`, re-measured the same afternoon without the quiet-machine
+  gate (fp16: two processes of 5 passes, 3.69 s and 3.74 s; fp32: one process, 4.40 s; a
+  background daemon was busy by the end of each): Metal fp16 at 3.35 s is now about 10%
+  ahead, and Metal fp32 at 4.43 s is level. The morning's MPS figures were 3.69–3.74 s
+  and 4.47 s. A third MPS fp32 process read 6.29 s straight after a Spotlight burst and
+  was set aside.
+- Qwen at 128 tokens, OPUS-MT and NLLB never reach the split path (fewer than 256 keys
+  per row, or more than 160 rows), so "no change" there is by construction; the A/B
+  confirms the refactored single-pass kernel is not slower and produces the same tokens.
+  Once Qwen's context passes 256 keys the split path engages and is 8–15% faster end to
+  end.
+- The split path is more exposed to CPU contention than the single-pass path: under a
+  `mediaanalysisd` burst the split arm lost 0.3–0.5 s per pass while the off arm did not
+  move. A likely reason, not verified: the off arm spends 2.1 s per pass blocked on a full
+  command queue, slack that hides a slower CPU, and the split arm has only 0.9 s of it.
+- After the change the GPU is busy for 2.62 s of a 3.38 s pass. The remaining idle time
+  is the one-command-buffer-per-op cost that the plan lists under "Not in this plan".
+
 ## Caveats
 
 - Tiny model + tiny ops is the worst case; a real LLM (large hidden size, big GEMMs) sits
