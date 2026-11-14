@@ -5,6 +5,7 @@
 
 #import <Foundation/Foundation.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -20,6 +21,57 @@
 
 namespace ctranslate2 {
   namespace metal {
+
+    // Submission tuning, read once from the environment (see the "Submission" block below).
+    static const unsigned long kDefaultBatchOps = 16;
+    static const unsigned long kDefaultMaxInflight = 0;
+
+    static unsigned long env_ulong(const char* name, unsigned long default_value) {
+      const char* env = std::getenv(name);
+      if (!env || !*env)
+        return default_value;
+      char* end = nullptr;
+      const unsigned long value = std::strtoul(env, &end, 10);
+      return (end == env || *end != '\0') ? default_value : value;
+    }
+
+    static bool env_flag(const char* name) {
+      const char* env = std::getenv(name);
+      return env && *env && env[0] != '0';
+    }
+
+    static bool stats_enabled() {
+      static const bool enabled = env_flag("CT2_METAL_STATS");
+      return enabled;
+    }
+
+    // Ops per command buffer. 1 (or CT2_NO_METAL_CB_BATCH=1) is the per-op commit path.
+    static unsigned long batch_ops() {
+      static const unsigned long value = env_flag("CT2_NO_METAL_CB_BATCH")
+        ? 1ul
+        : std::max(1ul, env_ulong("CT2_METAL_CB_OPS", kDefaultBatchOps));
+      return value;
+    }
+
+    static bool batching_enabled() {
+      return batch_ops() > 1;
+    }
+
+    // Maximum number of uncompleted command buffers (the open one included) before the
+    // CPU blocks waiting for the GPU. 0 keeps the queue's own default (64).
+    static unsigned long max_inflight() {
+      static const unsigned long value = env_flag("CT2_NO_METAL_CB_BATCH")
+        ? 0ul
+        : env_ulong("CT2_METAL_CB_MAX_INFLIGHT", kDefaultMaxInflight);
+      return value;
+    }
+
+    // Diagnostic: CT2_METAL_CB_SHARE_ENCODER=0 gives each op its own compute encoder
+    // inside the shared command buffer.
+    static bool share_encoder() {
+      static const bool value = env_ulong("CT2_METAL_CB_SHARE_ENCODER", 1) != 0;
+      return value;
+    }
 
     namespace {
 
@@ -116,7 +168,10 @@ namespace ctranslate2 {
           if (!_device)
             throw std::runtime_error("Metal: no default device available");
 
-          _queue = [_device newCommandQueue];
+          const unsigned long inflight = max_inflight();
+          _queue = inflight > 0
+            ? [_device newCommandQueueWithMaxCommandBufferCount:inflight]
+            : [_device newCommandQueue];
           if (!_queue)
             throw std::runtime_error("Metal: failed to create command queue");
         }
@@ -163,86 +218,219 @@ namespace ctranslate2 {
       return has_gpu() ? 1 : 0;
     }
 
-    // Asynchronous submission. Each Metal op encodes its own command buffer and commits it
-    // WITHOUT waiting — so consecutive GPU ops pipeline instead of forcing a CPU<->GPU
-    // round-trip per op. The single command queue executes committed buffers in FIFO order,
-    // so the most-recently-committed buffer completing implies all prior work is done.
-    // flush() waits on that buffer; it is called before any CPU access to Metal memory
-    // (CPU-reference ops via METAL_DEVICE_CASE, synchronize, host copies). A GLOBAL (not
-    // thread-local) last-committed handle is required because ops may be issued from worker
-    // threads (e.g. Conv1D's parallel_for) while a different thread performs the read.
+    // ---------------------------------------------------------------------------------
+    // Submission: bounded command-buffer batching
+    //
+    // Every Metal op is a CommandScope (device.h). By default consecutive ops are appended
+    // to one process-wide open command buffer, which is committed WITHOUT waiting as soon
+    // as it holds batch_ops() ops; flush() commits whatever is open and waits. Compared to
+    // one command buffer per op this removes most of the fixed per-buffer cost (CPU:
+    // create + commit; GPU: a few microseconds of idle between buffers) while the bound
+    // keeps the CPU/GPU overlap: the GPU starts on the first batch_ops() ops while the CPU
+    // encodes the next ones. Committing once per decode step / forward pass instead was
+    // tried and reverted in 2026-06: it left the GPU idle until the end.
+    //
+    // Invariants everything else relies on (all enforced under g_commit_mutex):
+    //  1. Issue order == encode order == commit order == GPU execution order. A scope
+    //     holds the mutex from construction to commit(), so ops from different threads
+    //     never interleave inside an op, land in the open buffer in the order the scopes
+    //     were entered, and buffers are committed to the single FIFO queue in the order
+    //     they were filled. There is exactly one open buffer for the whole process — not
+    //     one per thread — so an op issued on a worker thread (Conv1D's parallel_for
+    //     chunks, a second replica) can never be left behind in a batch that the reading
+    //     thread does not know about, and can never run before an earlier op of another
+    //     thread whose output it reads.
+    //  2. g_last_committed is the most recently committed buffer, so "it completed"
+    //     implies every earlier commit completed too.
+    //  3. flush() = commit the open buffer (if any) + wait for g_last_committed. After it
+    //     returns, every op whose scope was committed before the call has executed. It is
+    //     the single coherence point before host access to Metal memory (CPU-reference
+    //     ops via METAL_DEVICE_CASE, synchronize, host copies, sampling readback).
+    //
+    // CT2_NO_METAL_CB_BATCH=1 restores one command buffer per op (the scope then only
+    // takes the mutex for the commit itself, exactly as before batching).
+    // ---------------------------------------------------------------------------------
     static std::mutex g_commit_mutex;
-    static id<MTLCommandBuffer> g_last_committed = nil;
+    static id<MTLCommandBuffer> g_last_committed = nil;        // Retained.
+    static id<MTLCommandBuffer> g_open_buffer = nil;           // Retained, not committed.
+    static id<MTLComputeCommandEncoder> g_open_encoder = nil;  // Retained, encoding g_open_buffer.
+    static unsigned long g_open_ops = 0;
 
     // Dispatch statistics, dumped at exit when CT2_METAL_STATS=1. Counter increments are
     // a few ns against a ~10us command-buffer encode, so they stay unconditionally on.
     // A "stalled" flush found the last-committed buffer not yet completed — the CPU
     // actually blocked in waitUntilCompleted; the stall time is summed separately.
+    // The timed figures (acquire_wait, gpu_busy) need a clock read or a completion
+    // handler per command buffer and are only collected when stats are enabled.
     static std::atomic<uint64_t> g_stat_command_buffers{0};
+    static std::atomic<uint64_t> g_stat_ops{0};
     static std::atomic<uint64_t> g_stat_flushes{0};
     static std::atomic<uint64_t> g_stat_flushes_stalled{0};
+    static std::atomic<uint64_t> g_stat_flushes_partial{0};
     static std::atomic<uint64_t> g_stat_flush_wait_us{0};
+    static std::atomic<uint64_t> g_stat_acquire_wait_us{0};
+    static std::atomic<uint64_t> g_stat_gpu_busy_ns{0};
 
     static struct MetalStatsAtExit {
       MetalStatsAtExit() {
-        const char* env = std::getenv("CT2_METAL_STATS");
-        if (!env || !*env || env[0] == '0')
+        if (!stats_enabled())
           return;
         std::atexit([] {
           std::fprintf(stderr,
-                       "[metal-stats] command_buffers=%llu flushes=%llu stalled_flushes=%llu "
-                       "flush_wait_ms=%.1f\n",
+                       "[metal-stats] command_buffers=%llu ops=%llu flushes=%llu "
+                       "stalled_flushes=%llu partial_batch_flushes=%llu flush_wait_ms=%.1f "
+                       "acquire_wait_ms=%.1f gpu_busy_ms=%.1f batch_ops=%lu max_inflight=%lu\n",
                        (unsigned long long)g_stat_command_buffers.load(),
+                       (unsigned long long)g_stat_ops.load(),
                        (unsigned long long)g_stat_flushes.load(),
                        (unsigned long long)g_stat_flushes_stalled.load(),
-                       g_stat_flush_wait_us.load() / 1000.0);
+                       (unsigned long long)g_stat_flushes_partial.load(),
+                       g_stat_flush_wait_us.load() / 1000.0,
+                       g_stat_acquire_wait_us.load() / 1000.0,
+                       g_stat_gpu_busy_ns.load() / 1.0e6,
+                       batch_ops(),
+                       max_inflight());
         });
       }
     } g_metal_stats_at_exit;
+
+    // [queue commandBuffer] blocks while the queue already has its maximum number of
+    // uncompleted buffers: that is the backpressure that bounds in-flight work. The result
+    // is autoreleased; callers are inside a CommandScope's pool.
+    static id<MTLCommandBuffer> acquire_command_buffer() {
+      g_stat_command_buffers.fetch_add(1, std::memory_order_relaxed);
+      if (!stats_enabled())
+        return [get_command_queue() commandBuffer];
+      const auto start = std::chrono::steady_clock::now();
+      id<MTLCommandBuffer> command_buffer = [get_command_queue() commandBuffer];
+      const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - start);
+      g_stat_acquire_wait_us.fetch_add(elapsed.count(), std::memory_order_relaxed);
+      return command_buffer;
+    }
+
+    // Commits a retained command buffer and makes it g_last_committed (which takes over
+    // the caller's reference). Caller holds g_commit_mutex: the commit MUST happen inside
+    // the lock, or two threads could commit in one order and record in the other, leaving
+    // flush() waiting on a buffer that is not last in the queue.
+    static void commit_locked(id<MTLCommandBuffer> command_buffer) {
+      if (stats_enabled()) {
+        [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+          const double seconds = completed.GPUEndTime - completed.GPUStartTime;
+          if (seconds > 0)
+            g_stat_gpu_busy_ns.fetch_add(static_cast<uint64_t>(seconds * 1.0e9),
+                                         std::memory_order_relaxed);
+        }];
+      }
+      [command_buffer commit];
+      [g_last_committed release];
+      g_last_committed = command_buffer;
+    }
+
+    static void end_open_encoder_locked() {
+      if (g_open_encoder) {
+        [g_open_encoder endEncoding];
+        [g_open_encoder release];
+        g_open_encoder = nil;
+      }
+    }
+
+    // Commits the open batch, if any. Caller holds g_commit_mutex.
+    static bool commit_open_locked() {
+      if (!g_open_buffer)
+        return false;
+      end_open_encoder_locked();
+      commit_locked(g_open_buffer);
+      g_open_buffer = nil;
+      g_open_ops = 0;
+      return true;
+    }
 
     // Per-op autorelease pool. Command buffers ([queue commandBuffer]), compute encoders, and
     // MPSMatrixDescriptors are all autoreleased (+0). CTranslate2 issues ops from C++ worker
     // threads that have no run loop, so without an explicit pool these objects are never
     // drained — over a long op chain (e.g. Whisper's 730s transcribe) they accumulate as wired
-    // memory until the OS kills the process, while heap RSS stays flat. Each op is a flat
-    // new_command_buffer() -> encode -> commit_command_buffer() pair, so we push a thread-local
-    // pool in new_command_buffer() and drain it in commit_command_buffer(), bracketing exactly
-    // that op's autoreleased temporaries. The committed buffer is retained by g_last_committed,
-    // so it outlives the drain.
-    static thread_local NSAutoreleasePool* g_op_pool = nil;
-
-    id<MTLCommandBuffer> new_command_buffer() {
-      g_stat_command_buffers.fetch_add(1, std::memory_order_relaxed);
-      g_op_pool = [[NSAutoreleasePool alloc] init];
-      return [get_command_queue() commandBuffer];
+    // memory until the OS kills the process, while heap RSS stays flat. Each op is one
+    // CommandScope, which pushes a pool in its constructor and drains it in commit() (or
+    // its destructor), bracketing exactly that op's autoreleased temporaries on the thread
+    // that issued it. Objects that outlive the op (the open buffer and its encoder, the
+    // last-committed buffer) are explicitly retained, so they survive the drain — and can
+    // be ended/committed from another thread later.
+    CommandScope::CommandScope()
+      : _pool([[NSAutoreleasePool alloc] init])
+      , _own_buffer(nil)
+      , _own_encoder(nil)
+      , _locked(false)
+    {
+      if (!batching_enabled()) {
+        _own_buffer = acquire_command_buffer();
+        return;
+      }
+      g_commit_mutex.lock();
+      _locked = true;
+      if (!g_open_buffer)
+        g_open_buffer = [acquire_command_buffer() retain];
     }
 
-    void commit_command_buffer(id<MTLCommandBuffer> command_buffer) {
-      {
-        // The commit MUST happen inside the lock: flush()'s "waiting on the last-committed
-        // buffer implies all prior work is done" only holds if the queue's commit order
-        // matches the order of g_last_committed updates. With the commit outside the lock,
-        // two worker threads (e.g. Conv1D's grouped parallel_for) can commit in one order
-        // and record in the other, leaving flush() waiting on a buffer that is not last in
-        // the queue — the CPU then reads rows whose GPU write has not completed.
-        std::lock_guard<std::mutex> lock(g_commit_mutex);
-        [command_buffer commit];
-        [command_buffer retain];
-        [g_last_committed release];
-        g_last_committed = command_buffer;
+    id<MTLComputeCommandEncoder> CommandScope::compute_encoder() {
+      if (!batching_enabled()) {
+        if (!_own_encoder)
+          _own_encoder = [_own_buffer computeCommandEncoder];
+        return _own_encoder;
       }
-      // Drain this op's autoreleased temporaries (encoder, descriptors, the command buffer's
-      // own +0). The retain above keeps the committed buffer alive past the drain.
-      if (g_op_pool) {
-        [g_op_pool release];
-        g_op_pool = nil;
+      if (!g_open_encoder)
+        g_open_encoder = [[g_open_buffer computeCommandEncoder] retain];
+      return g_open_encoder;
+    }
+
+    id<MTLCommandBuffer> CommandScope::command_buffer() {
+      if (!batching_enabled())
+        return _own_buffer;
+      end_open_encoder_locked();
+      return g_open_buffer;
+    }
+
+    void CommandScope::commit() {
+      g_stat_ops.fetch_add(1, std::memory_order_relaxed);
+      if (!batching_enabled()) {
+        if (_own_encoder) {
+          [_own_encoder endEncoding];
+          _own_encoder = nil;
+        }
+        {
+          std::lock_guard<std::mutex> lock(g_commit_mutex);
+          commit_locked([_own_buffer retain]);
+        }
+        _own_buffer = nil;
+      } else {
+        if (!share_encoder())
+          end_open_encoder_locked();
+        if (++g_open_ops >= batch_ops())
+          commit_open_locked();
+        _locked = false;
+        g_commit_mutex.unlock();
       }
+      // Drain this op's autoreleased temporaries.
+      [static_cast<NSAutoreleasePool*>(_pool) release];
+      _pool = nullptr;
+    }
+
+    CommandScope::~CommandScope() {
+      // Only reached with work pending when encoding threw before commit().
+      if (_own_encoder)
+        [_own_encoder endEncoding];  // An encoder must be ended before it is released.
+      if (_locked)
+        g_commit_mutex.unlock();
+      if (_pool)
+        [static_cast<NSAutoreleasePool*>(_pool) release];
     }
 
     void flush() {
       id<MTLCommandBuffer> to_wait = nil;
       {
         std::lock_guard<std::mutex> lock(g_commit_mutex);
+        if (commit_open_locked())
+          g_stat_flushes_partial.fetch_add(1, std::memory_order_relaxed);
         to_wait = [g_last_committed retain];
       }
       g_stat_flushes.fetch_add(1, std::memory_order_relaxed);

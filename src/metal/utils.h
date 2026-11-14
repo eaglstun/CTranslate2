@@ -14,8 +14,8 @@ namespace ctranslate2 {
     // Number of usable Metal devices (0 or 1 in the current single-device model).
     int get_gpu_count();
 
-    // Commits the current thread's open command buffer (if any) and blocks until it
-    // completes. This is the single point that makes pending GPU writes visible to the
+    // Commits the open command buffer (if any; it is shared by all threads) and blocks until
+    // every op issued so far has executed. The single point that makes GPU writes visible to the
     // CPU; it is called before any CPU access to Metal-resident memory. synchronize() is
     // an alias kept for parity with the CUDA backend's naming.
     void flush();

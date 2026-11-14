@@ -9,9 +9,12 @@
 #include <limits>
 #include <random>
 #include <sstream>
+#include <thread>
 #include <vector>
 
 #include <cstdlib>
+
+#include <mach-o/dyld.h>
 
 #include <algorithm>
 
@@ -1280,6 +1283,197 @@ TEST_F(MetalTest, Int8GemmAllTransposeCombinations) {
 // Benchmarks (disabled by default; run with:
 //   ./ctranslate2_test <data> --gtest_also_run_disabled_tests --gtest_filter='*Benchmark*')
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------------------
+// Command-buffer batching (M21). Ops are appended to one shared open command buffer that
+// is committed every CT2_METAL_CB_OPS ops and at every flush. These tests sit on the
+// batch boundaries: they are valid under every setting, and CommandBatchEnvMatrix reruns
+// them in child processes with the settings forced (the knobs are read once per process).
+// ---------------------------------------------------------------------------------------
+
+static StorageView metal_filled(dim_t size, float value) {
+  return StorageView({size}, value, Device::CPU).to(Device::METAL);
+}
+
+// A chain of dependent small ops much longer than a batch, with a length that is not a
+// multiple of any tested batch size, then ONE host read. A lost, reordered or
+// never-committed op changes the final value.
+TEST_F(MetalTest, CommandBatchManySmallOpsThenHostRead) {
+  const dim_t n = 257;
+  for (const int chain : {1, 15, 16, 17, 1003}) {
+    StorageView a = metal_filled(n, 0.f);
+    StorageView b = metal_filled(n, -1.f);
+    float* src = a.data<float>();
+    float* dst = b.data<float>();
+    for (int i = 0; i < chain; ++i) {
+      metal::add(src, src, dst, n, /*b_is_scalar=*/true, 1.f);
+      std::swap(src, dst);
+    }
+    metal::synchronize();
+    for (dim_t i = 0; i < n; ++i)
+      ASSERT_EQ(src[i], static_cast<float>(chain)) << "chain " << chain << " index " << i;
+  }
+}
+
+// Host reads at every possible fill level of the open batch, WITHOUT an explicit
+// synchronize: the read goes through StorageView::to(CPU), whose METAL_DEVICE_CASE flush
+// must commit the partial batch before the CPU copies. Each read also sees everything
+// issued before it, and the chain continues after it.
+TEST_F(MetalTest, CommandBatchHostReadMidBatch) {
+  const dim_t n = 64;
+  StorageView a = metal_filled(n, 0.f);
+  StorageView b = metal_filled(n, 0.f);
+  StorageView* src = &a;
+  StorageView* dst = &b;
+  int total = 0;
+  for (int burst = 0; burst <= 40; ++burst) {
+    for (int i = 0; i < burst; ++i) {
+      metal::add(src->data<float>(), src->data<float>(), dst->data<float>(), n, true, 1.f);
+      std::swap(src, dst);
+      ++total;
+    }
+    const StorageView host = src->to(Device::CPU);
+    for (dim_t i = 0; i < n; ++i)
+      ASSERT_EQ(host.at<float>(i), static_cast<float>(total)) << "after burst " << burst;
+  }
+}
+
+// MPS GEMM encodes its own passes into the command buffer, so the shared compute encoder
+// must be ended before it and reopened after it. Alternate GEMM (MPS), Add and ReLU
+// (compute kernels) in one dependent chain and compare with the same chain on the CPU.
+TEST_F(MetalTest, CommandBatchMixedMpsAndComputeOps) {
+  const dim_t d = 24;
+  std::mt19937 rng(7);
+  std::uniform_real_distribution<float> dist(-0.25f, 0.25f);
+  std::vector<float> w_host(d * d), x_host(3 * d), bias_host(3 * d);
+  for (auto& v : w_host) v = dist(rng);
+  for (auto& v : x_host) v = dist(rng);
+  for (auto& v : bias_host) v = dist(rng);
+
+  const auto run = [&](Device device, DataType dtype) {
+    const StorageView w = StorageView({d, d}, w_host).to(device).to(dtype);
+    const StorageView bias = StorageView({3, d}, bias_host).to(device).to(dtype);
+    StorageView x = StorageView({3, d}, x_host).to(device).to(dtype);
+    const ops::Gemm gemm(1.f, 0.f, false, true);
+    const ops::Add add;
+    const ops::ReLU relu;
+    for (int step = 0; step < 37; ++step) {
+      StorageView y(dtype, device), z(dtype, device);
+      gemm(x, w, y);
+      add(y, bias, z);
+      if (step % 3 == 0)
+        relu(z, x);
+      else
+        x = std::move(z);
+    }
+    return x.to_float32().to(Device::CPU);
+  };
+
+  const StorageView ref = run(Device::CPU, DataType::FLOAT32);
+  expect_storage_eq(run(Device::METAL, DataType::FLOAT32), ref, 1e-4);
+  expect_storage_eq(run(Device::METAL, DataType::FLOAT16), ref, 2e-2);
+}
+
+// Ops issued from threads other than the one that reads. Worker threads issue a chain
+// each and exit without ever flushing (what a parallel_for chunk does); a second wave of
+// workers then consumes the first wave's outputs; the main thread, which issued nothing
+// itself, reads. With a per-thread open batch the workers' ops would be orphaned or run
+// out of order; with the single shared batch they cannot be.
+TEST_F(MetalTest, CommandBatchOpsIssuedFromWorkerThreads) {
+  const dim_t n = 128;
+  const int num_threads = 6;
+  const int chain = 21;  // Odd, and not a multiple of the batch size.
+  std::vector<StorageView> a, b, c;
+  for (int t = 0; t < num_threads; ++t) {
+    a.emplace_back(metal_filled(n, static_cast<float>(t)));
+    b.emplace_back(metal_filled(n, -1.f));
+    c.emplace_back(metal_filled(n, -1.f));
+  }
+
+  const auto wave = [&](std::vector<StorageView>& from, std::vector<StorageView>& scratch,
+                        std::vector<StorageView>& to) {
+    std::vector<std::thread> threads;
+    for (int t = 0; t < num_threads; ++t) {
+      threads.emplace_back([&, t] {
+        float* src = from[t].data<float>();
+        float* dst = scratch[t].data<float>();
+        for (int i = 0; i < chain - 1; ++i) {
+          metal::add(src, src, dst, n, true, 1.f);
+          std::swap(src, dst);
+        }
+        // chain - 1 is even: the running value is back in from[t]. Last hop lands in to[t].
+        metal::add(src, src, to[t].data<float>(), n, true, 1.f);
+      });
+    }
+    for (auto& thread : threads)
+      thread.join();
+  };
+
+  wave(a, b, c);  // c[t] = t + chain
+  wave(c, b, a);  // a[t] = t + 2 * chain, reading what the first wave's threads wrote.
+
+  for (int t = 0; t < num_threads; ++t) {
+    const StorageView host = a[t].to(Device::CPU);
+    for (dim_t i = 0; i < n; ++i)
+      ASSERT_EQ(host.at<float>(i), static_cast<float>(t + 2 * chain)) << "thread " << t;
+  }
+}
+
+// The real cross-thread case: float Conv1D issues one Metal GEMM per parallel_for chunk
+// on the intra-op worker threads, with no flush on those threads, then the calling thread
+// adds the bias and reads. Enough batch x groups for several chunks.
+TEST_F(MetalTest, CommandBatchConv1DParallelForGemm) {
+  const dim_t batch = 12, in_channels = 8, out_channels = 16, length = 40, kernel = 3;
+  const dim_t groups = 2;
+  std::mt19937 rng(11);
+  std::uniform_real_distribution<float> dist(-1.f, 1.f);
+  std::vector<float> x_host(batch * in_channels * length);
+  std::vector<float> w_host(out_channels * (in_channels / groups) * kernel);
+  std::vector<float> b_host(out_channels);
+  for (auto& v : x_host) v = dist(rng);
+  for (auto& v : w_host) v = dist(rng);
+  for (auto& v : b_host) v = dist(rng);
+  const StorageView x({batch, in_channels, length}, x_host);
+  const StorageView w({out_channels, in_channels / groups, kernel}, w_host);
+  const StorageView b({out_channels}, b_host);
+
+  const ops::Conv1D conv(/*stride=*/1, /*padding=*/1, /*dilation=*/1, groups);
+  StorageView ref;
+  conv(x, w, b, ref);
+  for (int repeat = 0; repeat < 5; ++repeat) {
+    StorageView y(Device::METAL);
+    conv(x.to(Device::METAL), w.to(Device::METAL), b.to(Device::METAL), y);
+    expect_storage_eq(y, ref, 1e-4);
+  }
+}
+
+// The submission knobs are read once per process, so force each interesting setting in a
+// child process running the CommandBatch* tests above: per-op commit (kill-switch and
+// N=1), tiny batches with and without the shared encoder, a batch that never fills (only
+// flushes commit), and the tightest in-flight bounds.
+TEST_F(MetalTest, CommandBatchEnvMatrix) {
+  if (std::getenv("CT2_METAL_CB_TEST_CHILD") != nullptr)
+    GTEST_SKIP() << "already inside the matrix";
+  char exe[4096];
+  uint32_t exe_size = sizeof(exe);
+  ASSERT_EQ(_NSGetExecutablePath(exe, &exe_size), 0);
+  const char* settings[] = {
+    "CT2_NO_METAL_CB_BATCH=1",
+    "CT2_METAL_CB_OPS=1",
+    "CT2_METAL_CB_OPS=2",
+    "CT2_METAL_CB_OPS=3 CT2_METAL_CB_SHARE_ENCODER=0",
+    "CT2_METAL_CB_OPS=16 CT2_METAL_CB_MAX_INFLIGHT=1",
+    "CT2_METAL_CB_OPS=5 CT2_METAL_CB_MAX_INFLIGHT=2",
+    "CT2_METAL_CB_OPS=1000000",
+    "CT2_METAL_CB_OPS=1000000 CT2_METAL_CB_MAX_INFLIGHT=1",
+  };
+  for (const char* setting : settings) {
+    const std::string command = std::string("env CT2_METAL_CB_TEST_CHILD=1 ") + setting
+      + " '" + exe + "' '" + get_data_dir() + "'"
+      + " --gtest_filter='MetalTest.CommandBatch*' > /dev/null 2>&1";
+    EXPECT_EQ(std::system(command.c_str()), 0) << setting;
+  }
+}
 
 template <typename Fn>
 static double time_ms(int iters, Fn&& fn) {
