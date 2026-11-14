@@ -1,6 +1,8 @@
 #include "metal/primitives.h"
 #include "metal/device.h"
 
+#include "ctranslate2/allocator.h"
+
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
@@ -75,8 +77,59 @@ namespace ctranslate2 {
     // Must match CT2_SDPA_SG (SIMD-groups of 32 lanes) in kernels_msl.h.
     static constexpr NSUInteger kSdpaThreadgroup = 4 * 32;
 
+    // Split-K routing thresholds (see sdpa_num_splits). Measured on an M4 Max; the sweep is
+    // recorded in docs/metal/plan-sdpa-split-k.md.
+    static constexpr dim_t kSdpaSplitTargetThreadgroups = 320;
+    static constexpr dim_t kSdpaSplitMinChunk = 128;
+
     namespace {
-      void sdpa_impl(const char* pipeline_name,
+      dim_t env_dim(const char* name, dim_t fallback) {
+        const char* value = std::getenv(name);
+        if (!value || !*value)
+          return fallback;
+        const long long parsed = std::atoll(value);
+        return parsed > 0 ? static_cast<dim_t>(parsed) : fallback;
+      }
+
+      // Float scratch for the split-K partials, reused across calls on this thread and
+      // grown geometrically: a per-call buffer would be allocation churn. Sharing one
+      // buffer between consecutive async launches is safe because every launch commits to
+      // the single serial command queue and each command buffer writes the partials
+      // before its own combine dispatch reads them. A command buffer retains the buffers
+      // it binds, so growing (which frees the old allocation) cannot pull memory out from
+      // under in-flight work.
+      class SdpaScratch {
+      public:
+        ~SdpaScratch() {
+          if (_ptr)
+            get_allocator<Device::METAL>().free(_ptr);
+        }
+
+        float* get(size_t num_floats) {
+          const size_t bytes = num_floats * sizeof(float);
+          if (bytes > _bytes) {
+            const size_t new_bytes = std::max(bytes, _bytes * 2);
+            void* ptr = get_allocator<Device::METAL>().allocate(new_bytes);
+            if (_ptr)
+              get_allocator<Device::METAL>().free(_ptr);
+            _ptr = ptr;
+            _bytes = new_bytes;
+          }
+          return static_cast<float*>(_ptr);
+        }
+
+      private:
+        void* _ptr = nullptr;
+        size_t _bytes = 0;
+      };
+
+      struct SdpaPipelines {
+        const char* single;
+        const char* split;
+        const char* combine;
+      };
+
+      void sdpa_impl(const SdpaPipelines& pipelines,
                      const void* queries,
                      const void* keys,
                      const void* values,
@@ -87,9 +140,11 @@ namespace ctranslate2 {
                      dim_t num_keys,
                      dim_t kv_stride,
                      dim_t depth,
-                     float scale) {
+                     float scale,
+                     dim_t num_splits) {
         if (num_rows == 0 || depth == 0)
           return;
+        num_splits = std::max<dim_t>(1, std::min(num_splits, num_keys));
 
         const BufferRange q_buffer = buffer_and_offset(queries);
         const BufferRange k_buffer = buffer_and_offset(keys);
@@ -100,7 +155,27 @@ namespace ctranslate2 {
         // dummy when there is no lengths array (same convention as softmax).
         const BufferRange len_buffer = lengths ? buffer_and_offset(lengths) : q_buffer;
 
-        id<MTLComputePipelineState> pso = get_pipeline(pipeline_name);
+        const bool split = num_splits > 1;
+        const uint32_t num_keys_u = static_cast<uint32_t>(num_keys);
+        const uint32_t kv_stride_u = static_cast<uint32_t>(kv_stride);
+        const uint32_t depth_u = static_cast<uint32_t>(depth);
+        const uint32_t rows_per_bh_u = static_cast<uint32_t>(rows_per_bh);
+        const uint32_t num_splits_u = static_cast<uint32_t>(num_splits);
+        const uint32_t chunk_u = static_cast<uint32_t>((num_keys + num_splits - 1) / num_splits);
+
+        // Split path: the partial pass writes {m, l, acc[depth]} floats per (row, split)
+        // into the scratch instead of the output.
+        BufferRange partials_buffer = out_buffer;
+        if (split) {
+          static thread_local SdpaScratch scratch;
+          partials_buffer = buffer_and_offset(scratch.get(
+            static_cast<size_t>(num_rows) * static_cast<size_t>(num_splits)
+            * static_cast<size_t>(depth + 2)));
+        }
+
+        id<MTLComputePipelineState> pso = get_pipeline(split ? pipelines.split
+                                                             : pipelines.single);
+        id<MTLComputePipelineState> combine_pso = split ? get_pipeline(pipelines.combine) : nil;
 
         id<MTLCommandBuffer> command_buffer = new_command_buffer();
         id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
@@ -108,12 +183,8 @@ namespace ctranslate2 {
         [encoder setBuffer:q_buffer.buffer offset:q_buffer.offset atIndex:0];
         [encoder setBuffer:k_buffer.buffer offset:k_buffer.offset atIndex:1];
         [encoder setBuffer:v_buffer.buffer offset:v_buffer.offset atIndex:2];
-        [encoder setBuffer:out_buffer.buffer offset:out_buffer.offset atIndex:3];
+        [encoder setBuffer:partials_buffer.buffer offset:partials_buffer.offset atIndex:3];
         [encoder setBuffer:len_buffer.buffer offset:len_buffer.offset atIndex:4];
-        const uint32_t num_keys_u = static_cast<uint32_t>(num_keys);
-        const uint32_t kv_stride_u = static_cast<uint32_t>(kv_stride);
-        const uint32_t depth_u = static_cast<uint32_t>(depth);
-        const uint32_t rows_per_bh_u = static_cast<uint32_t>(rows_per_bh);
         [encoder setBytes:&num_keys_u length:sizeof(num_keys_u) atIndex:5];
         [encoder setBytes:&depth_u length:sizeof(depth_u) atIndex:6];
         [encoder setBytes:&rows_per_bh_u length:sizeof(rows_per_bh_u) atIndex:7];
@@ -121,30 +192,94 @@ namespace ctranslate2 {
         [encoder setBytes:&has_lengths length:sizeof(has_lengths) atIndex:9];
         [encoder setBytes:&kv_stride_u length:sizeof(kv_stride_u) atIndex:10];
 
-        // One threadgroup per score row; the kernel assumes exactly CT2_SDPA_SG SIMD-groups.
-        const MTLSize grid = MTLSizeMake(static_cast<NSUInteger>(num_rows), 1, 1);
+        // One threadgroup per score row (single pass) or per (split, row); the kernels
+        // assume exactly CT2_SDPA_SG SIMD-groups.
         const MTLSize group = MTLSizeMake(kSdpaThreadgroup, 1, 1);
-        [encoder dispatchThreadgroups:grid threadsPerThreadgroup:group];
+        if (!split) {
+          const MTLSize grid = MTLSizeMake(static_cast<NSUInteger>(num_rows), 1, 1);
+          [encoder dispatchThreadgroups:grid threadsPerThreadgroup:group];
+        } else {
+          [encoder setBytes:&num_splits_u length:sizeof(num_splits_u) atIndex:11];
+          [encoder setBytes:&chunk_u length:sizeof(chunk_u) atIndex:12];
+          const MTLSize grid = MTLSizeMake(static_cast<NSUInteger>(num_splits),
+                                           static_cast<NSUInteger>(num_rows), 1);
+          [encoder dispatchThreadgroups:grid threadsPerThreadgroup:group];
+
+          // Combine pass in the SAME encoder: dispatches in one compute pass execute in
+          // order, which is the partial → combine dependency, and a second command buffer
+          // would add another per-buffer GPU gap. One thread per output element.
+          [encoder setComputePipelineState:combine_pso];
+          [encoder setBuffer:partials_buffer.buffer offset:partials_buffer.offset atIndex:0];
+          [encoder setBuffer:out_buffer.buffer offset:out_buffer.offset atIndex:1];
+          [encoder setBuffer:len_buffer.buffer offset:len_buffer.offset atIndex:2];
+          [encoder setBytes:&depth_u length:sizeof(depth_u) atIndex:3];
+          [encoder setBytes:&num_splits_u length:sizeof(num_splits_u) atIndex:4];
+          [encoder setBytes:&has_lengths length:sizeof(has_lengths) atIndex:5];
+          const NSUInteger width = combine_pso.threadExecutionWidth;
+          const NSUInteger tg_x = std::min<NSUInteger>(width, static_cast<NSUInteger>(depth));
+          const NSUInteger tg_y = std::max<NSUInteger>(
+            1, std::min<NSUInteger>(combine_pso.maxTotalThreadsPerThreadgroup / tg_x,
+                                    static_cast<NSUInteger>(num_rows)));
+          [encoder dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(depth),
+                                               static_cast<NSUInteger>(num_rows), 1)
+             threadsPerThreadgroup:MTLSizeMake(tg_x, tg_y, 1)];
+        }
         [encoder endEncoding];
 
         commit_command_buffer(command_buffer);
       }
+
+      const SdpaPipelines kSdpaFloat = {"ct2_sdpa_float", "ct2_sdpa_split_float",
+                                        "ct2_sdpa_combine_float"};
+      const SdpaPipelines kSdpaHalf = {"ct2_sdpa_half", "ct2_sdpa_split_half",
+                                       "ct2_sdpa_combine_half"};
+    }
+
+    dim_t sdpa_num_splits(dim_t num_rows, dim_t num_keys) {
+      static const bool disabled = std::getenv("CT2_NO_METAL_SDPA_SPLIT") != nullptr;
+      if (disabled || num_rows <= 0)
+        return 1;
+      static const dim_t target_tgs = env_dim("CT2_METAL_SDPA_SPLIT_TGS",
+                                              kSdpaSplitTargetThreadgroups);
+      static const dim_t min_chunk = env_dim("CT2_METAL_SDPA_SPLIT_MIN_CHUNK",
+                                             kSdpaSplitMinChunk);
+      const dim_t wanted = target_tgs / num_rows;  // stay within one wave: round down
+      const dim_t max_splits = num_keys / min_chunk;  // every split gets >= min_chunk keys
+      return std::max<dim_t>(1, std::min(wanted, max_splits));
     }
 
     void sdpa(const float* queries, const float* keys, const float* values,
               const int32_t* lengths, float* output,
               dim_t num_rows, dim_t rows_per_bh, dim_t num_keys, dim_t kv_stride,
               dim_t depth, float scale) {
-      sdpa_impl("ct2_sdpa_float", queries, keys, values, lengths, output,
-                num_rows, rows_per_bh, num_keys, kv_stride, depth, scale);
+      sdpa_impl(kSdpaFloat, queries, keys, values, lengths, output,
+                num_rows, rows_per_bh, num_keys, kv_stride, depth, scale,
+                sdpa_num_splits(num_rows, num_keys));
     }
 
     void sdpa(const float16_t* queries, const float16_t* keys, const float16_t* values,
               const int32_t* lengths, float16_t* output,
               dim_t num_rows, dim_t rows_per_bh, dim_t num_keys, dim_t kv_stride,
               dim_t depth, float scale) {
-      sdpa_impl("ct2_sdpa_half", queries, keys, values, lengths, output,
-                num_rows, rows_per_bh, num_keys, kv_stride, depth, scale);
+      sdpa_impl(kSdpaHalf, queries, keys, values, lengths, output,
+                num_rows, rows_per_bh, num_keys, kv_stride, depth, scale,
+                sdpa_num_splits(num_rows, num_keys));
+    }
+
+    void sdpa_split(const float* queries, const float* keys, const float* values,
+                    const int32_t* lengths, float* output,
+                    dim_t num_rows, dim_t rows_per_bh, dim_t num_keys, dim_t kv_stride,
+                    dim_t depth, float scale, dim_t num_splits) {
+      sdpa_impl(kSdpaFloat, queries, keys, values, lengths, output,
+                num_rows, rows_per_bh, num_keys, kv_stride, depth, scale, num_splits);
+    }
+
+    void sdpa_split(const float16_t* queries, const float16_t* keys, const float16_t* values,
+                    const int32_t* lengths, float16_t* output,
+                    dim_t num_rows, dim_t rows_per_bh, dim_t num_keys, dim_t kv_stride,
+                    dim_t depth, float scale, dim_t num_splits) {
+      sdpa_impl(kSdpaHalf, queries, keys, values, lengths, output,
+                num_rows, rows_per_bh, num_keys, kv_stride, depth, scale, num_splits);
     }
 
     namespace {

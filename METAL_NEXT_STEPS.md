@@ -7,9 +7,12 @@ lists.
 
 Two env-gated profilers are already in-tree: `CT2_AUTO_PROFILE=cpu|metal` and
 `CT2_METAL_STATS=1`. Important A/B switches are `CT2_NO_METAL_SDPA=1`,
-`CT2_NO_METAL_KV_CACHE=1`, `CT2_NO_METAL_QKV_FUSION=1`,
+`CT2_NO_METAL_SDPA_SPLIT=1` (keeps fused SDPA but forces the single-pass kernel instead of
+split-K), `CT2_NO_METAL_KV_CACHE=1`, `CT2_NO_METAL_QKV_FUSION=1`,
 `CT2_NO_METAL_SAMPLING=1`, `CT2_NO_MPP_GEMM=1`, and `CT2_MPS_GEMV=1`
-(experimental and off by default).
+(experimental and off by default). The split-K thresholds can be overridden for sweeps on
+other GPUs with `CT2_METAL_SDPA_SPLIT_TGS` (threadgroups per launch, default 320) and
+`CT2_METAL_SDPA_SPLIT_MIN_CHUNK` (minimum keys per split, default 128).
 
 ## Ranked list
 

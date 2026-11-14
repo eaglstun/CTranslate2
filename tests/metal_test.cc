@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <random>
@@ -459,15 +460,28 @@ void sdpa_reference_cpu(const StorageView& q, const StorageView& k, const Storag
   ops::MatMul()(attn, v, out);
 }
 
+// num_splits == 0 routes through metal::sdpa (the production heuristic); > 0 forces the
+// split-K path with that many key chunks (1 = the single-pass kernel). capacity > num_keys
+// lays K/V out capacity-strided (kv_stride > num_keys * depth) with poisoned slack rows,
+// so reading past the logical length shows up as a large error. q_offset/k_offset shift
+// the random q and K values, which shifts every score by about scale*depth*q_offset*k_offset.
 void run_sdpa_case(dim_t batch, dim_t heads, dim_t q_len, dim_t num_keys, dim_t depth,
-                   const std::vector<int32_t>* lengths, unsigned seed) {
+                   const std::vector<int32_t>* lengths, unsigned seed,
+                   dim_t num_splits = 0, dim_t capacity = 0,
+                   float q_offset = 0.f, float k_offset = 0.f) {
+  SCOPED_TRACE("sdpa case batch=" + std::to_string(batch) + " heads=" + std::to_string(heads)
+               + " q_len=" + std::to_string(q_len) + " keys=" + std::to_string(num_keys)
+               + " depth=" + std::to_string(depth) + " splits=" + std::to_string(num_splits)
+               + " capacity=" + std::to_string(capacity));
+  if (capacity < num_keys)
+    capacity = num_keys;
   std::mt19937 rng(seed);
   std::uniform_real_distribution<float> dist(-2.f, 2.f);
   std::vector<float> q_host(batch * heads * q_len * depth);
   std::vector<float> k_host(batch * heads * num_keys * depth);
   std::vector<float> v_host(batch * heads * num_keys * depth);
-  for (auto& x : q_host) x = dist(rng);
-  for (auto& x : k_host) x = dist(rng);
+  for (auto& x : q_host) x = dist(rng) + q_offset;
+  for (auto& x : k_host) x = dist(rng) + k_offset;
   for (auto& x : v_host) x = dist(rng);
   const float scale = 1.f / std::sqrt(static_cast<float>(depth));
 
@@ -481,36 +495,63 @@ void run_sdpa_case(dim_t batch, dim_t heads, dim_t q_len, dim_t num_keys, dim_t 
   StorageView ref(DataType::FLOAT32, Device::CPU);
   sdpa_reference_cpu(q_cpu, k_cpu, v_cpu, len_cpu.get(), scale, ref);
 
+  // Capacity-strided copies of K/V: logical rows first, then poisoned slack.
+  std::vector<float> k_cap(batch * heads * capacity * depth, 1e4f);
+  std::vector<float> v_cap(k_cap.size(), -1e4f);
+  for (dim_t bh = 0; bh < batch * heads; ++bh) {
+    std::copy_n(k_host.begin() + bh * num_keys * depth, num_keys * depth,
+                k_cap.begin() + bh * capacity * depth);
+    std::copy_n(v_host.begin() + bh * num_keys * depth, num_keys * depth,
+                v_cap.begin() + bh * capacity * depth);
+  }
+  const StorageView k_cap_cpu({batch, heads, capacity, depth}, k_cap, Device::CPU);
+  const StorageView v_cap_cpu({batch, heads, capacity, depth}, v_cap, Device::CPU);
+
   const dim_t num_rows = batch * heads * q_len;
+  const dim_t kv_stride = capacity * depth;
 
   // float32
   {
     StorageView q_gpu = q_cpu.to(Device::METAL);
-    StorageView k_gpu = k_cpu.to(Device::METAL);
-    StorageView v_gpu = v_cpu.to(Device::METAL);
+    StorageView k_gpu = k_cap_cpu.to(Device::METAL);
+    StorageView v_gpu = v_cap_cpu.to(Device::METAL);
     std::unique_ptr<StorageView> len_gpu;
     if (len_cpu)
       len_gpu = std::make_unique<StorageView>(len_cpu->to(Device::METAL));
     StorageView out({batch, heads, q_len, depth}, DataType::FLOAT32, Device::METAL);
-    metal::sdpa(q_gpu.data<float>(), k_gpu.data<float>(), v_gpu.data<float>(),
-                len_gpu ? len_gpu->data<int32_t>() : nullptr, out.data<float>(),
-                num_rows, q_len, num_keys, num_keys * depth, depth, scale);
+    const int32_t* len_data = len_gpu ? len_gpu->data<int32_t>() : nullptr;
+    if (num_splits == 0)
+      metal::sdpa(q_gpu.data<float>(), k_gpu.data<float>(), v_gpu.data<float>(),
+                  len_data, out.data<float>(),
+                  num_rows, q_len, num_keys, kv_stride, depth, scale);
+    else
+      metal::sdpa_split(q_gpu.data<float>(), k_gpu.data<float>(), v_gpu.data<float>(),
+                        len_data, out.data<float>(),
+                        num_rows, q_len, num_keys, kv_stride, depth, scale, num_splits);
     metal::synchronize();
-    expect_storage_eq(out.to(Device::CPU), ref, 1e-5);
+    // Shifted scores are ~144 in magnitude, where one float ulp (1.5e-5) already moves a
+    // softmax weight by that relative amount; unshifted cases keep the tight bound.
+    expect_storage_eq(out.to(Device::CPU), ref, q_offset * k_offset != 0.f ? 1e-4 : 1e-5);
   }
 
   // float16 against the fp32 reference (house fp16 tolerance)
   {
     StorageView q_gpu = q_cpu.to(Device::METAL).to(DataType::FLOAT16);
-    StorageView k_gpu = k_cpu.to(Device::METAL).to(DataType::FLOAT16);
-    StorageView v_gpu = v_cpu.to(Device::METAL).to(DataType::FLOAT16);
+    StorageView k_gpu = k_cap_cpu.to(Device::METAL).to(DataType::FLOAT16);
+    StorageView v_gpu = v_cap_cpu.to(Device::METAL).to(DataType::FLOAT16);
     std::unique_ptr<StorageView> len_gpu;
     if (len_cpu)
       len_gpu = std::make_unique<StorageView>(len_cpu->to(Device::METAL));
     StorageView out({batch, heads, q_len, depth}, DataType::FLOAT16, Device::METAL);
-    metal::sdpa(q_gpu.data<float16_t>(), k_gpu.data<float16_t>(), v_gpu.data<float16_t>(),
-                len_gpu ? len_gpu->data<int32_t>() : nullptr, out.data<float16_t>(),
-                num_rows, q_len, num_keys, num_keys * depth, depth, scale);
+    const int32_t* len_data = len_gpu ? len_gpu->data<int32_t>() : nullptr;
+    if (num_splits == 0)
+      metal::sdpa(q_gpu.data<float16_t>(), k_gpu.data<float16_t>(), v_gpu.data<float16_t>(),
+                  len_data, out.data<float16_t>(),
+                  num_rows, q_len, num_keys, kv_stride, depth, scale);
+    else
+      metal::sdpa_split(q_gpu.data<float16_t>(), k_gpu.data<float16_t>(),
+                        v_gpu.data<float16_t>(), len_data, out.data<float16_t>(),
+                        num_rows, q_len, num_keys, kv_stride, depth, scale, num_splits);
     metal::synchronize();
     expect_storage_eq(out.to_float32().to(Device::CPU), ref, 2e-2);
   }
@@ -527,6 +568,9 @@ TEST_F(MetalTest, SdpaFusedParityWithReference) {
   run_sdpa_case(1, 4, 1, 1500, 64, nullptr, 33);
   // Max supported head depth.
   run_sdpa_case(1, 2, 1, 64, 256, nullptr, 44);
+  // The same shapes pinned to the single-pass kernel, whatever the routing heuristic says.
+  run_sdpa_case(2, 3, 1, 333, 64, nullptr, 11, /*num_splits=*/1);
+  run_sdpa_case(1, 4, 1, 1500, 64, nullptr, 33, /*num_splits=*/1);
 }
 
 TEST_F(MetalTest, SdpaFusedMaskedAndBeamParity) {
@@ -536,6 +580,81 @@ TEST_F(MetalTest, SdpaFusedMaskedAndBeamParity) {
   const std::vector<int32_t> lengths = {57, 31, 1, 0, 44, 57,     // batch 0, 3 heads x 2 rows
                                         2, 57, 19, 3, 57, 5};     // batch 1
   run_sdpa_case(2, 3, 2, 57, 64, &lengths, 55);
+  run_sdpa_case(2, 3, 2, 57, 64, &lengths, 55, /*num_splits=*/1);
+}
+
+// Split-K (flash-decoding) path: partial pass + log-sum-exp combine, forced through
+// metal::sdpa_split so the merge logic is covered on shapes the routing heuristic would
+// leave on the single-pass kernel.
+TEST_F(MetalTest, SdpaSplitParityWithReference) {
+  // Whisper large-v3 cross-attention: 5 beams x 20 heads, 1,500 keys, d_head 64 — once
+  // through the production route and once per explicit split count.
+  run_sdpa_case(5, 20, 1, 1500, 64, nullptr, 101);
+  for (const dim_t splits : {2, 3, 12, 16})
+    run_sdpa_case(5, 20, 1, 1500, 64, nullptr, 101, splits);
+  // Keys not a multiple of the chunk (1501 / 7 → chunk 215, last chunk 211).
+  run_sdpa_case(1, 4, 1, 1501, 64, nullptr, 102, 7);
+  // Chunk not a multiple of the SIMD-group count, chunks of 1 and 2 keys.
+  run_sdpa_case(2, 3, 1, 333, 64, nullptr, 103, 5);
+  run_sdpa_case(1, 2, 1, 7, 64, nullptr, 104, 4);
+  run_sdpa_case(1, 2, 1, 7, 64, nullptr, 104, 7);
+  // Fewer keys than the requested splits (clamped to one key per split), and a single key.
+  run_sdpa_case(1, 2, 1, 3, 80, nullptr, 105, 8);
+  run_sdpa_case(1, 2, 1, 1, 64, nullptr, 106, 4);
+  // Head depth not a multiple of the SIMD width, and the maximum depth.
+  run_sdpa_case(1, 3, 1, 700, 80, nullptr, 107, 6);
+  run_sdpa_case(1, 2, 1, 600, 256, nullptr, 108, 4);
+  run_sdpa_case(1, 2, 2, 64, 256, nullptr, 109, 3);
+  // Beam-shaped q (several rows share one K/V block).
+  run_sdpa_case(2, 4, 5, 900, 64, nullptr, 110, 6);
+}
+
+TEST_F(MetalTest, SdpaSplitMaskedAndCapacityStrideParity) {
+  // 57 keys in 4 chunks of 15 ([0,15) [15,30) [30,45) [45,57)): lengths that are zero,
+  // shorter than the SIMD-group count, end inside a chunk, end exactly on a chunk
+  // boundary (so later splits are empty), and full.
+  const std::vector<int32_t> lengths = {57, 31, 1, 0, 44, 57,     // batch 0, 3 heads x 2 rows
+                                        2, 15, 30, 3, 45, 16};    // batch 1
+  run_sdpa_case(2, 3, 2, 57, 64, &lengths, 55, 4);
+  run_sdpa_case(2, 3, 2, 57, 64, &lengths, 55, 57);  // one key per split
+  run_sdpa_case(2, 3, 2, 57, 80, &lengths, 56, 3);
+
+  // Capacity-strided KV cache (kv_stride > num_keys * depth) with poisoned slack rows.
+  run_sdpa_case(2, 2, 1, 5, 16, nullptr, 77, 2, /*capacity=*/8);
+  run_sdpa_case(1, 4, 1, 1500, 64, nullptr, 78, 12, /*capacity=*/2048);
+  run_sdpa_case(2, 3, 2, 57, 64, &lengths, 79, 4, /*capacity=*/64);
+
+  // Long keys with per-row lengths, production route (Whisper-like with a memory mask).
+  std::vector<int32_t> long_lengths(5 * 20);
+  for (size_t i = 0; i < long_lengths.size(); ++i)
+    long_lengths[i] = i % 7 == 3 ? 0 : static_cast<int32_t>(1500 - 211 * (i % 8));
+  run_sdpa_case(5, 20, 1, 1500, 64, &long_lengths, 80);
+  run_sdpa_case(5, 20, 1, 1500, 64, &long_lengths, 80, 12);
+
+  // Every score near -144 (0.125 * 64 * 3 * -6), far below where exp() underflows, with
+  // rows that leave trailing splits empty: the empty partial must carry m = -INFINITY (a
+  // finite placeholder would become the row max and underflow every real weight to zero),
+  // and the combine must rescale by the max rather than exponentiate raw maxima.
+  const std::vector<int32_t> short_lengths = {5, 16, 1, 9, 12, 3};
+  run_sdpa_case(1, 3, 2, 16, 64, &short_lengths, 81, 4, 0, /*q_offset=*/3.f, /*k_offset=*/-6.f);
+  run_sdpa_case(1, 3, 2, 16, 64, nullptr, 82, 4, 0, 3.f, -6.f);
+  run_sdpa_case(1, 3, 2, 16, 64, &short_lengths, 81, 1, 0, 3.f, -6.f);
+}
+
+// The routing heuristic itself: split only when rows are few and keys are many, never
+// below the minimum chunk, and never when the kill-switch is set.
+TEST_F(MetalTest, SdpaSplitRouting) {
+  if (std::getenv("CT2_NO_METAL_SDPA_SPLIT") != nullptr) {
+    EXPECT_EQ(metal::sdpa_num_splits(100, 1500), 1);
+    return;
+  }
+  if (std::getenv("CT2_METAL_SDPA_SPLIT_TGS") != nullptr
+      || std::getenv("CT2_METAL_SDPA_SPLIT_MIN_CHUNK") != nullptr)
+    GTEST_SKIP() << "split thresholds overridden by environment";
+  EXPECT_GT(metal::sdpa_num_splits(100, 1500), 1);  // Whisper cross-attention
+  EXPECT_EQ(metal::sdpa_num_splits(100, 64), 1);    // short keys: single pass
+  EXPECT_EQ(metal::sdpa_num_splits(4096, 1500), 1); // already wide: single pass
+  EXPECT_EQ(metal::sdpa_num_splits(0, 1500), 1);
 }
 
 TEST_F(MetalTest, KvCacheAppendAndGrow) {
@@ -1170,6 +1289,113 @@ static double time_ms(int iters, Fn&& fn) {
     fn();
   const auto t1 = std::chrono::steady_clock::now();
   return std::chrono::duration<double, std::milli>(t1 - t0).count() / iters;
+}
+
+// Fused SDPA per-call cost vs split count (split-K / flash-decoding). Each cell commits a
+// burst of launches and synchronizes once, i.e. GPU-bound throughput — the regime Whisper
+// beam decode runs in (the queue is saturated). splits == 1 is the single-pass kernel.
+// "auto" is what the routing heuristic picks for the shape.
+TEST_F(MetalTest, DISABLED_BenchmarkSdpaSplit) {
+  struct Shape4 {
+    const char* label;
+    dim_t rows;
+    dim_t keys;
+    dim_t depth;
+  };
+  std::vector<Shape4> shapes = {
+    {"Whisper-L cross, beam 5 (100 rows)", 100, 1500, 64},
+    {"Whisper-L cross, greedy (20 rows)", 20, 1500, 64},
+    {"Whisper-L cross, 4x beam 5 (400 rows)", 400, 1500, 64},
+    {"Whisper-L self, beam 5 (100 rows)", 100, 64, 64},
+    {"Qwen-0.5B bs=1 (14 rows)", 14, 64, 64},
+    {"Qwen-0.5B bs=1 (14 rows)", 14, 256, 64},
+    {"Qwen-0.5B bs=1 (14 rows)", 14, 1024, 64},
+    {"Qwen-0.5B bs=1 (14 rows)", 14, 4096, 64},
+    {"Qwen-0.5B bs=8 (112 rows)", 112, 64, 64},
+    {"Qwen-0.5B bs=8 (112 rows)", 112, 256, 64},
+    {"Qwen-0.5B bs=8 (112 rows)", 112, 1024, 64},
+    {"NLLB cross, bs=8 beam 5 (640 rows)", 640, 32, 64},
+    {"NLLB cross, bs=1 beam 5 (80 rows)", 80, 256, 64},
+  };
+  std::vector<dim_t> split_counts = {1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64};
+  // Optional overrides for ad-hoc sweeps: CT2_SDPA_BENCH_SHAPES="rows,keys,depth;..." and
+  // CT2_SDPA_BENCH_SPLITS="1,2,3".
+  if (const char* env = std::getenv("CT2_SDPA_BENCH_SHAPES")) {
+    shapes.clear();
+    std::stringstream all(env);
+    std::string item;
+    while (std::getline(all, item, ';')) {
+      Shape4 shape{"custom", 0, 0, 0};
+      char comma;
+      std::stringstream(item) >> shape.rows >> comma >> shape.keys >> comma >> shape.depth;
+      if (shape.rows > 0 && shape.keys > 0 && shape.depth > 0)
+        shapes.push_back(shape);
+    }
+  }
+  if (const char* env = std::getenv("CT2_SDPA_BENCH_SPLITS")) {
+    split_counts.clear();
+    std::stringstream all(env);
+    std::string item;
+    while (std::getline(all, item, ','))
+      split_counts.push_back(std::stoll(item));
+  }
+  const int iters = 200;
+  const int repeats = 5;
+
+  for (const DataType dtype : {DataType::FLOAT16, DataType::FLOAT32}) {
+    std::cout << "\n=== Fused SDPA, us/call (median of " << repeats << " bursts of " << iters
+              << "), " << dtype_name(dtype) << " ===\n";
+    for (const auto& shape : shapes) {
+      std::mt19937 rng(7);
+      std::uniform_real_distribution<float> dist(-2.f, 2.f);
+      std::vector<float> q_host(shape.rows * shape.depth);
+      std::vector<float> kv_host(shape.rows * shape.keys * shape.depth);
+      for (auto& x : q_host) x = dist(rng);
+      for (auto& x : kv_host) x = dist(rng);
+      const StorageView q = StorageView({shape.rows, shape.depth}, q_host, Device::METAL).to(dtype);
+      const StorageView k =
+          StorageView({shape.rows, shape.keys, shape.depth}, kv_host, Device::METAL).to(dtype);
+      const StorageView v = k;
+      StorageView out({shape.rows, shape.depth}, dtype, Device::METAL);
+      const float scale = 0.125f;
+
+      auto launch = [&](dim_t splits) {
+        if (dtype == DataType::FLOAT16)
+          metal::sdpa_split(q.data<float16_t>(), k.data<float16_t>(), v.data<float16_t>(),
+                            nullptr, out.data<float16_t>(), shape.rows, 1, shape.keys,
+                            shape.keys * shape.depth, shape.depth, scale, splits);
+        else
+          metal::sdpa_split(q.data<float>(), k.data<float>(), v.data<float>(),
+                            nullptr, out.data<float>(), shape.rows, 1, shape.keys,
+                            shape.keys * shape.depth, shape.depth, scale, splits);
+      };
+      auto measure = [&](dim_t splits) {
+        std::vector<double> us;
+        for (int r = 0; r < repeats + 1; ++r) {
+          metal::synchronize();
+          const auto t0 = std::chrono::steady_clock::now();
+          for (int i = 0; i < iters; ++i)
+            launch(splits);
+          metal::synchronize();
+          const auto t1 = std::chrono::steady_clock::now();
+          if (r > 0)  // burst 0 is warmup (pipeline compile, scratch growth)
+            us.push_back(std::chrono::duration<double, std::micro>(t1 - t0).count() / iters);
+        }
+        std::sort(us.begin(), us.end());
+        return us[us.size() / 2];
+      };
+
+      std::cout << "  " << shape.label << ", keys=" << shape.keys << ", depth=" << shape.depth
+                << "  [auto=" << metal::sdpa_num_splits(shape.rows, shape.keys) << "]\n   ";
+      for (const dim_t splits : split_counts) {
+        if (splits > 1 && shape.keys / splits < 8)
+          continue;
+        std::cout << " s" << splits << "=" << std::fixed << std::setprecision(1)
+                  << measure(splits);
+      }
+      std::cout << "\n";
+    }
+  }
 }
 
 TEST_F(MetalTest, DISABLED_BenchmarkGemm) {
