@@ -1286,7 +1286,8 @@ TEST_F(MetalTest, Int8GemmAllTransposeCombinations) {
 
 // ---------------------------------------------------------------------------------------
 // Command-buffer batching (M21). Ops are appended to one shared open command buffer that
-// is committed every CT2_METAL_CB_OPS ops and at every flush. These tests sit on the
+// is committed when it is full (CT2_METAL_CB_OPS), early when the GPU is idle or the batch
+// already holds enough estimated GPU work, and at every flush. These tests sit on the
 // batch boundaries: they are valid under every setting, and CommandBatchEnvMatrix reruns
 // them in child processes with the settings forced (the knobs are read once per process).
 // ---------------------------------------------------------------------------------------
@@ -1450,23 +1451,33 @@ TEST_F(MetalTest, CommandBatchConv1DParallelForGemm) {
 // The submission knobs are read once per process, so force each interesting setting in a
 // child process running the CommandBatch* tests above: per-op commit (kill-switch and
 // N=1), tiny batches with and without the shared encoder, a batch that never fills (only
-// flushes commit), and the tightest in-flight bounds.
+// flushes commit), the tightest in-flight bounds, and each early-commit rule on its own.
 TEST_F(MetalTest, CommandBatchEnvMatrix) {
   if (std::getenv("CT2_METAL_CB_TEST_CHILD") != nullptr)
     GTEST_SKIP() << "already inside the matrix";
   char exe[4096];
   uint32_t exe_size = sizeof(exe);
   ASSERT_EQ(_NSGetExecutablePath(exe, &exe_size), 0);
+  // HOLD turns off the two early-commit rules (GPU idle, enough estimated GPU work), so
+  // batches really fill to CT2_METAL_CB_OPS and only flushes commit a partial one. In
+  // this suite the GPU is nearly always idle, so the default settings alone would commit
+  // almost every op by itself.
+#define CT2_CB_HOLD "CT2_METAL_CB_EAGER=0 CT2_METAL_CB_TARGET_US=0 "
   const char* settings[] = {
     "CT2_NO_METAL_CB_BATCH=1",
     "CT2_METAL_CB_OPS=1",
-    "CT2_METAL_CB_OPS=2",
-    "CT2_METAL_CB_OPS=3 CT2_METAL_CB_SHARE_ENCODER=0",
-    "CT2_METAL_CB_OPS=16 CT2_METAL_CB_MAX_INFLIGHT=1",
-    "CT2_METAL_CB_OPS=5 CT2_METAL_CB_MAX_INFLIGHT=2",
-    "CT2_METAL_CB_OPS=1000000",
-    "CT2_METAL_CB_OPS=1000000 CT2_METAL_CB_MAX_INFLIGHT=1",
+    CT2_CB_HOLD "CT2_METAL_CB_OPS=2",
+    CT2_CB_HOLD "CT2_METAL_CB_OPS=3 CT2_METAL_CB_SHARE_ENCODER=0",
+    CT2_CB_HOLD "CT2_METAL_CB_OPS=8",
+    CT2_CB_HOLD "CT2_METAL_CB_OPS=16 CT2_METAL_CB_MAX_INFLIGHT=1",
+    CT2_CB_HOLD "CT2_METAL_CB_OPS=5 CT2_METAL_CB_MAX_INFLIGHT=2",
+    CT2_CB_HOLD "CT2_METAL_CB_OPS=1000000",
+    CT2_CB_HOLD "CT2_METAL_CB_OPS=1000000 CT2_METAL_CB_MAX_INFLIGHT=1",
+    "CT2_METAL_CB_EAGER=0 CT2_METAL_CB_TARGET_US=1",
+    "CT2_METAL_CB_TARGET_US=0",
   };
+#undef CT2_CB_HOLD
+
   for (const char* setting : settings) {
     const std::string command = std::string("env CT2_METAL_CB_TEST_CHILD=1 ") + setting
       + " '" + exe + "' '" + get_data_dir() + "'"

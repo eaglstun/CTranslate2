@@ -22,8 +22,9 @@ namespace ctranslate2 {
     // appended to ONE process-wide open command buffer, in the order their scopes are
     // entered; the scope holds the batch lock for its lifetime, so encoding is serialized
     // and the GPU executes ops in exactly the order they were issued. The open buffer is
-    // committed (asynchronously) once it holds CT2_METAL_CB_OPS ops, and by metal::flush()
-    // (see utils.h) before any host access. With CT2_NO_METAL_CB_BATCH=1 each scope gets
+    // committed (asynchronously) once it holds CT2_METAL_CB_OPS ops, earlier when the GPU
+    // is idle or the batch already holds enough estimated GPU work (see device.mm), and by
+    // metal::flush() (see utils.h) before any host access. With CT2_NO_METAL_CB_BATCH=1 each scope gets
     // its own command buffer, committed at commit(), as before batching existed.
     //
     // The scope also brackets the op in an autorelease pool, so the autoreleased encoder,

@@ -23,8 +23,9 @@ namespace ctranslate2 {
   namespace metal {
 
     // Submission tuning, read once from the environment (see the "Submission" block below).
-    static const unsigned long kDefaultBatchOps = 16;
+    static const unsigned long kDefaultBatchOps = 8;
     static const unsigned long kDefaultMaxInflight = 0;
+    static const unsigned long kDefaultBatchTargetUs = 100;
 
     static unsigned long env_ulong(const char* name, unsigned long default_value) {
       const char* env = std::getenv(name);
@@ -63,6 +64,21 @@ namespace ctranslate2 {
       static const unsigned long value = env_flag("CT2_NO_METAL_CB_BATCH")
         ? 0ul
         : env_ulong("CT2_METAL_CB_MAX_INFLIGHT", kDefaultMaxInflight);
+      return value;
+    }
+
+    // Estimated GPU time at which a batch is committed even if it is not full, in
+    // microseconds; 0 sizes batches by op count only.
+    static uint64_t batch_target_ns() {
+      static const uint64_t value = batching_enabled()
+        ? static_cast<uint64_t>(env_ulong("CT2_METAL_CB_TARGET_US", kDefaultBatchTargetUs)) * 1000
+        : 0;
+      return value;
+    }
+
+    // CT2_METAL_CB_EAGER=0 holds every batch until it is full, even with the GPU idle.
+    static bool eager_when_idle() {
+      static const bool value = env_ulong("CT2_METAL_CB_EAGER", 1) != 0;
       return value;
     }
 
@@ -223,12 +239,14 @@ namespace ctranslate2 {
     //
     // Every Metal op is a CommandScope (device.h). By default consecutive ops are appended
     // to one process-wide open command buffer, which is committed WITHOUT waiting as soon
-    // as it holds batch_ops() ops; flush() commits whatever is open and waits. Compared to
-    // one command buffer per op this removes most of the fixed per-buffer cost (CPU:
-    // create + commit; GPU: a few microseconds of idle between buffers) while the bound
-    // keeps the CPU/GPU overlap: the GPU starts on the first batch_ops() ops while the CPU
-    // encodes the next ones. Committing once per decode step / forward pass instead was
-    // tried and reverted in 2026-06: it left the GPU idle until the end.
+    // as it is due (batch_is_due_locked(): full, enough estimated GPU work, or GPU idle);
+    // flush() commits whatever is open and waits. Compared to one command buffer per op
+    // this removes most of the fixed per-buffer cost (CPU: create + commit; GPU: a few
+    // microseconds between buffers) for small ops, while the bounds keep the CPU/GPU
+    // overlap: the GPU is never left idle with work pending, and large ops still get a
+    // buffer each. Committing once per decode step / forward pass instead was tried and
+    // reverted in 2026-06: it left the GPU idle until the end. When and how a batch is
+    // committed changes timing only; the invariants below hold for any policy.
     //
     // Invariants everything else relies on (all enforced under g_commit_mutex):
     //  1. Issue order == encode order == commit order == GPU execution order. A scope
@@ -271,6 +289,9 @@ namespace ctranslate2 {
     static std::atomic<uint64_t> g_stat_acquire_wait_us{0};
     static std::atomic<uint64_t> g_stat_gpu_busy_ns{0};
 
+    // Moving average of measured GPU nanoseconds per op (0 until the first completion).
+    static std::atomic<uint64_t> g_gpu_ns_per_op{0};
+
     static struct MetalStatsAtExit {
       MetalStatsAtExit() {
         if (!stats_enabled())
@@ -279,7 +300,8 @@ namespace ctranslate2 {
           std::fprintf(stderr,
                        "[metal-stats] command_buffers=%llu ops=%llu flushes=%llu "
                        "stalled_flushes=%llu partial_batch_flushes=%llu flush_wait_ms=%.1f "
-                       "acquire_wait_ms=%.1f gpu_busy_ms=%.1f batch_ops=%lu max_inflight=%lu\n",
+                       "acquire_wait_ms=%.1f gpu_busy_ms=%.1f batch_ops=%lu max_inflight=%lu "
+                       "batch_target_us=%llu last_gpu_us_per_op=%.1f\n",
                        (unsigned long long)g_stat_command_buffers.load(),
                        (unsigned long long)g_stat_ops.load(),
                        (unsigned long long)g_stat_flushes.load(),
@@ -289,7 +311,9 @@ namespace ctranslate2 {
                        g_stat_acquire_wait_us.load() / 1000.0,
                        g_stat_gpu_busy_ns.load() / 1.0e6,
                        batch_ops(),
-                       max_inflight());
+                       max_inflight(),
+                       (unsigned long long)(batch_target_ns() / 1000),
+                       g_gpu_ns_per_op.load() / 1000.0);
         });
       }
     } g_metal_stats_at_exit;
@@ -313,13 +337,23 @@ namespace ctranslate2 {
     // the caller's reference). Caller holds g_commit_mutex: the commit MUST happen inside
     // the lock, or two threads could commit in one order and record in the other, leaving
     // flush() waiting on a buffer that is not last in the queue.
-    static void commit_locked(id<MTLCommandBuffer> command_buffer) {
-      if (stats_enabled()) {
+    static void commit_locked(id<MTLCommandBuffer> command_buffer, unsigned long ops) {
+      if (batch_target_ns() > 0 || stats_enabled()) {
+        // Runs on a Metal-owned thread after the buffer completed: only touches atomics.
         [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
           const double seconds = completed.GPUEndTime - completed.GPUStartTime;
-          if (seconds > 0)
-            g_stat_gpu_busy_ns.fetch_add(static_cast<uint64_t>(seconds * 1.0e9),
-                                         std::memory_order_relaxed);
+          if (seconds <= 0 || ops == 0)
+            return;
+          const uint64_t ns = static_cast<uint64_t>(seconds * 1.0e9);
+          g_stat_gpu_busy_ns.fetch_add(ns, std::memory_order_relaxed);
+          // Exponential moving average (weight 1/8) of GPU time per op. A lost update
+          // between two completion threads only drops one sample.
+          const uint64_t sample = ns / ops;
+          const uint64_t previous = g_gpu_ns_per_op.load(std::memory_order_relaxed);
+          const uint64_t next = previous == 0
+            ? sample
+            : previous - previous / 8 + sample / 8;
+          g_gpu_ns_per_op.store(std::max<uint64_t>(next, 1), std::memory_order_relaxed);
         }];
       }
       [command_buffer commit];
@@ -335,12 +369,42 @@ namespace ctranslate2 {
       }
     }
 
+    // True when every committed buffer has completed. Caller holds g_commit_mutex.
+    static bool gpu_idle_locked() {
+      return !g_last_committed
+        || g_last_committed.status >= MTLCommandBufferStatusCompleted;
+    }
+
+    // Decides whether the open batch, which just received an op, is committed now.
+    // Caller holds g_commit_mutex.
+    //  - Full: batch_ops() ops.
+    //  - Enough GPU work: its estimated GPU time (ops x the moving average of measured
+    //    GPU time per op) reached batch_target_ns(). Batching only pays for small ops,
+    //    where the fixed per-buffer cost is comparable to the work. Large ops (prefill
+    //    GEMMs and row kernels at hundreds of microseconds each) measured FASTER in
+    //    their own buffers — the GPU overlaps consecutive command buffers but runs the
+    //    passes of one buffer strictly one after the other — so in that regime the
+    //    estimate exceeds the target after one op and this degenerates to per-op commit.
+    //  - GPU idle: the last committed buffer already completed, so holding ops back
+    //    would only lose CPU/GPU overlap. Batches build up exactly while the GPU is
+    //    behind.
+    static bool batch_is_due_locked() {
+      ++g_open_ops;
+      if (g_open_ops >= batch_ops())
+        return true;
+      const uint64_t target = batch_target_ns();
+      if (target > 0
+          && g_open_ops * g_gpu_ns_per_op.load(std::memory_order_relaxed) >= target)
+        return true;
+      return eager_when_idle() && gpu_idle_locked();
+    }
+
     // Commits the open batch, if any. Caller holds g_commit_mutex.
     static bool commit_open_locked() {
       if (!g_open_buffer)
         return false;
       end_open_encoder_locked();
-      commit_locked(g_open_buffer);
+      commit_locked(g_open_buffer, g_open_ops);
       g_open_buffer = nil;
       g_open_ops = 0;
       return true;
@@ -399,13 +463,13 @@ namespace ctranslate2 {
         }
         {
           std::lock_guard<std::mutex> lock(g_commit_mutex);
-          commit_locked([_own_buffer retain]);
+          commit_locked([_own_buffer retain], 1);
         }
         _own_buffer = nil;
       } else {
         if (!share_encoder())
           end_open_encoder_locked();
-        if (++g_open_ops >= batch_ops())
+        if (batch_is_due_locked())
           commit_open_locked();
         _locked = false;
         g_commit_mutex.unlock();
