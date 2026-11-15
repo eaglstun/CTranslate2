@@ -149,7 +149,7 @@ namespace ctranslate2 {
         [x_vector release];
         [y_vector release];
         // mv is owned by the thread-local cache; descriptors are autoreleased inside the
-        // per-op pool opened by new_command_buffer().
+        // per-op pool held by the CommandScope.
       }
 
       template <typename T>
@@ -165,13 +165,14 @@ namespace ctranslate2 {
         const BufferRange x_buffer = buffer_and_offset(x);
         const BufferRange y_buffer = buffer_and_offset(y);
 
-        id<MTLCommandBuffer> command_buffer = new_command_buffer();
+        CommandScope command;
+        id<MTLCommandBuffer> command_buffer = command.command_buffer();
         encode_gemv(command_buffer, transpose, rows, columns, alpha, beta,
                     matrix_buffer.buffer, matrix_buffer.offset, ldm,
                     x_buffer.buffer, x_buffer.offset,
                     y_buffer.buffer, y_buffer.offset,
                     element_size, data_type);
-        commit_command_buffer(command_buffer);
+        command.commit();
       }
 
       template <typename T>
@@ -187,7 +188,8 @@ namespace ctranslate2 {
         const BufferRange b_buffer = buffer_and_offset(b);
         const BufferRange c_buffer = buffer_and_offset(c);
 
-        id<MTLCommandBuffer> command_buffer = new_command_buffer();
+        CommandScope command;
+        id<MTLCommandBuffer> command_buffer = command.command_buffer();
         // Experimental Dense decode route. For A[1,k] * op(B)[k,n], transpose the
         // equation to C^T = op(B)^T * A^T and feed stored B as the GEMV matrix. Dense's
         // common trans_b=true layout stores B as [n,k], so GEMV needs no transpose.
@@ -209,7 +211,7 @@ namespace ctranslate2 {
                       c_buffer.buffer, c_buffer.offset, ldc,
                       element_size, data_type);
         }
-        commit_command_buffer(command_buffer);
+        command.commit();
       }
 
       template <typename T>
@@ -226,7 +228,8 @@ namespace ctranslate2 {
         const BufferRange b_buffer = buffer_and_offset(b);
         const BufferRange c_buffer = buffer_and_offset(c);
 
-        id<MTLCommandBuffer> command_buffer = new_command_buffer();
+        CommandScope command;
+        id<MTLCommandBuffer> command_buffer = command.command_buffer();
         for (dim_t i = 0; i < batch_size; ++i) {
           encode_gemm(command_buffer, transpose_a, transpose_b, m, n, k, alpha, beta,
                       a_buffer.buffer, a_buffer.offset + i * stridea * element_size, lda,
@@ -234,7 +237,7 @@ namespace ctranslate2 {
                       c_buffer.buffer, c_buffer.offset + i * stridec * element_size, ldc,
                       element_size, data_type);
         }
-        commit_command_buffer(command_buffer);
+        command.commit();
       }
 
     }
