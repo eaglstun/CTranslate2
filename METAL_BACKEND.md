@@ -24,7 +24,9 @@ memory, behind a full regression net (the existing op/layer/storage suites all r
 bs=8 ~2.8× over CPU). Whisper beam-search decode joined the win column in M17
 (2026-07-17): large-v3 fp16 at 6.4× realtime, 4.3× faster than CPU, transcript
 byte-identical. Split-K fused attention (M20, 2026-11-13) took that to 9.0× realtime
-(3.35 s for the 30 s clip) with the same transcript.
+(3.35 s for the 30 s clip) with the same transcript. Bounded command-buffer batching
+(M21, 2026-11-14) then cut the per-op submission cost: Whisper 3.19 s, Qwen fp16 decode
++23–31%, OPUS-MT and NLLB fp16 +5–58%, prefill unchanged or better.
 
 ## Why this is tractable
 
@@ -116,11 +118,17 @@ models hit this first because the encoder leads with `Conv1D`.
 from MSL embedded as a C++ raw string in `src/metal/kernels/kernels_msl.h`. (Runtime
 compilation avoids `.metallib` path-resolution issues with the bare shared library; an
 offline `.metallib` is a future optimization.) Compute pipeline states are cached per
-kernel name. Each `metal::` op commits its own command buffer asynchronously (no per-op
-wait); `metal::flush()` waits on the last-committed buffer before any CPU access to Metal
-memory. Reusing one command buffer across many ops (committing once per step) was tried and
-reverted — it removed CPU/GPU overlap and regressed GEMM-heavy regimes; see
-`METAL_BENCHMARKS.md`.
+kernel name.
+
+**Submission (M21).** Every `metal::` op is a `CommandScope` (`device.h`). Consecutive
+ops, from any thread, are appended in issue order to **one process-wide open command
+buffer**, sharing one compute encoder between MPS encodes. The buffer is committed without
+waiting when it is full (8 ops), when its estimated GPU time reaches 100 µs (so large ops
+get a buffer each), or when the GPU has nothing in flight. `metal::flush()` commits the
+open buffer and waits on the last-committed one before any CPU access to Metal memory, so
+it still means "everything issued so far has executed". Committing once per step instead
+was tried in 2026-06 and reverted: it removed CPU/GPU overlap and regressed GEMM-heavy
+regimes. See M21 below and `docs/metal/plan-cb-batching.md`.
 
 **Autorelease pool (load-bearing — a long run will be OOM-killed without it).** Command
 buffers (`[queue commandBuffer]`), compute encoders, and `MPSMatrixDescriptor`s are
@@ -128,19 +136,19 @@ autoreleased (+0). CTranslate2 drives ops from C++ worker threads that have **no
 so without an explicit pool these objects never drain and accumulate as **wired** memory for
 the entire run — process heap RSS stays flat while the GPU/wired footprint balloons until the
 OS SIGKILLs the process (this is what made a 730s Whisper transcribe die at ~155s). Each op is
-a flat `new_command_buffer() → encode → commit_command_buffer()` pair, so `new_command_buffer()`
-pushes a thread-local `NSAutoreleasePool` and `commit_command_buffer()` drains it, bracketing
-exactly that op's autoreleased temporaries (the committed buffer survives the drain because
-`g_last_committed` retains it). **Any new code path that creates Metal objects outside a
-new→commit pair must wrap itself in `@autoreleasepool`.**
+one flat `CommandScope`, which pushes an `NSAutoreleasePool` in its constructor and drains it
+in `commit()` (or its destructor) on the issuing thread, bracketing exactly that op's
+autoreleased temporaries. The open command buffer, its shared encoder and the last-committed
+buffer are explicitly retained, so they survive the drain. **Any new code path that creates
+Metal objects outside a `CommandScope` must wrap itself in `@autoreleasepool`.**
 
 ## File map
 
 | File                                 | Role                                                                                        |
 | ------------------------------------ | ------------------------------------------------------------------------------------------- |
 | `src/metal/utils.h`                  | Pure-C++ surface (`has_gpu`, `get_gpu_count`, `synchronize`) — safe to include from `.cc`   |
-| `src/metal/device.h`                 | Objective-C++ internals (device/queue/pipeline accessors, `buffer_and_offset`) — `.mm` only |
-| `src/metal/device.mm`                | Device/queue/library singleton, pipeline cache, lifecycle                                   |
+| `src/metal/device.h`                 | Objective-C++ internals (`CommandScope`, pipeline accessors, `buffer_and_offset`) — `.mm` only |
+| `src/metal/device.mm`                | Device/queue/library singleton, pipeline cache, command-buffer batching, `flush()`          |
 | `src/metal/allocator.mm`             | Shared-buffer allocator + address-ordered side table                                        |
 | `src/metal/primitives.h`             | Pure-C++ declarations of `metal::` compute entry points                                     |
 | `src/metal/primitives.mm`            | Host-side dispatch for custom Metal compute kernels                                         |
@@ -522,6 +530,49 @@ different split count is a different float summation order. Tests:
 and the per-kernel breakdown are in `METAL_BENCHMARKS.md` and
 `docs/metal/plan-sdpa-split-k.md`.
 
+### ✅ M21 — bounded command-buffer batching (2026-11-14)
+
+Until M21 every op committed its own command buffer: about 111.7k buffers per Whisper
+pass, a fixed CPU cost to create and commit each one, a few microseconds of GPU time
+between them, and a CPU blocked on the 64-buffer queue limit. Every op is now a
+`metal::CommandScope`, and consecutive ops are appended to **one process-wide open command
+buffer** that is committed without waiting.
+
+- **One batch for all threads, in issue order.** A scope holds `g_commit_mutex` from
+  construction to `commit()`. Issue order = encode order = commit order = GPU execution
+  order, so `metal::flush()` (commit the open buffer, wait for the last committed one)
+  keeps its meaning and no host read point had to change. Ops issued on worker threads
+  (float Conv1D's GEMM per `parallel_for` chunk, a second replica) are in the same batch,
+  so they cannot be orphaned or reordered: the cross-thread bug of the 2026-06 attempt
+  cannot occur, and nothing commits at `parallel_for` or thread-pool boundaries.
+- **Shared compute encoder.** Compute ops of a buffer share one encoder; MPS ends it
+  before encoding its own passes. Encoder state is not reset between ops, so **every op
+  must set every pipeline, buffer and bytes slot its kernel reads.**
+- **When a batch is committed:** when it is full (`CT2_METAL_CB_OPS`, default 8); when
+  `ops × measured GPU time per op` reaches `CT2_METAL_CB_TARGET_US` (default 100 µs; the
+  estimate is a moving average fed by command-buffer completion handlers); or when the GPU
+  has nothing in flight. The second rule is what the 2026-06 attempt lacked. Batching by
+  count alone regressed 512-token prefill by 14% at only 8 ops per buffer, because large
+  ops run faster in separate buffers; with the rule they get one buffer each.
+- **In-flight bound:** the queue's own 64-buffer limit. Upstream's limit of 8 measured
+  slower here and saved no memory (`CT2_METAL_CB_MAX_INFLIGHT` overrides).
+- `CT2_NO_METAL_CB_BATCH=1` restores one buffer per op. `CT2_METAL_STATS=1` now also
+  reports ops, partial-batch flushes, time blocked acquiring a buffer and summed GPU time.
+
+Result (M4 Max, same-binary alternating A/B against the kill-switch under the quiet-machine
+gate; Whisper 5 process rounds × 5 passes, the rest 3 rounds; output hashes identical in
+every cell): Whisper large-v3 fp16 **3.35 s → 3.19 s** (1.05×, 9.4× realtime) and fp32
+4.44 s → 4.30 s, transcript `be969f62b3`; command buffers per pass 111.7k → 20.8k.
+Qwen2.5-0.5B decode at 128 tokens fp16 **+31%** (bs=1, 179 → 235 tok/s) and **+23%** (bs=8,
+1,208 → 1,486), fp32 +8% and +2%; at 512 tokens fp16 +21% and +16%. Qwen prefill (128 and
+512 prompt tokens, fp16/fp32, bs=1/8): between no change and +10%, no cell slower.
+OPUS-MT fp16 **+58%** (bs=1) and +21% (bs=8); NLLB-600M fp16 **+26%** and +5%. Peak memory
+unchanged. Whisper gains least because it is GPU-bound; the workloads whose CPU-side
+per-buffer cost was on the critical path gain most. Tests: `MetalTest.CommandBatch*`
+(six, including a child-process matrix over 11 settings); `*Metal*:*METAL*` 117 passed /
+2 skipped with batching on and with the kill-switch. Sweeps, counters and the prefill
+diagnosis are in `METAL_BENCHMARKS.md` and `docs/metal/plan-cb-batching.md`.
+
 ## What runs where today
 
 | Operation                                                                  | Metal execution                                                                                                                             |
@@ -578,10 +629,10 @@ Still worth evaluating after a profile:
 
 ### Performance work
 
-- ~~Batch op encoding into fewer command buffers / reduce per-op synchronize.~~ — tried and
-  reverted: per-thread command-buffer reuse (one commit per step) measured neutral-to-negative
-  on a real LLM because it destroys CPU/GPU overlap; per-op async commit is already
-  near-optimal. See `METAL_BENCHMARKS.md`.
+- ~~Batch op encoding into fewer command buffers.~~ — done in M21 with bounded batches
+  (8 ops or 100 µs of estimated GPU work, committed early when the GPU is idle). The
+  2026-06 version, one commit per step, was reverted because it destroyed CPU/GPU overlap.
+  Reducing the number of host sync points per decode step is still open.
 - Offline `.metallib` compilation (faster startup than `newLibraryWithSource`), located
   at runtime via `dladdr()` with a source-compile fallback.
 - Avoid the first-GEMM MPS pipeline warmup cost on the hot path.
@@ -614,6 +665,10 @@ Still worth evaluating after a profile:
   binds the input buffer as a dummy at the `lengths` index when there is no mask.
 - **MPS is row-major** like `StorageView`; do not copy the cuBLAS column-major a/b swap.
 - The `.mm` files use **manual retain/release (not ARC)**.
+- **A `CommandScope` shares its compute encoder with earlier ops** (M21): set every
+  pipeline, buffer and bytes index the kernel reads, every time. And never call
+  `metal::flush()` or open a second scope while one is alive on the same thread; the batch
+  lock is not recursive.
 - **Metal has no `erf`** (nor `precise::erf`, any language version) — exact GELU uses the
   `ct2_erf` Abramowitz-Stegun approximation in `kernels_msl.h`. Check before assuming a
   libm function exists in MSL.

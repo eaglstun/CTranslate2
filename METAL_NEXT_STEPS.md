@@ -14,6 +14,14 @@ split-K), `CT2_NO_METAL_KV_CACHE=1`, `CT2_NO_METAL_QKV_FUSION=1`,
 other GPUs with `CT2_METAL_SDPA_SPLIT_TGS` (threadgroups per launch, default 320) and
 `CT2_METAL_SDPA_SPLIT_MIN_CHUNK` (minimum keys per split, default 128).
 
+Command-buffer batching (M21) has its own set: `CT2_NO_METAL_CB_BATCH=1` restores one
+command buffer per op; `CT2_METAL_CB_OPS` (maximum ops per buffer, default 8),
+`CT2_METAL_CB_TARGET_US` (estimated GPU time that commits a batch early, default 100;
+0 sizes by count only) and `CT2_METAL_CB_MAX_INFLIGHT` (queue limit on uncompleted
+buffers, default 0 = the queue's 64) are the tuning knobs; `CT2_METAL_CB_EAGER=0` turns off
+commit-when-GPU-idle and `CT2_METAL_CB_SHARE_ENCODER=0` gives each op its own compute
+encoder (both diagnostic). The defaults were only measured on the M4 Max.
+
 ## Ranked list
 
 1. **Close the classic encoder-decoder fp16 coverage/performance gap.** Qwen and Whisper
@@ -73,6 +81,10 @@ enabling it by default.
 ## Do not reopen without new evidence
 
 - Whole-step command-buffer reuse: neutral at batch 1 and regressed GEMM-heavy workloads.
+  Bounded batching (M21) is the version that works; batches larger than about 32 ops, or
+  sized by op count alone, reproduce the regression.
+- An in-flight command-buffer limit below the queue default (upstream uses 8): slower on
+  Whisper at every value tried and no memory saving.
 - Combining the two old Concat copies: parity-correct but slower; M18 replaced the layout.
 - Defaulting to `MPSMatrixVectorMultiplication`: isolated GEMV wins did not survive the
   Qwen gate, so `CT2_MPS_GEMV=1` remains experimental.

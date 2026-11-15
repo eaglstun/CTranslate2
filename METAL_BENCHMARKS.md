@@ -878,8 +878,8 @@ buffer cost it about 0.1–0.3 s per pass (noisy). Projections that run as a sep
 Where your own wins show up: the in-place KV cache (M18) beats upstream's `concat2` +
 gather by about 0.39 s per pass, and LayerNorm and TopK are faster too. Fix candidates, by
 estimated payoff: split-K / flash-decoding for `sdpa` when keys are many and rows few
-(**done**: see "Split-K fused SDPA" below, Whisper fp16 4.61 → 3.35 s, now ahead of MPS); batching dispatches per command buffer while keeping overlap (upstream's
-16-ops + 8-in-flight scheme, unlike the reverted reuse attempt); a fused bias/residual
+(**done**: see "Split-K fused SDPA" below, Whisper fp16 4.61 → 3.35 s, now ahead of MPS); batching dispatches per command buffer while keeping overlap (**done**: see "Bounded
+command-buffer batching" below, Whisper fp16 3.35 → 3.19 s); a fused bias/residual
 epilogue for m=5 decode projections.
 
 ## Split-K fused SDPA: Whisper cross-attention at full GPU width (2026-11-13)
@@ -1030,6 +1030,193 @@ quiet machine; 4,320 cross-attention and 4,320 self-attention `sdpa` launches pe
   command queue, slack that hides a slower CPU, and the split arm has only 0.9 s of it.
 - After the change the GPU is busy for 2.62 s of a 3.38 s pass. The remaining idle time
   is the one-command-buffer-per-op cost that the plan lists under "Not in this plan".
+
+## Bounded command-buffer batching (2026-11-14)
+
+Apple M4 Max (40-core GPU), 64 GB, macOS 27.0, Release build with Accelerate,
+`OPENMP_RUNTIME=NONE`, `ENABLE_PROFILING=OFF`. Every end-to-end figure is a same-binary
+alternating A/B through `CT2_NO_METAL_CB_BATCH=1` (off, one command buffer per op) against
+the default (on): fresh process per arm, arm order reversed on odd rounds, started only on
+a quiet machine and discarded and repeated if another process was above 20% of a core at
+the end of the run (41 discarded during the final matrix). Design and the M21 summary are
+in `METAL_BACKEND.md`; the plan and full results are in `docs/metal/plan-cb-batching.md`.
+
+**End-to-end A/B**
+
+Median of per-process medians; the range is over process medians.
+
+| Workload                                  | off (per-op)           | on (default)               | Change        |
+| ----------------------------------------- | ---------------------- | -------------------------- | ------------- |
+| Whisper large-v3 fp16, s/pass             | 3.35 (3.35–3.38)       | **3.19** (3.16–3.58 †)     | **1.05×**     |
+| Whisper large-v3 fp32, s/pass             | 4.44 (4.39–6.32 †)     | **4.30** (4.19–4.69 †)     | 1.03×         |
+| Qwen decode 128, fp16 bs=1, tok/s         | 179.0 (177.4–181.8)    | **235.0** (234.4–237.5)    | **+31%**      |
+| Qwen decode 128, fp16 bs=8, tok/s         | 1208.1 (1205.2–1211.9) | **1486.2** (1480.0–1495.0) | **+23%**      |
+| Qwen decode 128, fp32 bs=1, tok/s         | 149.5 (149.0–150.3)    | **161.1** (161.0–161.7)    | +7.8%         |
+| Qwen decode 128, fp32 bs=8, tok/s         | 857.4 (857.2–858.2)    | 873.2 (872.5–873.8)        | +1.8%         |
+| Qwen decode 512, fp16 bs=1, tok/s         | 184.5 (183.0–187.7)    | **223.1** (219.4–223.9)    | **+21%**      |
+| Qwen decode 512, fp16 bs=8, tok/s         | 1324.8 (1281.6–1326.0) | **1534.8** (1510.4–1539.0) | **+16%**      |
+| Qwen decode 512, fp32 bs=1, tok/s         | 146.2 (146.2–146.4)    | **155.9** (155.2–156.1)    | +6.6%         |
+| Qwen decode 512, fp32 bs=8, tok/s         | 854.8 (688.4 ‡–858.2)  | 870.7 (723.4 ‡–872.4)      | +1.9%         |
+| Qwen prefill 128, fp16 bs=1, prompt tok/s | 3451.9 (3367.5–3454.5) | **3791.9** (3778.4–3828.4) | +9.8%         |
+| Qwen prefill 128, fp16 bs=8               | 5886.8 (5782.7–5922.6) | 5945.2 (5860.2–6029.7)     | within spread |
+| Qwen prefill 128, fp32 bs=1               | 3344.9 (3341.4–3345.3) | **3473.2** (3466.0–3482.8) | +3.8%         |
+| Qwen prefill 128, fp32 bs=8               | 5381.3 (5362.4–5488.9) | 5451.8 (5378.4–5480.5)     | within spread |
+| Qwen prefill 512, fp16 bs=1               | 7902.2 (7526.2–7937.9) | **8208.5** (8145.1–8231.9) | +3.9%         |
+| Qwen prefill 512, fp16 bs=8               | 9938.1 (9891.2–9952.3) | 9945.1 (9906.8–9966.4)     | none          |
+| Qwen prefill 512, fp32 bs=1               | 6689.3 (6656.1–6732.1) | 6718.5 (6690.6–6754.7)     | none          |
+| Qwen prefill 512, fp32 bs=8               | 7573.3 (7541.1–7583.9) | 7593.8 (7570.3–7601.9)     | none          |
+| OPUS-MT fp16 bs=1, tok/s                  | 184.5 (183.1–191.0)    | **292.0** (290.4–292.9)    | **+58%**      |
+| OPUS-MT fp16 bs=8, tok/s                  | 822.6 (813.7–849.9)    | **994.2** (983.1–1041.4)   | **+21%**      |
+| NLLB-600M fp16 bs=1, tok/s                | 86.3 (85.3–87.5)       | **108.8** (108.5–109.4)    | **+26%**      |
+| NLLB-600M fp16 bs=8, tok/s                | 256.0 (255.4–256.6)    | **269.2** (268.6–269.3)    | +5.2%         |
+
+Whisper: 5 process rounds × (1 warmup + 5 passes), beam 5, with a third arm running a
+build of main `de415aca`: fp16 3.35 s (3.34–3.37), fp32 4.54 s (4.46–4.61). Qwen decode
+128, OPUS-MT, NLLB: 3 rounds × (3 warmups + 7 passes). Qwen decode 512: 3 × (2 + 5).
+Prefill is a prompt of 128 or 512 tokens per row plus one generated token, timed as prompt
+tokens per second: 128 is 3 × (5 + 15), 512 is 3 × (3 + 7).
+
+† One round was disturbed in each Whisper column. fp16: four on processes read 3.16–3.20
+and one read 3.58. fp32: round 3 read 6.32 (off) and 4.69 (on) back to back; the other
+four rounds were 4.39–4.53 (off) and 4.19–4.36 (on). The gate only samples load at the
+start and end of a run, so a mid-run burst is the likely cause, not verified.
+
+‡ Round 1 of Qwen 512 fp32 bs=8 was slow in both arms (688 and 723); the other two rounds
+were 855–858 and 871–872.
+
+The earlier sweeps, with the same harness, measured Whisper fp16 at 3.12–3.16 s for the
+neighbouring settings (table below), so 3.19 s is at the slow end of what this change has
+shown on this machine.
+
+**Counters before and after**
+
+One process per cell with `CT2_METAL_STATS=1` (which adds a completion handler per buffer),
+1 warmup + 4 passes for Whisper, 2 + 8 for the others; figures are per pass.
+
+| Per pass                       | Whisper fp16 off | Whisper fp16 on | Whisper fp32 off | Whisper fp32 on |
+| ------------------------------ | ---------------- | --------------- | ---------------- | --------------- |
+| Ops                            | 111.7k           | 111.7k          | 111.7k           | 111.7k          |
+| Command buffers                | 111.7k           | **20.8k**       | 111.7k           | **26.1k**       |
+| Ops per buffer                 | 1                | 5.4             | 1                | 4.3             |
+| GPU busy (summed intervals)    | 2.62 s           | 2.49 s          | 3.49 s           | 3.41 s          |
+| CPU blocked acquiring a buffer | 0.85 s           | 0.60 s          | 1.56 s           | 1.07 s          |
+| Wall (this process)            | 3.37 s           | 3.18 s          | 4.44 s           | 4.22 s          |
+| Peak memory footprint          | 4.47 GB          | 4.50 GB         | 8.65 GB          | 8.66 GB         |
+
+| Whole process (10 passes)   | Buffers off → on | CPU blocked acquiring | GPU busy off → on |
+| --------------------------- | ---------------- | --------------------- | ----------------- |
+| Qwen decode 128, fp16 bs=1  | 441.0k → 64.1k   | 55 → 5 ms             | 5.43 → 4.81 s     |
+| Qwen decode 128, fp16 bs=8  | 441.0k → 66.3k   | 74 → 5 ms             | 6.35 → 5.64 s     |
+| Qwen prefill 512, fp16 bs=8 | 9.2k → 7.2k      | 54 → 8 ms             | 4.46 → 4.39 s     |
+| NLLB-600M fp16 bs=1         | 76.0k → 15.8k    | 141 → 2 ms            | 1.40 → 1.38 s     |
+
+Whisper is still GPU-bound after the change: the CPU still spends 0.6 s per pass waiting
+for a queue slot, and the GPU is busy for 2.49 s of a 3.18 s pass. Peak memory did not
+move (within 1%) in any cell.
+
+"GPU busy" is the sum of each buffer's `GPUEndTime − GPUStartTime`. With one op per
+buffer those intervals overlap (see the prefill finding below), so the off and on columns
+are not measuring quite the same thing. Treat the busy figures as indicative; wall time is
+the result.
+
+**How the defaults were chosen**
+
+Three sweeps, each 2 alternating rounds, fresh process per arm. Values are the two process
+medians, or one where the two rounds were not comparable.
+
+**Sweep 1: op count only** (no early-commit rules). Round 0 of the Whisper column ran with
+a steady Firefox video load on the GPU (about 0.2 s slower in every arm, same ordering);
+the quiet round is shown.
+
+| Ops per buffer | Whisper fp16 s | Qwen dec fp16 bs=1 | Qwen dec fp16 bs=8 | Prefill 512 fp16 bs=8 | Prefill 512 fp16 bs=1 |
+| -------------: | -------------- | ------------------ | ------------------ | --------------------- | --------------------- |
+|        1 (off) | 3.36           | 180.1, 181.3       | 1209, 1207         | 9813, 9825            | 7844, 7902            |
+|              2 | 3.23           | 213.8, 212.6       | 1403, 1386         | 9817, 9841            | 8174, 8151            |
+|              4 | 3.15           | 226.9, 227.2       | 1458, 1453         | 9400, 9261            | 8085, 8018            |
+|              8 | **3.12**       | **234.7, 234.5**   | **1453, 1457**     | 8463, 8499            | 7390, 6919            |
+|             16 | 3.14           | 234.2, 234.5       | 1450, 1452         | 7861, 7887            | 6646, 6456            |
+|             32 | 3.16           | 229.2, 229.7       | 1413, 1416         | 7676, 7703            | 5011, 5534            |
+|             64 | 3.29           | 219.0, 220.3       | 1362, 1358         | 7666, 7704            | 6270, 5879            |
+|            256 | 3.65           | 142.8, 147.5       | 933, 914           | 7546, 7584            | 5419, 5626            |
+
+In-flight limit and encoder sharing at 8 ops per buffer, Whisper fp16 (quiet round):
+
+| Setting                      | s/pass                                          |
+| ---------------------------- | ----------------------------------------------- |
+| in-flight 2                  | 3.93                                            |
+| in-flight 4                  | 3.21                                            |
+| in-flight 8                  | 3.19                                            |
+| in-flight 16                 | 3.16                                            |
+| in-flight 64 (queue default) | 3.12                                            |
+| in-flight 256                | 3.12 (3.09 in the Firefox-free part of round 0) |
+| separate encoder per op      | 3.10 (3.11)                                     |
+
+Decode and Whisper peak at 8–16 ops and fall off from 32: the 2026-06 result, one commit
+per step, is the far right of this curve. **Prefill regressed with op count** (bs=8: −14%
+at 8, −20% at 16), which is the same loss the 2026-06 attempt recorded. An in-flight limit
+below the queue default never helped and upstream's 8 cost 0.07 s; sharing the encoder
+measured no different from one encoder per op.
+
+**Sweep 2: add commit-when-GPU-idle** (still count only):
+
+| Setting            | Prefill 512 fp16 bs=8 | Qwen dec fp16 bs=8 | Whisper fp16 s |
+| ------------------ | --------------------- | ------------------ | -------------- |
+| off                | 9882, 9892            | 1237, 1204         | 3.40, 3.37     |
+| 8, no early commit | 8462, 8472            | 1455, 1452         | 3.14, 3.13     |
+| 4                  | 9631, 9617            | 1453, 1456         | 3.16, 3.15     |
+| 8                  | 9124, 9182            | **1495, 1494**     | **3.12, 3.12** |
+| 16                 | 8803, 8779            | 1491, 1493         | 3.16, 3.16     |
+| 32                 | 8638, 8733            | 1467, 1472         | 3.21, 3.21     |
+
+The idle rule recovers about half the prefill loss and adds 3% to decode bs=8, but prefill
+bs=8 is still 7% down at 8 ops.
+
+**Why prefill loses.** `CT2_METAL_STATS=1` on prefill 512 fp16 bs=8 (12 passes): with one
+buffer per op the summed GPU intervals were 5.33 s for 4.98 s of wall time, so consecutive
+buffers overlap on the GPU. With 8 ops per buffer and no early commit the sum fell to
+3.79 s while wall time rose to 5.77 s and the CPU's time blocked in `flush()` rose from
+3.53 s to 4.41 s. The CPU was waiting and the GPU was doing less per unit of time. The
+likely reading, not verified beyond these counters: the GPU pipelines separate command
+buffers but runs the passes inside one buffer strictly one after another, which costs
+nothing for small ops and a lot for ops of several hundred microseconds. Encoder sharing
+is not the cause (same result with one encoder per op).
+
+**Sweep 3: add the GPU-time target** (8 ops per buffer unless noted):
+
+| Target µs      | Prefill 512 bs=8 | Prefill 512 bs=1 | Prefill 128 bs=8 | Qwen dec bs=1 | Qwen dec bs=8 | Whisper s  |
+| -------------- | ---------------- | ---------------- | ---------------- | ------------- | ------------- | ---------- |
+| off            | 9942, 9841       | 7912, 7939       | 5844, 5775       | 179.3, 177.9  | 1211, 1205    | 3.38, 3.37 |
+| 0 (count only) | 9249, 9201       | 7112, 7557       | 5684, 5602       | 237.5, 235.5  | 1491, 1489    | 3.14, 3.11 |
+| 50             | 9964, 9922       | 8195, 8149       | 5934, 5904       | 230.5, 230.9  | 1464, 1466    | 3.23, 3.21 |
+| **100**        | 9856, 9868       | 8159, 8115       | 5896, 5701       | 234.6, 239.6  | 1484, 1484    | 3.18, 3.16 |
+| 200            | 9941, 9883       | 8236, 8249       | 6008, 5897       | 235.4, 235.1  | 1487, 1490    | 3.16, 3.15 |
+| 400            | 9743, 9729       | 7676, 7767       | 5804, 6047       | 239.1, 235.0  | 1485, 1490    | 3.12, 3.12 |
+| 200, 16 ops    | 9903, 9891       | 7217, 8090       | 5928, 6068       | 236.4, 235.8  | 1501, 1501    | 3.19, 3.18 |
+| 200, 4 ops     | 9941, 9886       | 8197, 8103       | 5895, 6091       | 227.5, 226.0  | 1452, 1453    | 3.17, 3.17 |
+
+All fp16. Any target from 50 to 200 µs removes the prefill loss and keeps the decode gain.
+The 128-token bs=1 prefill cell (35 ms per pass) was too noisy here to rank 100 against
+200, so it was rerun alone, 5 rounds × (5 warmups + 15 passes):
+
+| Prefill 128, bs=1 | off                | target 100             | target 200         | target 100, 4 ops  |
+| ----------------- | ------------------ | ---------------------- | ------------------ | ------------------ |
+| fp16              | 3515.1 (3447–3545) | **3821.4** (3798–3828) | 3759.9 (3750–3776) | 3782.1 (3768–3787) |
+| fp32              | 3289.0 (3253–3323) | **3480.3** (3470–3481) | 3284.7 (3177–3293) | 3429.0 (3418–3447) |
+
+100 µs wins both, and 200 µs gives nothing in fp32, so the default is 8 ops and 100 µs.
+That costs Whisper about 0.02–0.04 s per pass against the best count-only setting.
+
+**Read:**
+
+- Batching 8 small ops per command buffer is worth 16–31% on fp16 LLM decode and 5–58% on
+  fp16 translation (most at batch 1), where the CPU-side cost of creating and committing a
+  buffer per op was on the critical path. Whisper, which is GPU-bound, gains 5%.
+- The 2026-06 "command-buffer reuse" result was the far end of the op-count curve. The
+  curve peaks at 8–16 ops and is negative by 256 for decode; for bs=8 512-token prefill it
+  is negative from 4 ops on unless batches are sized by GPU time.
+- After the change Whisper's GPU is busy for 2.49 s of a 3.18 s pass and the CPU still
+  waits 0.6 s per pass for a queue slot. What is left is host sync points in the decode
+  loop (2,356 flushes per pass), not command-buffer count.
 
 ## Caveats
 
